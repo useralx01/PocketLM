@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pocket LLM</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">P</div>
+        <div>
+          <div class="brand-name">Pocket LLM</div>
+          <div class="brand-sub">Local AI control</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-screen="chat">Chat</button>
+        <button class="nav-item" data-screen="load">Load Model</button>
+        <button class="nav-item" data-screen="personalize">Personalize</button>
+        <button class="nav-item" data-screen="compare">Compare</button>
+        <button class="nav-item" data-screen="benchmarks">Benchmarks</button>
+        <button class="nav-item" data-screen="agents">Agents</button>
+        <button class="nav-item" data-screen="settings">Settings</button>
+      </nav>
+      <div class="runtime-card">
+        <span class="live-dot"></span>
+        <div>
+          <div id="sidebar-model">Loading model</div>
+          <small id="sidebar-runtime">Local runtime</small>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section id="screen-chat" class="screen active">
+        <header class="topbar">
+          <div>
+            <h1>Chat</h1>
+            <p id="chat-subtitle">Quality mode uses the full current stack.</p>
+          </div>
+          <div class="top-actions">
+            <span id="model-pill" class="pill">Qwen</span>
+            <div class="segmented" id="mode-picker">
+              <button class="selected" data-mode="Quality">Quality</button>
+              <button data-mode="Quick">Quick</button>
+              <button data-mode="GGUF">GGUF</button>
+              <button data-mode="Balanced">Balanced</button>
+              <button data-mode="Fast">Fast</button>
+            </div>
+          </div>
+        </header>
+        <div class="chat-shell">
+          <div id="chat-history" class="chat-history">
+            <div class="empty-state">
+              <div class="logo large">P</div>
+              <h2>What can I help with?</h2>
+              <p>Running locally through Pocket LLM. Quality is default; Quick uses the full model for shorter replies.</p>
+              <div class="prompt-grid">
+                <button data-prompt="Say hello in one short sentence.">Quick hello</button>
+                <button data-prompt="Explain what Pocket LLM can do in plain English.">Explain Pocket LLM</button>
+                <button data-prompt="Write a tiny Python function and explain it.">Code check</button>
+                <button data-prompt="Give me a short project plan for local AI agents.">Plan an agent</button>
+              </div>
+            </div>
+          </div>
+          <details id="runtime-panel" class="runtime-panel" hidden>
+            <summary>Runtime details</summary>
+            <div id="runtime-grid" class="runtime-grid"></div>
+          </details>
+          <form id="chat-form" class="composer">
+            <textarea id="prompt-input" rows="2" placeholder="Message Pocket LLM..."></textarea>
+            <div class="composer-row">
+              <span id="chat-status">Ready</span>
+              <label>Profile <select id="profile-select"><option value="">Default</option></select></label>
+              <label>Max tokens <input id="max-new-tokens" type="number" min="1" max="64" value="4"></label>
+              <button id="retry-button" type="button" class="secondary compact" hidden>Retry</button>
+              <button id="cancel-button" type="button" class="secondary compact" hidden>Cancel</button>
+              <button id="send-button" type="submit">Send</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section id="screen-load" class="screen">
+        <header class="topbar"><div><h1>Load Model</h1><p>Import local models or prepare supported downloads.</p></div></header>
+        <div class="content-grid">
+          <article class="panel"><h2>Model Library</h2><div id="model-list" class="stack"></div></article>
+          <article class="panel"><h2>Active Runtime</h2><div id="load-runtime-card" class="stack"></div></article>
+          <article class="panel"><h2>GGUF Server</h2><div id="gguf-server-card" class="stack"></div></article>
+          <article class="panel"><h2>Support Plan</h2><div id="support-plan" class="stack"></div></article>
+        </div>
+      </section>
+
+      <section id="screen-personalize" class="screen">
+        <header class="topbar"><div><h1>Personalize</h1><p>Three saved profile records are included for free.</p></div></header>
+        <div class="content-grid two">
+          <article class="panel"><h2>Saved Profiles</h2><div id="profile-list" class="stack"></div></article>
+          <article class="panel"><h2>Profile Controls</h2><div class="control-row"><span>Speed vs quality</span><input type="range" value="45"></div><div class="control-row"><span>Memory budget</span><input type="range" value="35"></div><div class="control-row"><span>Agent behavior</span><input type="range" value="60"></div><p class="muted">More saved custom profiles can become a subscription feature later.</p></article>
+        </div>
+      </section>
+
+      <section id="screen-compare" class="screen">
+        <header class="topbar"><div><h1>Compare</h1><p>Compare the default Quality path with saved profile targets.</p></div></header>
+        <div class="content-grid two">
+          <article class="panel"><h2>Default Baseline</h2><div id="compare-default" class="stack"></div></article>
+          <article class="panel"><h2>Profiles</h2><div id="compare-list" class="stack"></div></article>
+        </div>
+      </section>
+
+      <section id="screen-benchmarks" class="screen">
+        <header class="topbar">
+          <div><h1>Benchmarks</h1><p>Compare GGUF and direct runtime modes on this machine.</p></div>
+          <div class="top-actions">
+            <button id="run-gguf-benchmark" class="secondary compact">Run GGUF</button>
+            <button id="run-benchmark" class="primary">Run full</button>
+          </div>
+        </header>
+        <div class="panel">
+          <h2>Latest Results</h2>
+          <div id="benchmark-status" class="muted">No benchmark loaded yet.</div>
+          <div id="benchmark-table" class="benchmark-table"></div>
+          <h2 class="section-subhead">History</h2>
+          <div id="benchmark-history" class="benchmark-table"></div>
+        </div>
+      </section>
+
+      <section id="screen-agents" class="screen">
+        <header class="topbar"><div><h1>Agents</h1><p>Create agents and assign models or profiles later.</p></div></header>
+        <div class="content-grid two">
+          <article class="panel"><h2>Code Reviewer</h2><p class="muted">Model: Qwen2.5 14B<br>Profile: Agent Coder<br>Tools: file read, git, terminal later</p></article>
+          <article class="panel"><h2>Create Agent</h2><p class="muted">Agent creation will connect to profile and tool permissions after the runtime stabilizes.</p><button class="secondary">Create later</button></article>
+        </div>
+      </section>
+
+      <section id="screen-settings" class="screen">
+        <header class="topbar"><div><h1>Settings</h1><p>Runtime, storage, and account settings.</p></div></header>
+        <div class="content-grid two">
+          <article class="panel">
+            <h2>Runtime</h2>
+            <p id="settings-runtime" class="muted">Loading...</p>
+            <div class="control-row">
+              <span>Tensor cache</span>
+              <select id="tensor-cache-preset">
+                <option value="standard">Standard</option>
+                <option value="boosted">Boosted</option>
+              </select>
+            </div>
+            <p id="tensor-cache-preset-status" class="muted">Standard cache active</p>
+          </article>
+          <article class="panel"><h2>Runtime Settings</h2><div id="settings-runtime-grid" class="runtime-grid"></div></article>
+          <article class="panel"><h2>Backend Options</h2><div id="backend-report" class="stack"></div></article>
+          <article class="panel"><h2>Storage</h2><p id="settings-storage" class="muted">Loading...</p></article>
+          <article class="panel"><h2>Account</h2><p class="muted">Subscription and custom profile limits will live here later.</p></article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

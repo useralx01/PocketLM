@@ -1,0 +1,35 @@
+{
+  "models": [
+    {
+      "model_id": "qwen2.5-14b-instruct",
+      "label": "Qwen2.5-14B-Instruct",
+      "family": "qwen",
+      "model_type": "dense",
+      "source_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen2.5-14b-instruct\\original",
+      "original_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen2.5-14b-instruct\\original",
+      "source_kind": "local-folder",
+      "source_origin": "huggingface",
+      "repo_id": "Qwen/Qwen2.5-14B-Instruct",
+      "format_name": "safetensors-sharded",
+      "config": {
+        "architecture": "Qwen2ForCausalLM",
+        "model_type": "qwen2",
+        "hidden_size": 5120,
+        "num_hidden_layers": 48,
+        "num_attention_heads": 40,
+        "max_position_embeddings": 32768,
+        "vocab_size": 152064,
+        "torch_dtype": "bfloat16"
+      },
+      "imported": true,
+      "validated": true,
+      "runnable": true,
+      "validation": {
+        "result": "ok",
+        "missing_files": [],
+        "warnings": []
+      },
+      "artifact_paths": []
+    }
+  ]
+}

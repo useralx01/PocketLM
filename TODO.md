@@ -1,0 +1,101 @@
+# Todo
+
+## In Progress
+
+- Decide whether staged streaming should auto-verify after each rotation in debug mode or only when explicitly requested
+- Decide how much of the live streaming telemetry should appear in the desktop app by default versus debug views
+
+## Next
+
+- Decide how GGUF mode should sit beside Direct CPU Standard/Boosted in the customer UI: default, power-user option, or auto-suggested when enough RAM is available.
+- Add stronger agent-style GGUF checks that test tool-planning wording, short task decomposition, and follow-up consistency beyond the first two-step checklist.
+- Add a clean model artifact manager for GGUF files so split downloads, merged artifacts, and disk usage are visible from Load Model instead of being hidden in folders.
+- Add a clearer pre-load warning before loading the 9 GB GGUF artifact, including expected cold-load time and RAM use.
+- Add full side-by-side GGUF vs Direct CPU Standard/Boosted comparison only when RAM is high enough or when Pocket can safely unload/reload GGUF between benchmark groups.
+- Next speed target: design a real reduction in repeated large tensor movement. Bigger resident-cache tweaks are now low-return; the next useful step should be a better derived weight layout/backend path that avoids reloading the same projection weights so often.
+- Keep the `288 MB` / `13` front-layer residency boost as a selectable preset, not an automatic default; do not expand it again without a live speed win.
+- Treat the new `361.02 MB` Boosted pack as optional, not a default release path, until longer follow-up tests show a bigger win than the first roughly `0.6s` Quick improvement.
+- Next major speed path should investigate backend execution changes or more direct mapped-weight execution; safetensors repacking alone is now showing limited returns.
+- Add a backend comparison runner that compares GGUF/llama.cpp against Direct CPU Standard/Boosted on the same prompt.
+- Continue session-prefix/KV reuse work beyond the first guarded implementation; exact response reuse is instant for retries, and prefix reuse now exists but needs batched suffix append to speed up normal follow-ups
+- Next session-speed target: reduce repeated tensor loading during batched prefix reuse, because live follow-up proof now saves prompt work but still spends most time loading the same layer weights
+- Use the new engine-decision status as the base for future backend work: DirectML/Vulkan/llama.cpp-style CPU/GPU hybrid experiments should plug into this selector instead of being hardwired
+- Next high phase should stop trying to win mainly through larger safetensors packs on this laptop; live proof shows the `481 MB` pack creates memory pressure and slows down the current CPU path
+- Design the next speed path around execution reuse or a different backend strategy: persistent session/KV reuse across turns, quantized/hybrid runtime options, or a llama.cpp/DirectML/Vulkan-style backend experiment
+- Keep the new `speed_status` surface as the customer-facing explanation layer for why a pack was selected or rejected
+- Continue heavy runtime work before profile/UI polish: target repeated full-layer tensor loading, longer conversation stability, and release-grade speed without falling back to rough partial-layer answers
+- Run a fresh measured benchmark before the next high phase so the new timing-summary fields become the baseline for stack/load/tail comparisons
+- Next high-speed phase: reduce Quality full-stack time enough that 6-8 token open-ended model answers do not take multiple minutes
+- Investigate the full-stack bottleneck shown by live smokes: deterministic identity is now local/instant, but real Qwen logic still spends about `16.4s` to `17.3s` in tensor loading for a 1-token run
+- Keep request-scoped safetensors handle reuse automatic only for one-token Quick runs; forcing it through multi-token decode is still unsafe and should stay opt-in until redesigned
+- Free enough system RAM before the next real speed benchmark; below `4 GB`, Pocket LLM now blocks generation to avoid crashing or entering severe memory pressure
+- Expand the first real small-tensor runtime pack into a larger derived runtime pack that reduces repeated 25+ GB tensor movement per prompt
+- Use the new tensor-load diagnostics to compare source-shard reads against the future optimized artifact path
+- Build true conversation/session state reuse after the runtime can keep memory stable enough for longer chats
+- Design the next artifact pack tier for large projection tensors without duplicating the full model recklessly or crashing low-RAM machines
+- Add a benchmark row that compares original-source tensor loading against artifact-backed tensor loading using shard opens and artifact hits
+- Run the Tier 2 artifact-backed speed smoke once free RAM is above `4 GB`; current live RAM was about `2.31 GB`, so generation correctly stayed guarded
+- Expand Tier 2 beyond the first `2` Q/K/V layers only after the measured smoke proves memory and speed behavior are acceptable
+- Add a safer memory-pressure guard around larger grouped loads before expanding batching beyond the proven norm/QKV/MLP groups
+- Improve Balanced-mode output quality before presenting it as a customer-facing speed mode
+- Expand realistic prompt checks after speed improves enough to make 20+ token answers practical
+- Add deeper saved profile behavior beyond mode/token defaults only after the runtime path is less fragile
+- Replace remaining placeholder actions in Load Model, Personalize, Agents, and Settings with real backend actions as each backend is ready
+- Define the first non-Qwen support target and what "supported" means for import, readiness checks, direct runtime loading, chat, personalization, and comparison
+- Expand persisted lightweight benchmark runs with measured real prompt timings and output summaries when the user explicitly starts a slower benchmark
+- Expand the first profile templates into saved profile records under each model's profile directory
+- Wire Compare to real default-vs-profile summaries once saved profile records and benchmark results exist
+- Use the new tensor residency benchmark stats to compare cache behavior across Fast, Balanced, and Quality modes
+- Add an advanced opt-in tensor cache preset only if repeated real measurements prove it improves speed more than the safe front-layer default
+- Improve Balanced-mode output quality so the faster mode can become more useful without producing rough text
+- Expand benchmark history further only after fresh measured runs populate the new timing-summary fields
+- Define beginner vs advanced desktop modes so plain-English status remains visible while deeper runtime telemetry stays available without overwhelming normal users
+- Surface the real RAM blocker inside the desktop UI
+- Surface the staged-streaming residency state, cache hits, cache misses, and refill count inside the desktop UI
+- Add the first runtime component that verifies cache files automatically after a rotation when debugging is enabled
+- Add the first cache-residency metadata view to the desktop app
+- Add the first runtime component that advances the stream based on residency telemetry instead of one-off manual rotation
+- Add a desktop button or mode that verifies cache health before advancing when the user wants a safer path
+- Add the first minimal decode-oriented loop after the layer bridge proves stable
+- Decide the smallest honest next step after the first RoPE-aware K/V loop: more production-like decode state layout, or broader loop coverage
+- Expand the decode benchmark from small chain comparison into a more formal regression benchmark with fixed seeds, persisted baselines, and expected summaries
+- Add the next repeated token loop that carries more faithful context than the current first K/V-with-RoPE implementation
+- Improve the first real prompt/tokenizer entry path so prompt handling is less rough and closer to usable chat
+- Add stronger prompt/session quality controls such as richer sampling controls, configurable system prompts, and prompt formatting choices
+- Turn the new desktop prompt test panel into a fuller prompt/chat test surface with cleaner session summaries and easier prompt presets
+- Improve runtime-side generation behavior further so the desktop prompt panel produces less rough text, especially by strengthening decode fidelity beyond the current conservative greedy + multi-token-prefill prompt profile and the new full-stack short-prompt default
+- Turn the desktop status-screen spec into the first real app UI when desktop implementation starts
+- Use the risk register to guide the first real load debugging pass
+- Define the first code folder layout
+- Define the model registry schema
+- Define the profile schema
+- Define the benchmark schema
+- Implement first model file validation pass
+- Implement first registry write/read flow
+- Implement import readiness detection from real model folders
+- Add a simple model status CLI for local inspection
+- Add a simple local import CLI for model folders
+- Add a dedicated source download-state command
+- Add a registry-backed model catalog command
+- Add a safe registry record removal command
+- Choose the exact first supported Qwen model variant
+- Decide the initial source format support
+- Design the model registry and storage layout
+- Add a registry-backed runtime source command
+- Add a runtime bootstrap command that can target registry entries directly
+- Attempt the first real dense-model load through the custom runtime path
+- Define the first benchmark suite
+- Choose the desktop shell approach
+- Break the runtime into concrete modules and file layout
+
+## Backlog
+
+- Add a richer visual desktop acquisition panel
+- Add a richer desktop model catalog view
+- Add auto-refresh and multi-model selection to the desktop test UI
+- Add warm-window refill logic that reacts to the current hot-window head
+- Add benchmarking flow
+- Add presets for different hardware tiers
+- Add capability-based optimization profiles
+- Add advanced research mode
+- Add export/import of optimization profiles

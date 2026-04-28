@@ -1,0 +1,720 @@
+import json
+from pathlib import Path
+
+import torch
+from safetensors.torch import save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+
+from pcketlm.core.runtime.layer_bridge import (
+    CANCEL_BLOCKER,
+    _recommended_prompt_layer_count,
+    _trim_generated_text_at_stop_string,
+    _auto_torch_thread_count,
+    build_history_summary_hidden_state,
+    initialize_kv_decode_state,
+    select_next_token,
+    run_decode_benchmark,
+    run_kv_decode_step,
+    run_kv_decode_loop,
+    run_decode_tail,
+    load_token_entry_hidden_state,
+    load_layer_bridge_config,
+    run_layer_bridge_stack,
+    run_minimal_layer_forward_bridge,
+    run_prompt_decode_loop,
+    run_repeated_decode_loop,
+    runtime_torch_thread_count,
+    run_token_decode_step,
+    run_token_entry_layer_bridge,
+)
+from pcketlm.core.runtime.tokenizer_runtime import prepare_prompt_text
+from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_plan
+
+
+class _PromptBudgetConfig:
+    ready = True
+    num_hidden_layers = 48
+
+
+def test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack() -> None:
+    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=4) == 48
+    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=260, max_new_tokens=4) == 32
+
+
+def test_runtime_torch_thread_count_uses_safe_auto_and_env_override(monkeypatch) -> None:
+    assert _auto_torch_thread_count(16) == 14
+    assert _auto_torch_thread_count(8) == 6
+    assert _auto_torch_thread_count(4) == 4
+
+    monkeypatch.setenv("PCKETLM_TORCH_THREADS", "3")
+    assert runtime_torch_thread_count() == 3
+    monkeypatch.setenv("PCKETLM_TORCH_THREADS", "bad")
+    assert runtime_torch_thread_count() >= 1
+
+
+def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
+    text, marker = _trim_generated_text_at_stop_string("Hello<|im_end|>ignored", ["<|im_end|>"])
+
+    assert text == "Hello"
+    assert marker == "<|im_end|>"
+
+
+def _bootstrap_layer_bridge_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+
+    model_id = "qwen-bridge-test"
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "model_type": "qwen2",
+                "bos_token_id": 0,
+                "eos_token_id": 6,
+                "hidden_size": 8,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "intermediate_size": 12,
+                "hidden_act": "silu",
+                "rms_norm_eps": 1e-6,
+                "max_position_embeddings": 128,
+                "rope_theta": 10000.0,
+                "vocab_size": 8,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "generation_config.json").write_text(
+        json.dumps(
+            {
+                "bos_token_id": 0,
+                "pad_token_id": 0,
+                "eos_token_id": [6, 0],
+                "do_sample": True,
+                "top_k": 3,
+                "temperature": 0.8,
+                "repetition_penalty": 1.1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    tokenizer = Tokenizer(
+        WordLevel(
+            {
+                "[PAD]": 0,
+                "hello": 1,
+                "world": 2,
+                "there": 3,
+                "friend": 4,
+                "again": 5,
+                "[EOS]": 6,
+                "[UNK]": 7,
+            },
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.save(str(model_dir / "tokenizer.json"))
+    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
+    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+
+    shard_path = model_dir / "model-00001-of-00001.safetensors"
+    save_file(
+        {
+            "model.embed_tokens.weight": torch.arange(64, dtype=torch.bfloat16).reshape(8, 8),
+            "model.layers.0.input_layernorm.weight": torch.ones((8,), dtype=torch.bfloat16),
+            "model.layers.0.post_attention_layernorm.weight": torch.full((8,), 1.5, dtype=torch.bfloat16),
+            "model.layers.0.self_attn.q_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.0.self_attn.q_proj.bias": torch.zeros((8,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.k_proj.weight": torch.tensor(
+                [
+                    [1, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "model.layers.0.self_attn.k_proj.bias": torch.zeros((4,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.v_proj.weight": torch.tensor(
+                [
+                    [1, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "model.layers.0.self_attn.v_proj.bias": torch.zeros((4,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.o_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.0.mlp.gate_proj.weight": torch.ones((12, 8), dtype=torch.bfloat16),
+            "model.layers.0.mlp.up_proj.weight": torch.full((12, 8), 0.5, dtype=torch.bfloat16),
+            "model.layers.0.mlp.down_proj.weight": torch.full((8, 12), 0.25, dtype=torch.bfloat16),
+            "model.layers.1.input_layernorm.weight": torch.full((8,), 0.75, dtype=torch.bfloat16),
+            "model.layers.1.post_attention_layernorm.weight": torch.full((8,), 1.25, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.q_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.q_proj.bias": torch.full((8,), 0.1, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.k_proj.weight": torch.tensor(
+                [
+                    [1, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "model.layers.1.self_attn.k_proj.bias": torch.full((4,), 0.05, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.v_proj.weight": torch.tensor(
+                [
+                    [1, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "model.layers.1.self_attn.v_proj.bias": torch.full((4,), -0.05, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.o_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.1.mlp.gate_proj.weight": torch.full((12, 8), 0.8, dtype=torch.bfloat16),
+            "model.layers.1.mlp.up_proj.weight": torch.full((12, 8), 0.3, dtype=torch.bfloat16),
+            "model.layers.1.mlp.down_proj.weight": torch.full((8, 12), 0.2, dtype=torch.bfloat16),
+            "model.norm.weight": torch.ones((8,), dtype=torch.bfloat16),
+            "lm_head.weight": torch.arange(64, dtype=torch.bfloat16).reshape(8, 8),
+        },
+        str(shard_path),
+    )
+
+    weight_names = [
+        "model.embed_tokens.weight",
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.q_proj.bias",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.k_proj.bias",
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.self_attn.v_proj.bias",
+        "model.layers.0.self_attn.o_proj.weight",
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+        "model.layers.1.input_layernorm.weight",
+        "model.layers.1.post_attention_layernorm.weight",
+        "model.layers.1.self_attn.q_proj.weight",
+        "model.layers.1.self_attn.q_proj.bias",
+        "model.layers.1.self_attn.k_proj.weight",
+        "model.layers.1.self_attn.k_proj.bias",
+        "model.layers.1.self_attn.v_proj.weight",
+        "model.layers.1.self_attn.v_proj.bias",
+        "model.layers.1.self_attn.o_proj.weight",
+        "model.layers.1.mlp.gate_proj.weight",
+        "model.layers.1.mlp.up_proj.weight",
+        "model.layers.1.mlp.down_proj.weight",
+        "model.norm.weight",
+        "lm_head.weight",
+    ]
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard_path.stat().st_size},
+                "weight_map": {name: shard_path.name for name in weight_names},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    build_tensor_execution_plan(model_id, model_dir)
+    return model_id, model_dir
+
+
+def test_load_layer_bridge_config_reads_required_qwen_values(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    config = load_layer_bridge_config(model_id)
+
+    assert config.ready is True
+    assert config.hidden_size == 8
+    assert config.num_hidden_layers == 2
+    assert config.num_attention_heads == 2
+    assert config.num_key_value_heads == 1
+    assert config.intermediate_size == 12
+    assert config.eos_token_ids == [6, 0]
+    assert config.bos_token_id == 0
+    assert config.pad_token_id == 0
+
+
+def test_run_minimal_layer_forward_bridge_executes_real_layer_slice(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_minimal_layer_forward_bridge(model_id)
+
+    assert result.ready is True
+    assert result.loaded_unit_ids == ["layer-00-layer_norm", "layer-00-attention", "layer-00-mlp"]
+    assert result.input_shape == [1, 1, 8]
+    assert result.output_shape == [1, 1, 8]
+    assert result.output_dtype == "torch.bfloat16"
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor).all()
+    assert result.output_mean_abs > 0
+    assert result.output_l2_norm > 0
+
+
+def test_run_minimal_layer_forward_bridge_supports_multi_token_input_with_causal_mask(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    input_hidden = torch.zeros((1, 2, 8), dtype=torch.float32)
+    result = run_minimal_layer_forward_bridge(model_id, input_hidden=input_hidden)
+
+    assert result.ready is True
+    assert result.input_shape == [1, 2, 8]
+    assert result.output_shape == [1, 2, 8]
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor).all()
+
+
+def test_run_minimal_layer_forward_bridge_supports_bfloat16_math_mode(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("PCKETLM_RUNTIME_MATH_DTYPE", "bf16")
+
+    result = run_minimal_layer_forward_bridge(model_id)
+
+    assert result.ready is True
+    assert result.output_dtype == "torch.bfloat16"
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor.float()).all()
+
+
+def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_layer_bridge_stack(model_id, start_layer=0, layer_count=2)
+
+    assert result.ready is True
+    assert result.executed_layers == [0, 1]
+    assert result.input_shape == [1, 1, 8]
+    assert result.output_shape == [1, 1, 8]
+    assert result.output_dtype == "torch.bfloat16"
+    assert len(result.step_summaries) == 2
+    assert all(summary.ready for summary in result.step_summaries)
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor).all()
+
+
+def test_load_token_entry_hidden_state_reads_one_embedding_row_without_full_table(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    hidden_state, blockers = load_token_entry_hidden_state(model_id, [3])
+
+    assert not blockers
+    assert hidden_state is not None
+    assert list(hidden_state.shape) == [1, 1, 8]
+    expected = torch.arange(24, 32, dtype=hidden_state.dtype).view(1, 1, 8)
+    assert torch.equal(hidden_state, expected)
+
+
+def test_run_token_entry_layer_bridge_executes_from_token_id(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_token_entry_layer_bridge(model_id, token_ids=[3], start_layer=0, layer_count=2)
+
+    assert result.ready is True
+    assert result.executed_layers == [0, 1]
+    assert result.embedding_shape == [1, 1, 8]
+    assert result.output_shape == [1, 1, 8]
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor).all()
+
+
+def test_run_decode_tail_streams_lm_head_and_returns_logits(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    stack_result = run_layer_bridge_stack(model_id, start_layer=0, layer_count=2)
+
+    result = run_decode_tail(model_id, stack_result.output_tensor, lm_head_chunk_rows=3, top_k=3)
+
+    assert result.ready is True
+    assert result.logits_shape == [1, 1, 8]
+    assert result.logits_dtype == "torch.bfloat16"
+    assert result.chunk_count == 3
+    assert len(result.top_token_ids) == 3
+    assert result.logits is not None
+    assert torch.isfinite(result.logits).all()
+
+
+def test_run_decode_tail_can_stream_topk_without_full_logits(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    stack_result = run_layer_bridge_stack(model_id, start_layer=0, layer_count=2)
+
+    result = run_decode_tail(
+        model_id,
+        stack_result.output_tensor,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        return_logits=False,
+        recent_token_ids=[1, 2],
+        repetition_penalty=1.1,
+    )
+
+    assert result.ready is True
+    assert result.logits_shape == [1, 1, 8]
+    assert result.chunk_count == 3
+    assert len(result.top_token_ids) == 3
+    assert len(result.top_logits) == 3
+    assert result.logits is None
+
+
+def test_run_token_decode_step_produces_logits_from_real_token_entry(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_token_decode_step(model_id, token_ids=[3], start_layer=0, layer_count=2, lm_head_chunk_rows=3, top_k=3)
+
+    assert result.ready is True
+    assert result.context_mode == "single-token-entry"
+    assert result.chosen_token_id is not None
+    assert result.executed_layers == [0, 1]
+    assert result.embedding_shape == [1, 1, 8]
+    assert result.hidden_shape == [1, 1, 8]
+    assert result.logits_shape == [1, 1, 8]
+    assert len(result.top_token_ids) == 3
+    assert result.logits is not None
+    assert torch.isfinite(result.logits).all()
+
+
+def test_run_repeated_decode_loop_greedily_selects_next_tokens(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_repeated_decode_loop(model_id, seed_token_id=3, steps=2, start_layer=0, layer_count=2, lm_head_chunk_rows=3, top_k=3)
+
+    assert result.ready is True
+    assert result.steps_completed == 2
+    assert result.generated_token_ids[0] == 3
+    assert len(result.generated_token_ids) == 3
+    assert len(result.step_summaries) == 2
+    assert all(summary.ready for summary in result.step_summaries)
+    assert any("history summary" in blocker for blocker in result.blockers)
+
+
+def test_build_history_summary_hidden_state_carries_recent_tokens(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    hidden_state, context_tokens, context_mode, blockers = build_history_summary_hidden_state(
+        model_id,
+        token_ids=[1, 2, 3],
+        history_window=2,
+    )
+
+    assert not blockers
+    assert context_tokens == [2, 3]
+    assert context_mode == "history-summary-no-kv-cache"
+    assert hidden_state is not None
+    assert list(hidden_state.shape) == [1, 1, 8]
+
+
+def test_run_token_decode_step_can_use_history_summary_context(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_token_decode_step(
+        model_id,
+        token_ids=[1, 2, 3],
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        history_window=3,
+    )
+
+    assert result.ready is True
+    assert result.context_mode == "history-summary-no-kv-cache"
+    assert result.context_token_ids == [1, 2, 3]
+    assert result.history_window == 3
+    assert result.logits_shape == [1, 1, 8]
+
+
+def test_select_next_token_supports_greedy_and_top_k_sample() -> None:
+    logits = torch.tensor([[[1.0, 3.0, 2.0, 0.5]]], dtype=torch.float32)
+
+    greedy = select_next_token(logits, policy="greedy", top_k=3)
+    sampled = select_next_token(
+        logits,
+        policy="top-k-sample",
+        top_k=3,
+        temperature=1.0,
+        sample_seed=7,
+    )
+
+    assert greedy.ready is True
+    assert greedy.chosen_token_id == 1
+    assert sampled.ready is True
+    assert sampled.chosen_token_id in sampled.top_token_ids
+
+
+def test_select_next_token_applies_top_p_filtering() -> None:
+    logits = torch.tensor([[[5.0, 4.0, 1.0, 0.1]]], dtype=torch.float32)
+
+    sampled = select_next_token(
+        logits,
+        policy="top-k-sample",
+        top_k=4,
+        top_p=0.55,
+        temperature=1.0,
+        sample_seed=7,
+    )
+
+    assert sampled.ready is True
+    assert sampled.chosen_token_id in {0, 1}
+
+
+def test_run_repeated_decode_loop_can_use_top_k_sampling_policy(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_repeated_decode_loop(
+        model_id,
+        seed_token_id=3,
+        steps=2,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        history_window=2,
+        selection_policy="top-k-sample",
+        sample_seed=11,
+    )
+
+    assert result.ready is True
+    assert result.selection_policy == "top-k-sample"
+    assert result.strategy == "top-k-sample-single-token-no-kv-cache"
+    assert len(result.generated_token_ids) == 3
+
+
+def test_run_kv_decode_loop_carries_cache_lengths_across_steps(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_kv_decode_loop(
+        model_id,
+        seed_token_id=3,
+        steps=2,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+    )
+
+    assert result.ready is True
+    assert result.strategy == "greedy-kv-cache-rope"
+    assert len(result.generated_token_ids) == 3
+    assert result.cache_sequence_lengths["0"] == 2
+    assert result.cache_sequence_lengths["1"] == 2
+    assert result.stop_reason == "step-limit"
+    assert any("RoPE" in blocker for blocker in result.blockers)
+
+
+def test_run_decode_benchmark_compares_history_and_kv_paths(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_decode_benchmark(
+        model_id,
+        seed_token_id=3,
+        steps=2,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        history_window=2,
+        sample_seed=11,
+    )
+
+    assert result.ready is True
+    assert result.sample_seed == 11
+    assert result.to_dict()["case_count"] == 3
+    assert len(result.cases) == 3
+    assert [case.label for case in result.cases] == [
+        "history-greedy",
+        "history-top-k-sample",
+        "kv-greedy",
+    ]
+    assert result.cases[0].steps_completed == 2
+    assert result.cases[0].final_token_id == result.cases[0].generated_token_ids[-1]
+    assert result.cases[0].unique_token_count >= 2
+    assert result.cases[0].stop_reason == "step-limit"
+    assert result.cases[2].strategy == "greedy-kv-cache-rope"
+    assert result.cases[2].cache_sequence_lengths["0"] == 2
+    assert result.cases[2].stop_reason == "step-limit"
+
+
+def test_run_kv_decode_step_can_advance_explicit_decode_state(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    decode_state = initialize_kv_decode_state(model_id, seed_token_id=3)
+
+    first_step = run_kv_decode_step(
+        model_id,
+        input_token_id=decode_state.next_token_id,
+        decode_state=decode_state,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+    )
+
+    assert first_step.ready is True
+    assert first_step.next_decode_state is not None
+    assert first_step.next_decode_state.ready is True
+    assert first_step.next_decode_state.next_position == 1
+    assert first_step.next_decode_state.generated_token_ids[0] == 3
+    assert len(first_step.next_decode_state.generated_token_ids) == 2
+    assert first_step.next_decode_state.cache_sequence_lengths["0"] == 1
+    assert first_step.next_decode_state.finished is False
+    assert first_step.next_decode_state.stop_reason is None
+
+
+def test_run_prompt_decode_loop_uses_real_prompt_tokenization(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+
+    assert result.ready is True
+    assert result.prompt_token_ids == [1, 2]
+    assert result.steps_completed == 2
+    assert result.stop_reason == "step-limit"
+    assert result.strategy == "greedy-prompt-kv-cache-rope"
+    assert len(result.generated_token_ids) == 2
+    assert result.cache_sequence_lengths["0"] >= 3
+    assert isinstance(result.generated_text, str)
+    assert isinstance(result.full_text, str)
+    assert result.timings["total"] >= 0
+    assert "prefill_decode_tail" in result.timings
+
+
+def test_run_prompt_decode_loop_can_cancel_before_heavy_generation(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        apply_chat_format=False,
+        should_cancel=lambda: True,
+    )
+
+    assert result.ready is False
+    assert result.stop_reason == "canceled"
+    assert CANCEL_BLOCKER in result.blockers
+    assert result.steps_completed == 0
+
+
+def test_run_prompt_decode_loop_supports_raw_prompt_and_custom_system_controls(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    raw_result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="top-k-sample",
+        repetition_penalty=1.2,
+        apply_chat_format=False,
+        sample_seed=5,
+    )
+
+    assert raw_result.ready is True
+    assert raw_result.prompt == "hello world"
+
+
+def test_run_prompt_decode_loop_supports_min_new_tokens_and_stop_strings(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        top_p=0.9,
+        min_new_tokens=2,
+        stop_strings=["friend"],
+        apply_chat_format=False,
+        sample_seed=5,
+    )
+
+    assert result.ready is True
+    assert result.min_new_tokens == 2
+    assert result.stop_strings == ["friend"]
+
+
+def test_prepare_prompt_text_supports_chat_wrapping_when_metadata_is_present(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "prompt-wrap-test"
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+
+    tokenizer = Tokenizer(
+        WordLevel(
+            {
+                "[UNK]": 0,
+                "<|im_start|>": 1,
+                "<|im_end|>": 2,
+                "system": 3,
+                "user": 4,
+                "assistant": 5,
+                "Be": 6,
+                "brief.": 7,
+                "hello": 8,
+                "world": 9,
+                "You": 10,
+                "are": 11,
+                "Qwen,": 12,
+                "created": 13,
+                "by": 14,
+                "Alibaba": 15,
+                "Cloud.": 16,
+                "a": 17,
+                "helpful": 18,
+                "assistant.": 19,
+            },
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.save(str(model_dir / "tokenizer.json"))
+    (model_dir / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "added_tokens_decoder": {
+                    "1": {"content": "<|im_start|>", "special": True},
+                    "2": {"content": "<|im_end|>", "special": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    wrapped = prepare_prompt_text(model_id, "hello world", system_prompt="Be brief.", apply_chat_format=True)
+    raw = prepare_prompt_text(model_id, "hello world", apply_chat_format=False)
+
+    assert wrapped.ready is True
+    assert raw.ready is True
+    assert wrapped.prepared_prompt.startswith("<|im_start|>system\nBe brief.")
+    assert raw.prepared_prompt == "hello world"
+    assert len(wrapped.token_ids) > len(raw.token_ids)

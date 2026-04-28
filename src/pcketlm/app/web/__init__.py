@@ -1,0 +1,2 @@
+"""Local web desktop frontend."""
+

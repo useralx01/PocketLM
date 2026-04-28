@@ -1,0 +1,561 @@
+# Log
+
+## 2026-04-28
+
+- Added the first real GGUF/llama.cpp backend path for Queen/Qwen.
+- Downloaded the official standalone llama.cpp Windows CPU runtime release `b8963` and verified `llama-cli.exe` works.
+- Tried the `llama-cpp-python` package path, but the current Python `3.14` environment has no matching wheel and the Python `3.12` sidecar install tried to compile native code without Windows build tools. Pocket now records this as a blocked package route instead of forcing a beginner-machine compile.
+- Downloaded the official `Qwen/Qwen2.5-14B-Instruct-GGUF` Q4_K_M split files and merged them into `models/qwen2.5-14b-instruct/artifacts/qwen2.5-14b-instruct-q4_k_m.gguf`.
+- Added `pcketlm.core.runtime.gguf_backend` and `gguf_sidecar_runner`, plus runtime/backend status detection for `llama-cli`, `llama-server`, main-process `llama_cpp`, and sidecar `llama_cpp`.
+- Added web `GGUF` mode and status reporting so the app can route chat through the new GGUF backend.
+- Added persistent local `llama-server` use on `127.0.0.1:8767` so GGUF prompts can reuse the already-loaded model.
+- Live GGUF checks: direct llama-server answered a one-token prompt in about `0.52s`; the Python adapter answered in about `0.39s`; the live web API answered `READY` with `strategy: llama-cpp-gguf-server` and `0.91s` reported generation time.
+- Fixed a bug where the old direct-runtime RAM guard blocked GGUF mode after `llama-server` had already loaded the model. Added a regression test for that path.
+- Re-ran verification after the GGUF guard fix: compile passed, focused web/GGUF tests passed, and the full suite passed with `158` tests.
+- Added GGUF server lifecycle management around the persistent llama.cpp server: status, start/load, stop/unload, PID detection, process RAM reporting, and a small state file for the managed server.
+- Wired `/api/gguf/server` into the web server and added Load/Unload controls to the Load Model screen.
+- Live lifecycle proof: the API unloaded the GGUF server, confirmed port `8767` was no longer listening, then loaded it again in about `45.75s`; the loaded process reported ready with about `9.81 GB` RAM.
+- A first post-control GGUF chat smoke showed the model generation was fast but the web response was still slow because chat rebuilt full process/RAM metadata after generation.
+- Optimized the GGUF chat response path to return lightweight server metadata after chat while leaving full PID/RAM status for the Load Model/status surface.
+- Latest live GGUF web chat proof: `Reply with SUN only.` returned `SUN` through `llama-cpp-gguf-server` with `1.07s` wall time and `0.61s` app-reported generation time.
+- Re-ran verification after the control and metadata-speed work: compile passed, focused GGUF/web tests passed, and the full suite passed with `161` tests.
+- Fixed the GGUF wrong-answer bug shown in the UI where `Reply with OK only.` could produce unrelated continuation text. The cause was raw completion prompting; GGUF mode now wraps Qwen prompts in the proper instruct chat format before sending them to llama.cpp.
+- Live proof after the prompt-format fix: `Reply with OK only.` returned `OK`, and a follow-up formatted GGUF check returned `YES` in about `1.29s` wall time.
+- Re-ran verification after the GGUF prompt-format fix: focused tests passed and the full suite passed with `162` tests.
+- Added GGUF-focused measured benchmark cases for instruction following, 1/4/8/16-token generation, a basic logic check, and a short agent-style checklist.
+- Added `run_gguf_measured_benchmark` and a web `/api/benchmark/gguf` route so GGUF can be benchmarked and saved without forcing the slow Direct CPU benchmark path.
+- Added a `Run GGUF` button beside `Run full` on the Benchmarks screen.
+- Live saved GGUF benchmark results: `GGUF 1` `0.54s` -> `OK`; `GGUF 4` `1.52s` -> `Local AI enhances efficiency`; `GGUF 8` `3.03s` -> `Pocket LLM provides concise answers and assistance`; `GGUF 16` `5.7s` -> cut off at the token limit; `GGUF Logic` `0.72s` -> `YES`; `GGUF Agent` `5.77s` -> began a numbered checklist but cut off at the token limit.
+- Re-ran verification after the GGUF benchmark phase: compile passed, focused tests passed, and the full suite passed with `164` tests.
+- Added GGUF stop-string support and visible stop-marker cleanup for server, Python package, sidecar, and CLI paths.
+- Raised the web GGUF max-token cap to `64` while leaving direct CPU modes capped at `16`; the UI now switches the max-token input limit when GGUF mode is selected.
+- Updated GGUF benchmark cases from the old cut-off `16` token/agent checks to `GGUF 32` and a `48` token agent check.
+- Live longer-answer GGUF smoke: `List the next two safe steps for checking a local model...` returned two complete numbered steps through `llama-cpp-gguf-server` in about `21.57s`.
+- Live saved GGUF benchmark results after tuning: `GGUF 1` `0.55s` -> `OK`; `GGUF 4` `1.56s` -> `Local AI enhances efficiency`; `GGUF 8` `4.0s` -> `Pocket LLM provides concise answers and assistance`; `GGUF 32` `10.37s` -> complete one-sentence explanation; `GGUF Logic` `0.93s` -> `YES`; `GGUF Agent` `12.63s` -> two complete numbered checking steps.
+- Re-ran verification after the GGUF longer-answer phase: compile passed, focused tests passed, live smoke passed, live GGUF benchmark passed, and the full suite passed with `167` tests.
+
+## 2026-04-23
+
+- Created the `pcketlm` Mission Control tracking category.
+- Set up the initial project tracking structure.
+- Wrote the full V1 blueprint with scope, architecture, phases, and current risks.
+- Added the first engineering roadmap while the initial model download was in progress.
+- Added the first draft schemas and initial code layout while the model download was stalled.
+- Logged the Hugging Face Xet download failure and restarted the model download with Xet disabled.
+- Created the first Python package skeleton so implementation can start before the model download fully completes.
+- Implemented the first registry, storage path, and Qwen file validation foundation.
+- Added real source inspection so pcketlm can distinguish partial downloads from runnable model sources.
+- Hardened the source inspector so partial or malformed JSON files do not break import detection.
+- Added a first model status command so local source folders can be checked without opening Python internals manually.
+- Stopped the stalled Qwen download path so the next acquisition attempt can start cleanly from LM Studio or another source.
+- Added the first local import command so a downloaded model folder can be registered as soon as it is ready.
+- Removed the temporary LM Studio / GGUF fallback logic after the official-source download path started working again.
+- Added a download-state layer so pcketlm can report partial vs ready official sources more clearly.
+- Added the first registry-backed catalog layer so pcketlm can list all known models and their current source states.
+- Added registry removal support so stale model entries can be cleaned out when project direction changes.
+- Added a standing rule that obvious bugs should be debugged immediately instead of being framed as normal option decisions.
+- Debugged the registry/catalog mismatch and confirmed the live registry is now clean after stale-entry removal.
+- Added a standing workflow rule: future decisions should be framed as 3 options with a clear recommendation, and tracker files should stay updated as changes are made.
+- Added a product-facing acquisition layer so pcketlm can show clearer download progress, plain-English state, and next-step guidance.
+- Verified the new acquisition layer against the live Qwen source folder and confirmed the official download is still partial but growing.
+- Installed `pytest` so the local pcketlm test suite can be verified properly.
+- Added the first runtime source-readiness layer and a runtime-source CLI so pcketlm can describe loader-facing source readiness directly.
+- Verified the current runtime, acquisition, registry, and validation foundation with a passing 13-test local run.
+- Confirmed the live Qwen source folder now has loader metadata present, but only 1 of 8 expected shard files is downloaded so far.
+- Installed `transformers`, `tokenizers`, and `safetensors` for the first runtime correctness slice.
+- Added a runtime bootstrap/preflight layer so pcketlm can separate source blockers, dependency blockers, and loader readiness before full model loading.
+- Installed `torch`, reran the bootstrap checks, and confirmed the runtime is now blocked only by the incomplete shard download.
+- Verified the current pcketlm foundation again with a passing 15-test local run.
+- Rechecked the live Qwen download and confirmed it has reached about 17.5 GB / 27.51 GB, roughly 63.6%.
+- Added an explicit risk register and tightened the blueprint/roadmap around failure avoidance while the model download continues.
+- Rechecked the live Qwen download and confirmed it has reached about 21.0 GB / 27.51 GB, roughly 76.33%.
+- Added the first desktop status-screen spec based on the real acquisition, runtime-source, and runtime-bootstrap states already implemented in pcketlm.
+- Created a desktop shortcut at `C:\Users\isale\Desktop\pcketlm.lnk` pointing to the project folder so it can later be retargeted to the real app.
+- Built the first Tkinter desktop test UI for the model status screen, verified it with a passing 9-test run, and repointed the desktop shortcut to launch `launch_pcketlm.pyw`.
+- Connected the desktop UI to real registry model options and kept a detected-local-source fallback so the app stays usable before the registry is populated.
+- Confirmed the official Qwen source is now fully downloaded and runtime-ready at the file level, with all 8 shards present.
+- Registered `qwen2.5-14b-instruct` in the live pcketlm registry.
+- Added a guarded real-load command, verified it with a passing 11-test run, and ran the first real load attempt against the full model.
+- The first real CPU load was blocked honestly by available RAM: about 1.97 GB free versus an estimated 33.01 GB needed.
+- Added reusable blocker category, severity, and recommended-action state so the app can explain the RAM blocker as stable product logic, not just ad-hoc text.
+- Added a reduced-memory strategy planner, verified it with a passing test run, and ran it against the live Qwen model.
+- The planner recommends `staged-disk-streaming` as the best next runtime path: plain CPU loading is not viable, but a streamed working-set path may be.
+- Added the first staged disk-streaming planner, verified it with a passing test run, and ran it against the live Qwen model.
+- The current adaptive plan suggests about a 0.86 GB hot window, 0.43 GB prefetch window, and about 33 streamed chunks, with cache state under `state/streaming/qwen2.5-14b-instruct`.
+- Added the first staged-streaming manifest/bootstrap layer, verified it with a passing test run, and bootstrapped real cache state for `qwen2.5-14b-instruct`.
+- The real manifest now lives at `C:\Users\isale\Documents\pcketlm\state\streaming\qwen2.5-14b-instruct\manifest.json` with hot and warm window directories beside it.
+- Added the first staged-streaming manifest reader, verified it with a passing test run, and confirmed the live manifest reads back as ready with no cache-layout blockers.
+- Added the first staged-streaming weight-unit mapper, fixed a test fixture issue in the unit-map tests, and verified the live unit map with a passing test run.
+- The real unit map now lives at `C:\Users\isale\Documents\pcketlm\state\streaming\qwen2.5-14b-instruct\units.json` and maps all 8 shard files into streamable units.
+- Copied the live `pcketlm` project out of `.openclaw` into `C:\Users\isale\Documents\pcketlm` and repointed the desktop shortcut to the new root.
+- The old `.openclaw` copy is no longer the active project root and only remains as cleanup if Windows still holds a transient lock on that original folder.
+- Removed the old `.openclaw` copy after the Windows lock cleared, so `C:\Users\isale\Documents\pcketlm` is now the only live project root.
+- Debugged a post-move desktop status regression and found that the registry still pointed to the deleted old model folder.
+- Added automatic registry relocation for stale in-project model paths, verified it with a new repository test, and confirmed the live desktop status now resolves the model from `C:\Users\isale\Documents\pcketlm\models\qwen2.5-14b-instruct\original`.
+- Registry and streaming regression tests: 5/5 passed for the focused repository and streaming suite after the move fix.
+- Added the first staged-streaming segment materializer, a CLI for it, and focused cache-materialization tests.
+- Hit and fixed a circular import in `streaming_units.py` by importing the manifest reader directly instead of through the aggregate runtime package.
+- Hit and fixed a second move-related stale-path bug in the streaming manifest so staged streaming cache paths relocate to the current project root automatically.
+- Streaming tests: 9/9 passed for the focused reader, materializer, unit-map, and window-schedule suite.
+- The live materializer now writes one hot cache file and one warm cache file for `qwen2.5-14b-instruct`, each about 388.5 MB, plus a `cache-index.json` file under `state/streaming/qwen2.5-14b-instruct`.
+- Added lightweight write-boundary checksum recording to the cache index and an on-demand cache verification command.
+- Added the first staged-streaming rotation flow, including persisted schedule loading and one-step hot/warm advancement.
+- Hit and fixed a small rotation robustness gap so locked cache files return blockers instead of crashing the materializer.
+- Hit and fixed a test expectation mismatch in the small rotation fixture because the segment splitter produced `6/5/5/5/5` bytes, not repeated `6`-byte segments.
+- Streaming tests: 11/11 passed for the focused reader, verifier, materializer, unit-map, window-schedule, and rotation suite.
+- The live Qwen cache verification passes cleanly before and after rotation, and the live rotation now advances from `unit-0001-seg-002` / `unit-0001-seg-003` to `unit-0001-seg-003` / `unit-0001-seg-004`.
+- Added a persistent `residency.json` state file for staged streaming and wired materialization/rotation to keep it updated.
+- Hit and fixed a small residency writer assumption so schedule-like test doubles without `overflow_units` no longer crash the materializer tests.
+- Streaming tests: 13/13 passed for the focused reader, verifier, materializer, unit-map, window-schedule, rotation, and residency suite.
+- The live residency state now persists the post-rotation position correctly: rotation step `1`, hot `unit-0001-seg-005`, warm `unit-0001-seg-006`, consumed `unit-0001-seg-004`, overflow head `unit-0001-seg-007`.
+- Verified the first segment-level unit refactor and found two foundation issues: repo-root `pytest` still needed manual package path setup, and the original segment sizing fit the hot window but not the smaller warm prefetch window.
+- Added `tests/conftest.py` so local test runs work from the repo root without manual `PYTHONPATH`.
+- Added a repo-root `pcketlm` import shim so `py -m pcketlm...` commands work directly from the workspace root during development.
+- Refactored the staged-streaming plan to include a shared segment budget that fits both the hot and warm windows.
+- Rebootstrapped the live streaming manifest, regenerated the live unit map, and rebuilt the live window schedule with the shared segment budget.
+- Streaming tests: 7/7 passed for the focused streaming manifest, reader, units, and window-schedule suite.
+- The live Qwen streaming state now schedules one segment into the hot window and one segment into the warm prefetch window with no blockers.
+- Added cache-hit and cache-miss accounting to cache verification and extended the residency writer so verification can preserve rotation/refill state while adding telemetry deltas.
+- Added a regression test for the full `materialize -> rotate -> verify` sequence so verification no longer resets rotation step or doubles refill count.
+- Streaming tests: 7/7 passed for the focused materialize, rotation, and residency suite after the verification-state fix.
+- Rebuilt the live residency state from the current schedule after the old verification bug had polluted the counters, then reran verification on the fixed code path.
+- The live staged-streaming residency state is now consistent again: rotation step `4`, hot `unit-0001-seg-005`, warm `unit-0001-seg-006`, consumed `unit-0001-seg-004`, refill count `4`, cache hits `2`, cache misses `0`.
+- Added `last_cache_hit_delta` and `last_cache_miss_delta` to streaming residency so runtime control can react to the latest verification result instead of stale cumulative totals.
+- Added a staged-streaming control layer and CLI so pcketlm can decide whether to materialize, repair cache, rotate forward, or hold position from live telemetry.
+- Wired the desktop status screen to show streaming control state, current hot/warm/overflow units, and cache telemetry, and added a live `Advance Stream` button.
+- Hit and fixed a controller-priority bug so current verification misses trigger `repair-cache-window` before the generic materialization path.
+- Streaming and desktop tests: 12/12 passed for the focused control, residency, materialization, rotation, and status-screen suite.
+- Ran one live controlled streaming step for `qwen2.5-14b-instruct`; the stream advanced cleanly from hot `unit-0001-seg-005` / warm `unit-0001-seg-006` to hot `unit-0001-seg-006` / warm `unit-0001-seg-007`.
+- The live runtime control state now recommends another `rotate-forward` step with rotation step `5`, overflow head `unit-0001-seg-008`, refill count `5`, cache hits `2`, cache misses `0`.
+- Debugged a desktop layout regression after adding the streaming control card and confirmed the window needed about `1369px` of vertical space while opening at only `760px`.
+- Reworked the desktop app into a scrollable content area with a fixed bottom action bar so `Refresh Status`, `Open Model Folder`, `Retry Preflight`, `Advance Stream`, and `View Details` remain visible.
+- Desktop status tests: 2/2 passed after the layout fix, and direct Tk widget inspection confirmed the live action buttons are mapped inside the visible window.
+- Added a verify-first safe control path so the runtime can verify cache health, repair if needed, and only then advance the stream.
+- Wired the safer path into both the runtime control CLI and the desktop app as `Safe Advance`.
+- Streaming and desktop tests: 14/14 passed for the focused control, residency, materialization, rotation, and status-screen suite after the safe-advance work.
+- Ran one live safe advance for `qwen2.5-14b-instruct`; verification passed and the stream advanced cleanly to hot `unit-0001-seg-010`, warm `unit-0002-seg-001`, overflow head `unit-0002-seg-002`.
+- The live residency state after the safe advance is now: rotation step `9`, refill count `9`, cache hits `4`, cache misses `0`.
+- Added a tensor-aware catalog layer that reads safetensors headers without loading whole weights and persists the result as `tensor-catalog.json` beside the streaming state.
+- Added a runtime tensor-catalog CLI and focused tensor-catalog tests using tiny generated safetensors shards.
+- Tensor catalog tests: 2/2 passed.
+- Built the live tensor catalog for `qwen2.5-14b-instruct`; it found `579` tensors across `8` shards and `48` layers, with component-group counts of `336` attention tensors, `144` MLP tensors, `96` layer norms, plus embeddings, final norm, and lm head.
+- Added a tensor-aware execution-plan layer that groups catalog entries into runtime units and persists them as `tensor-execution-plan.json`.
+- Added a runtime tensor-execution-plan CLI and focused tests for grouped execution units and phase ordering.
+- Tensor bridge tests: 4/4 passed for the catalog + execution-plan slice.
+- Built the live tensor execution plan for `qwen2.5-14b-instruct`; it found `147` execution units with ordered phases `prefill`, `layer-entry`, `layer-attention`, `layer-mlp`, and `decode-head`.
+- Added a first tensor loader slice that can load a single tensor by name or a grouped execution unit directly from the original safetensors shards.
+- Added a runtime tensor-loader CLI and focused tests for both single-tensor loads and grouped execution-unit loads.
+- Tensor loader tests: 6/6 passed for the catalog + execution-plan + loader slice.
+- Loaded the live `layer-00-layer_norm` execution unit from the real Qwen model; it returned two real `torch.bfloat16` tensors from `model-00001-of-00008.safetensors` with no blockers.
+- Added a stronger tensor verification pass for both single tensors and grouped execution units, with CLI support for `--verify-tensor` and `--verify-unit`.
+- Tensor verification tests: 8/8 passed for the catalog + execution-plan + loader + verification slice.
+- Verified the live `layer-00-attention` execution unit from the real Qwen model; all 7 tensors matched expected dtype, shape, and byte size.
+- Loaded the live `layer-00-attention` execution unit from the real Qwen model; it returned 7 real `torch.bfloat16` tensors totaling `125843456` bytes with no blockers.
+- Added a first minimal CPU-only layer bridge, CLI, and focused tests so pcketlm can run a real layer-0 execution slice instead of only loading or verifying tensors.
+- Focused layer-bridge tests: 3/3 passed, and the catalog + execution-plan + loader regression suite also stayed green at 8/8 passed.
+- The first live bridge attempt failed silently under memory pressure when it held full attention and MLP execution units in memory at once.
+- Reworked the live layer bridge to load required norms, projections, and MLP tensors one at a time instead of keeping full verified units resident.
+- The reworked live bridge now executes successfully on `qwen2.5-14b-instruct`; it produced a real `1 x 1 x 5120` `torch.float32` output tensor from the true layer-0 norm, attention, and MLP math with no blockers.
+- Extended the layer bridge with a stack runner and CLI support for `--layers`, so we can chain multiple real layers without creating a second execution path.
+- Focused stacked layer-bridge tests: 4/4 passed, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live stacked bridge now executes successfully on `qwen2.5-14b-instruct` through layers `0` and `1`; it still uses synthetic single-token input and produced a real `1 x 1 x 5120` `torch.float32` output tensor with no blockers.
+- Proved the stack can go deeper on the live Qwen model by running a four-layer synthetic single-token pass through layers `0` to `3`, still with no blockers.
+- Added low-memory token-entry support using `safetensors.get_slice()` so pcketlm can read the needed embedding row for a token id without loading the full embedding table.
+- Focused bridge tests are now 6/6 passed after adding token-entry coverage, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live token-entry bridge now works for `qwen2.5-14b-instruct`; token id `42` is converted into a `1 x 1 x 5120` hidden state and then executed through layers `0` and `1` with no blockers.
+- Added a low-memory decode tail using final norm plus streamed `lm_head` row chunks, so pcketlm can produce real logits without loading the whole output matrix into RAM.
+- Focused bridge tests are now 8/8 passed after adding decode-tail coverage, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live token-to-logits decode path now works for `qwen2.5-14b-instruct`; token id `42` is converted into a hidden state, executed through layers `0` and `1`, and decoded into a real `1 x 1 x 152064` logits tensor with no blockers.
+- Added the first repeated greedy decode loop on top of the token-entry + layer-stack + decode-tail path, with explicit labeling that it is still context-naive and not KV-cache aware.
+- Focused bridge tests are now 9/9 passed after adding repeated-loop coverage, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live repeated loop now works for `qwen2.5-14b-instruct`; starting from token id `42`, it generated the two-step chain `42 -> 123571 -> 102664`.
+- Strengthened the repeated loop with an explicit recent-token embedding-history summary and exposed it through `history_window` so the loop can carry more than the newest token.
+- Focused bridge tests are now 11/11 passed after adding history-summary loop coverage, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live history-summary loop now works for `qwen2.5-14b-instruct`; starting from token id `42` with `history_window=3`, it generated the two-step chain `42 -> 123571 -> 117864`.
+- Added a token-selection policy layer with greedy and deterministic top-k sampling support on the live decode path.
+- Focused bridge tests are now 14/14 passed after adding policy and K/V-aware coverage, and the catalog + execution-plan + loader regression suite stayed green at 8/8 passed.
+- The live sampled history-summary loop now works for `qwen2.5-14b-instruct`; starting from token id `42` with `history_window=3` and `top-k-sample`, it generated the two-step chain `42 -> 123571 -> 123571`.
+- Added the first real K/V-carrying decode step and repeated loop so projected keys and values persist across steps per layer.
+- The live K/V-aware loop now works for `qwen2.5-14b-instruct`; starting from token id `42`, it generated the two-step chain `42 -> 123571 -> 10862` and reports cache sequence lengths of `2` for layers `0` and `1`.
+- Added a small decode benchmark path so pcketlm can compare the current history-summary greedy loop, sampled loop, and K/V-aware loop on the same seed token.
+- Focused bridge tests are now 15/15 passed after adding benchmark coverage, and the tensor catalog/execution-plan/loader regression suite stayed green at 8/8 passed.
+- Added RoPE-aware handling on the live K/V key path inside the real attention bridge instead of only labeling the loop as K/V-aware.
+- The live decode benchmark for `qwen2.5-14b-instruct` now compares `history-greedy`, `history-top-k-sample`, and `kv-greedy`; the RoPE-aware K/V case currently yields `42 -> 123571 -> 46322`.
+- The live K/V-aware loop now reports `greedy-kv-cache-rope` and yields the two-step chain `42 -> 123571 -> 46322` with cache sequence lengths of `2` for layers `0` and `1`.
+- Expanded the decode benchmark output so each case now records `steps_completed`, `final_token_id`, `unique_token_count`, and overall ready-case counts for regression-style comparisons.
+- Reworked the live K/V path around an explicit `KVDecodeState` object so the runtime now carries next token, next position, generated chain, and cache sequence lengths as one state bundle instead of passing loose cache dicts around.
+- Focused bridge tests are now 16/16 passed after adding explicit decode-state coverage, and the tensor catalog/execution-plan/loader regression suite stayed green at 8/8 passed.
+- Extended the decode-state model again so it now loads EOS metadata from `generation_config.json` / `config.json`, tracks `finished` and `stop_reason`, and surfaces those values in the K/V loop and decode benchmark.
+- The live Qwen benchmark and K/V loop both now report `stop_reason: step-limit` for the current 2-step runs, confirming that the runtime is treating decode as a bounded session rather than an open-ended demo chain.
+- Added a local tokenizer runtime layer so pcketlm can load `tokenizer.json`, encode prompt text into token ids, and decode generated token ids back into text without leaving the local model files.
+- Added the first prompt-entry runtime path so a real text prompt can prefill the current K/V session and then hand off to the existing prompt-generation loop.
+- Focused bridge tests are now 17/17 passed after adding prompt-entry coverage, and the tensor catalog/execution-plan/loader regression suite stayed green at 8/8 passed.
+- The first live prompt-entry runs now work for `qwen2.5-14b-instruct`; `hello world` tokenized to `[14990, 1879]` and generated `eligeçek`, while `write a short poem` tokenized to `[4934, 264, 2805, 32794]` and generated `Państwo엘`.
+- Improved the prompt-entry path so it now reads tokenizer metadata, wraps plain prompts in a simple Qwen-style instruct/session format, uses local generation defaults, and forces prompt-prefill tokens instead of sampling during prefill.
+- Focused bridge tests stayed green at 17/17 passed after the prompt-quality pass, and the tensor catalog/execution-plan/loader regression suite stayed green at 8/8 passed.
+- The current live wrapped-prompt runs now use `top-k-sample-prompt-kv-cache-rope`; `hello world` generated `Ởgaard`, and `write a short poem` generated `อำนวยความ坐标`.
+- Added the first prompt/session control layer so prompt-entry can now take a custom system prompt, raw-prompt mode, and explicit repetition penalty.
+- Focused bridge tests are now 19/19 passed after adding prompt-control coverage, and the tensor catalog/execution-plan/loader regression suite stayed green at 8/8 passed.
+- The live controlled prompt-entry path now works for `qwen2.5-14b-instruct`; wrapped `hello world` with `Be brief.` and repetition penalty `1.2` generated ` alguataka`, while raw `hello world` with the same repetition penalty generated `eligeuish`.
+- Added explicit `max_new_tokens` and custom `stop_token_ids` support to the prompt runtime path and CLI so prompt sessions can stop more cleanly and predictably.
+- Added a real desktop prompt test panel with prompt input, system prompt override, raw-prompt mode, max-new-tokens input, custom stop-token parsing, generated output, and detailed session summaries.
+- Added focused desktop helper tests for stop-token parsing and prompt-result summarization.
+- Desktop + prompt runtime tests: 24/24 passed across `test_desktop_main.py`, `test_desktop_status_screen.py`, and `test_runtime_layer_bridge.py`.
+- Verified the updated live prompt runtime with `hello world` and `max_new_tokens=4`; it returned a ready result with strategy `top-k-sample-prompt-kv-cache-rope`, generated `setTypeものicielty`, and stopped on `step-limit`.
+- Tightened prompt runtime defaults so prompt runs stay on `greedy` unless sampling is explicitly requested, even when local generation metadata advertises `do_sample`.
+- Added a model-aware automatic prompt layer budget so prompt runs do not stay artificially stuck at 2 layers when no explicit layer count is provided.
+- Updated the prompt runtime tests so the tiny Qwen fixture advertises sampling-capable generation metadata while the default prompt path still stays conservative and ready.
+- Runtime + desktop tests: 24/24 passed again after the prompt-defaults change.
+- Verified the updated live prompt runtime with `hello world` and `max_new_tokens=4`; it now returns `greedy-prompt-kv-cache-rope`, uses 4 carried layers by default on the real Qwen model, and generated ` underminlüNotFoundErroryü` with `stop_reason: step-limit`.
+- Deepened the automatic prompt layer budget for short sessions so the runtime now aims higher on real models instead of staying at the earlier 4-layer default.
+- Runtime + desktop tests: 24/24 passed again after the deeper auto-layer change.
+- Verified the updated live prompt runtime with `hello world` and `max_new_tokens=4`; it now returns `greedy-prompt-kv-cache-rope`, uses 8 carried layers by default on the real Qwen model, and generated `findFirstOrCreateyü背上` with `stop_reason: step-limit`.
+- Added real multi-token causal support to the layer bridge, including causal masking for multi-token self-attention while preserving RoPE and carried K/V handling.
+- Switched prompt prefill from token-by-token stepping to a true multi-token prefill slice that builds the prompt cache in one causal pass before generation starts.
+- Runtime + desktop tests: 24/24 passed again after the multi-token prefill change.
+- Verified the updated live prompt runtime with `hello world` and `max_new_tokens=4`; it kept the same generated text `findFirstOrCreateyü背上`, but the live runtime check completed much faster because prompt prefill no longer walks token-by-token.
+- Probed the real Qwen runtime with deeper manual prompt slices and confirmed that both 12-layer and 16-layer short prompt runs still complete successfully on this machine.
+- Raised the automatic short-prompt layer budget so the default runtime now aims for 12 carried layers instead of 8 on short prompt sessions.
+- Runtime + desktop tests: 24/24 passed again after the 12-layer default change.
+- Verified the updated live default prompt runtime with `hello world` and `max_new_tokens=4`; it now uses 12 carried layers by default and generated ` mmcographedgeshift`.
+- Probed the real Qwen runtime even deeper and confirmed that both 24-layer and 32-layer short prompt runs still complete successfully on this machine.
+- Raised the automatic short-prompt layer budget again so the default runtime now aims for 24 carried layers instead of 12 on short prompt sessions, while still using prompt-length-sensitive reductions for longer prompts.
+- Runtime + desktop tests: 24/24 passed again after the 24-layer default change.
+- Verified the updated live default prompt runtime with `hello world` and `max_new_tokens=4`; it now uses 24 carried layers by default and generated `您好 {{--<../../../zego`.
+- Probed the real Qwen runtime at 40 layers and at the full 48-layer stack; both short prompt runs completed successfully on this machine.
+- Promoted the short-prompt default to the full carried stack for short prompt sessions instead of leaving the runtime below verified headroom.
+- Runtime + desktop tests: 24/24 passed again after the full-stack default change.
+- Verified the updated live default prompt runtime with `hello world` and `max_new_tokens=4`; it now uses all 48 carried layers by default and generated `Hello! How can`.
+- 2026-04-27: Started the handoff-to-Codex workstream by running a full project health check. There is no `.git` repository in `C:\Users\isale\Documents\pcketlm`, but the Python suite passed cleanly at `74` tests before new work began.
+- Added `pcketlm.core.model_families` as the first product-level model-family metadata layer, with priority order Qwen, Kimi, Kronos/Kronk, then Gemma. Qwen is marked `active`; the next families are marked `planned`.
+- Updated model import to normalize known family aliases before writing registry records, so values like `qwen2`, `kronk`, and `gemma3` map to stable family keys.
+- Connected the desktop status view to family labels and runtime support status instead of hardcoding Qwen in every product-facing path.
+- Added a first desktop `Model Home` summary that shows the selected model as a flexible surface for chat, personalization, comparison, inspection, and benchmarking. This keeps the product direction aligned with direct model loading and non-linear user workflows.
+- Added focused model-family tests and updated desktop status tests. Full verification now passes at `77` tests.
+- Turned the desktop `Model Home` into clickable actions. Chat scrolls/focuses the existing local chat surface, Inspect opens the existing details view, and unfinished actions stay honest instead of pretending artifact flows exist.
+- Added `pcketlm.core.benchmark.readiness` so the Benchmark action can report benchmark readiness, first planned checks, blockers, and recommended runtime path without running an expensive generation benchmark yet.
+- Added built-in safe personalization profile templates under `pcketlm.core.profiles.templates`: Balanced Local, Agent Coder, and Low Memory. These are targets only; artifact generation is still not enabled.
+- Changed desktop chat labels from prompt-test wording to product-facing chat wording.
+- Full verification now passes at `82` tests after the model-home/profile/benchmark-readiness slice.
+- Reproduced the user's suspected chat bug by running a real prompt smoke check. The Qwen runtime worked, but a 4-token `hello world` check took about two minutes, meaning the desktop appeared frozen because generation ran on the Tkinter UI thread.
+- Fixed desktop chat execution by moving `run_prompt_decode_loop` into a background thread, disabling the Send button while a prompt is active, and showing a local generation working state.
+- Re-ran the full test suite: `82` tests passed.
+- Re-ran a real Qwen prompt smoke check with `hello world`, `max_new_tokens=2`, and repetition penalty `1.1`; it generated `Hello!`, reported `ready: true`, and had no blockers.
+- Launched a fresh desktop app window after the fix so the user can test the updated chat behavior instead of the older frozen window.
+- Lowered the desktop chat default from `8` to `2` max new tokens and added a visible alpha-runtime speed hint. This makes the current product easier to test while the real speed work is still unfinished.
+- Re-ran unit tests: `83` passed.
+- Re-ran the real Qwen smoke check after the default change. `hello world` with `max_new_tokens=2` generated `Hello!`, reported `ready: true`, and took about `67` seconds.
+- Compared runtime layer budgets on the live Qwen smoke prompt. `8` layers took about `24` seconds but generated `findFirstOrCreate`; `16` layers took about `33` seconds but generated rough mixed text; `32` layers took about `48` seconds and generated Japanese-like text; full stack took about `67` seconds and generated the cleanest current `Hello!` result.
+- Added a desktop runtime mode selector: Fast (`8` layers), Balanced (`32` layers), and Quality (`full stack`). Balanced is now the default for faster alpha testing, while Quality remains available for the best current output.
+- Added mtime-aware caching for tensor catalog and tensor execution-plan JSON reads. This kept tests green but only slightly improved real runtime, confirming metadata reads are not the main bottleneck.
+- Ran cProfile on the prompt path. For an `8`-layer, one-token smoke check, the dominant runtime costs were repeated `.float()` conversion of loaded tensors and `torch._C._nn.linear`; safetensors `get_tensor` itself was not the dominant cost.
+- Re-ran unit tests: `84` passed.
+- Re-ran the real Balanced-mode Qwen smoke check. `hello world` with `max_new_tokens=2`, `32` layers, and repetition penalty `1.1` completed in about `47` seconds, ready with no blockers, but quality drifted compared with full-stack mode.
+- Added PyTorch `inference_mode` around the heavy prompt/layer/decode paths and cached small layer-bridge config JSON reads with mtime invalidation.
+- Re-ran unit tests: `84` passed.
+- Re-ran the real Balanced-mode Qwen smoke check after inference-mode/config caching. `hello world` with `max_new_tokens=2`, `32` layers, and repetition penalty `1.1` completed in about `44` seconds, ready with no blockers.
+- Added persisted lightweight benchmark runs under each model's `benchmarks` directory and a `latest.lightweight-benchmark.json` snapshot. The desktop Benchmark action now saves this lightweight result before showing the summary.
+- Re-ran unit tests: `85` passed.
+- Re-ran the real Balanced-mode Qwen smoke check after benchmark persistence. The prompt path stayed ready with no blockers.
+- Added `pcketlm.core.runtime.tensor_residency`, a memory-capped cache for converted CPU tensors with environment-tunable limits, LRU eviction, and runtime counters.
+- Changed the layer bridge so `_load_required_tensor` uses the residency layer instead of directly returning `loaded.tensor.float()`. This keeps the generation math path stable while making conversion reuse tunable.
+- Added focused tensor residency tests covering reuse, skip behavior for oversized tensors, and cache reset behavior.
+- Re-ran the full unit suite after tensor residency: `88` tests passed.
+- Re-ran the real Balanced-mode Qwen smoke check after tensor residency. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, `32` layers, and repetition penalty `1.1` completed in about `48` seconds, reported `ready: true`, and had no blockers.
+- Added tensor residency stats to lightweight benchmark result JSON and the desktop Benchmark message, including hits, misses, resident tensors, resident MB, evictions, and skips.
+- Re-ran the full unit suite after benchmark-stat wiring: `88` tests passed.
+- Re-ran the real Balanced-mode Qwen smoke check after benchmark-stat wiring. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, `32` layers, and repetition penalty `1.1` completed in about `48` seconds, reported `ready: true`, and had no blockers.
+- Measured the first broad tensor cache policy in-process on the real Balanced Qwen path. It completed in about `47` seconds but showed `0` cache hits, `770` misses, `450` stores, `406` evictions, and about `252 MB` resident tensors, proving the policy was safe but not useful.
+- Changed tensor residency admission to keep only a front-layer warm window by default. The current defaults are `256 MB` total cache, `32 MB` per tensor, and `6` front layers, all tunable through environment variables.
+- Measured the tuned front-layer policy in-process on the real Balanced Qwen path. It completed in about `46` seconds and showed `43` hits, `727` misses, `43` stores, `0` evictions, and about `252 MB` resident tensors.
+- Tested a larger projection-cache variant with `1` front layer, `128 MB` per tensor, and `256 MB` total cache. It completed in about `46` seconds with fewer hits, so the safer six-front-layer default remains the chosen policy.
+- Re-ran the full unit suite after front-layer cache tuning: `89` tests passed.
+- Re-ran the real Balanced-mode Qwen CLI smoke check after front-layer cache tuning. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, `32` layers, and repetition penalty `1.1` completed in about `50` seconds, reported `ready: true`, and had no blockers.
+- Measured decode-tail chunk sizes on the real Balanced Qwen CLI path. `8192` rows produced the same output and measured faster than `4096`, while `16384` was slower on this machine.
+- Changed the default lm_head decode-tail chunk size from `4096` to `8192` rows and exported the default through the runtime package so the CLI and app share one value.
+- Measured a real Qwen layer-0 projection and found bfloat16 linear math was far faster than float32 for that projection, with close mean output magnitude.
+- Added `PCKETLM_RUNTIME_MATH_DTYPE` support, including `bfloat16` and `float32` modes, then verified the tiny runtime fixture in bfloat16 mode.
+- Found and fixed a bfloat16 safety issue where same-dtype tensors could keep safetensors-backed storage after the shard handle closed. The residency loader now clones same-dtype converted tensors into owned CPU memory.
+- Verified isolated real Qwen layer-0 and decode-tail execution in bfloat16 mode after the residency clone fix.
+- Verified the real in-process Balanced Qwen prompt path in bfloat16 mode: it completed in about `36.5` seconds, returned the same generated token ids `[89015, 107162]`, and had no blockers.
+- Promoted bfloat16 to the default runtime math dtype while keeping `PCKETLM_RUNTIME_MATH_DTYPE=float32` as an escape hatch.
+- Re-ran the full unit suite after bfloat16 became the default: `91` tests passed.
+- Re-ran the real Balanced-mode Qwen CLI smoke check with default bfloat16 math. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, `32` layers, and repetition penalty `1.1` completed in about `38.5` seconds, reported `ready: true`, and had no blockers.
+- Added runtime setting visibility to lightweight benchmark result JSON and the desktop Benchmark message, including math dtype and lm_head chunk rows.
+- Rechecked the Quality full-stack path after the bfloat16 speed change. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, `48` layers, and repetition penalty `1.1` completed in about `61` seconds, generated `Hello!`, and had no blockers.
+- Changed the desktop chat default from Balanced to Quality because Balanced is faster but still drifts on the live Qwen smoke check, while Quality produces the clean current answer.
+- Updated desktop runtime hints so the estimated time changes by mode: Fast is under 30 seconds, Balanced is about 40 seconds, and Quality is about 1 minute for the current 2-token default.
+- Re-ran the full unit suite after the desktop default/mode-hint change: `91` tests passed.
+- Re-ran the real default Quality-mode Qwen smoke check without forcing a layer count. `hello world` with `max_new_tokens=2`, `min_new_tokens=1`, and repetition penalty `1.1` completed in about `60` seconds, generated `Hello!`, and had no blockers.
+- Added a measured benchmark backend that times Fast, Balanced, and Quality prompt runs, stores generated text, token ids, blockers, stop reason, runtime settings, and tensor residency stats, then writes `latest.measured-benchmark.json`.
+- Wired the desktop Benchmark action to run the measured benchmark in a background thread and show a compact comparison when it completes.
+- The first real measured benchmark exposed a readiness bug where plain CPU RAM warnings were treated as blockers even though the measured runtime path completed. Fixed that logic so completed measured cases can be ready while RAM limitations stay visible as warnings.
+- Re-ran the full unit suite after measured benchmark wiring and readiness-status correction: `93` tests passed.
+- Ran the real measured Qwen benchmark and saved it under `models/qwen2.5-14b-instruct/benchmarks`. Results: Fast `12.33s` -> `findFirstOrCreate`; Balanced `39.72s` -> `こんにちは世界的`; Quality `57.14s` -> `Hello!`; benchmark status `Measured benchmark ready`.
+- Imported the new Pocket LLM design direction into the product by adding a local web UI shell with the same dark sidebar structure: Chat, Load Model, Personalize, Benchmarks, Agents, and Settings.
+- Added `pcketlm.app.web.main`, a small stdlib HTTP server that serves the web assets and exposes local API routes for `/api/status`, `/api/chat`, and `/api/benchmark`.
+- Repointed `launch_pcketlm.pyw` to launch the new local web UI instead of the older Tkinter desktop screen.
+- Replaced the template's fake Claude/demo chat behavior with calls to the real Pocket LLM local runtime through `/api/chat`.
+- Wired the web Benchmark screen to the real measured benchmark backend through `/api/benchmark`.
+- Added focused web tests for mode mapping and prompt-result serialization.
+- Re-ran the full unit suite after adding the web UI shell: `95` tests passed.
+- Ran a local web-server smoke check. The new HTML served successfully, `/api/status` resolved `qwen2.5-14b-instruct`, the model list contained one model, and the profile list contained the three built-in templates.
+- Ran a real Qwen smoke check through the new web API route. Quality mode generated `Hello!` from `hello world`, reported ready, and had no blockers.
+- Added bounded recent-history support to `/api/chat`, including UI role normalization, placeholder filtering, and a compact transcript wrapper before the current user message.
+- Updated the web chat UI so it sends the last few local turns, shows a live elapsed-time status while Qwen is running, and defaults to `4` max new tokens instead of `2`.
+- Added focused web tests for chat history normalization and conversation prompt construction.
+- Re-ran the full unit suite after conversation-history wiring: `98` tests passed.
+- Ran a real Qwen web API smoke check with two previous conversation turns. The route returned HTTP `200`, `ready: true`, no blockers, `conversation_turn_count: 2`, and completed in about `59` seconds for `2` generated tokens. The tiny output was still mixed-language, so the next runtime concern is answer quality rather than the web history path.
+- Switched web chat history from a plain transcript wrapper to real Qwen chat-message formatting when `<|im_start|>` and `<|im_end|>` are available locally, while keeping the transcript wrapper as fallback for other model families.
+- Added a Pocket LLM web-system prompt so default web replies are instructed to stay English, brief, and direct.
+- Tested the first formatted-history Quality check with `4` tokens. It was ready with no blockers, but still produced mixed-language text and an invented `defaultManager`, which showed the web formatting alone was not enough.
+- Found that the automatic prompt budget was reducing chat-history prompts below the full stack once they passed `32` prompt tokens. Changed short-answer runs to keep the full stack for prompts under `256` tokens.
+- Re-ran the full unit suite after the quality fix: `101` tests passed.
+- Re-ran the real Qwen web memory check with two previous turns and `max_new_tokens=4`. The route returned HTTP `200`, `ready: true`, no blockers, `preformatted_chat: true`, `prompt_token_count: 61`, `48` cache layers, and generated `Your name is Sam` in about `99` seconds.
+- Added a background chat-job layer for the web server. `/api/chat/start` creates a job, `/api/chat/status` polls it, and `/api/chat/cancel` marks it canceled while preserving `/api/chat` as the simple synchronous compatibility route.
+- Updated the web chat UI to use start/status polling, show elapsed job state, expose Cancel during active generation, and expose Retry after a previous request.
+- Re-ran the full unit suite after the background-job UI/API work: `103` tests passed.
+- Ran a real Qwen background-job smoke check through `/api/chat/start` and `/api/chat/status`. The job completed with HTTP `202` on start, final status `completed`, `ready: true`, no blockers, and generated `Hello` from `hello world` in about `25` seconds for `1` token.
+- Added cooperative cancellation hooks across the runtime path used by web chat: prompt decode loop checks, layer-stack per-layer checks, K/V decode-step checks, and streamed `lm_head` chunk checks in the decode tail.
+- Passed the web job's cancel state into `run_prompt_decode_loop`, so a canceled job can stop inside the active runtime path instead of waiting until the full response is produced.
+- Added focused cancellation coverage for prompt decode and web chat job payloads.
+- Re-ran the full unit suite after runtime cancellation wiring: `104` tests passed.
+- Ran a real Qwen cancel smoke check through `/api/chat/start` and `/api/chat/cancel`. The job reached final status `canceled`, with `cancel_requested: true`, no kept result, and about `4` seconds wall time.
+- Re-ran a normal real Qwen background-job completion after the cancellation smoke. It completed with `ready: true`, no blockers, and generated `Hello` in about `25` seconds for `1` token.
+- Cleaned up many duplicate `launch_pcketlm.pyw` processes that had accumulated from repeated relaunch checks. This removed resource pressure that was distorting runtime experiments.
+- Tested unsafe large-tensor cache variants and rejected them after the process failed early under larger projection caching. The current weak-hardware cache policy remains conservative.
+- Measured PyTorch CPU thread counts on the real Qwen Quality path. On the current 16-core machine, `14` threads gave the best observed 1-token result while preserving the same generated output.
+- Added automatic runtime thread configuration with `PCKETLM_TORCH_THREADS` as an override. Auto mode keeps two cores free on larger machines and caps the default at `14` threads.
+- Re-ran the real Qwen Quality `hello world` check after thread auto-configuration. The 2-token path generated `Hello!`, ready with no blockers, in about `57` seconds.
+- Added a fixed web app port (`8765`) and single-instance lock port (`8764`) so repeated launches reuse the existing Pocket LLM server instead of accumulating duplicate local runtimes.
+- Re-ran the full unit suite after the speed and singleton-launch work: `107` tests passed.
+- Verified a double-launch check: one server process owned both the app port and lock port, and `/api/status` resolved `qwen2.5-14b-instruct`.
+- Ran a live web-job Qwen smoke check against `http://127.0.0.1:8765`: Quality generated `Hello`, ready with no blockers, in about `25.6` seconds for `1` token.
+- Added runtime phase timings to the prompt path and K/V continuation step, including stack totals, average layer time, and slowest layer time.
+- Added a streamed top-k decode-tail path for policies that can select directly from top-k candidates, avoiding full logits materialization on greedy and top-k-sample paths.
+- Re-ran focused runtime/web tests after the timing and top-k work: `37` tests passed.
+- Re-ran the full unit suite after the timing and top-k work: `108` tests passed.
+- Re-ran a clean real Qwen Quality timing check. `hello world` with `max_new_tokens=2` generated `Hello!`, ready with no blockers, in about `49.6` seconds. Timing showed prefill stack about `24.3s`, prefill decode tail about `1.0s`, continuation stack about `23.0s`, and continuation decode tail about `1.0s`.
+- Restarted the updated web app on `http://127.0.0.1:8765` and verified the background-job route. Quality generated `Hello`, ready with no blockers.
+- Added a safe full-stack speed pass: all-layer small-tensor residency, cached RoPE trig tables, math-dtype token entry, and optional layer-summary reductions so normal chat does less debug-only work.
+- Re-ran focused runtime/web/tensor tests after the speed pass: `43` tests passed.
+- Re-ran the full unit suite after the speed pass: `109` tests passed.
+- Re-ran a clean real Qwen Quality timing check. `hello world` with `max_new_tokens=2` generated `Hello!`, ready with no blockers, in about `42.7` seconds. Timing showed prefill stack about `20.6s`, prefill decode tail about `0.9s`, continuation stack about `20.0s`, and continuation decode tail about `0.9s`.
+- Restarted the updated web app on `http://127.0.0.1:8765` and verified the background-job route. Quality generated `Hello`, ready with no blockers, in about `21.0` seconds for `1` token.
+- Added runtime visibility to the web UI: completed chat runs now expose timing/cache/runtime settings in a collapsible runtime details panel, and Settings shows the current runtime dtype, thread count, lm-head chunk size, and cache counters.
+- Changed `/api/status` to include a direct-runtime status that can say `Working` when the Pocket direct runtime path is usable, even if the older full-RAM/Transformers preflight still warns.
+- Re-ran the full unit suite after runtime visibility/status cleanup: `109` tests passed.
+- Restarted the web app on `http://127.0.0.1:8765`. `/api/status` reported `qwen2.5-14b-instruct`, direct runtime `Working`, `bfloat16` math, `14` torch threads, and `8192` lm-head chunk rows.
+- Ran a live web background-job smoke check after the cleanup. Quality generated `Hello`, ready with no blockers, in about `22.9` seconds for `1` token and returned timing/runtime settings data.
+- Polished web chat cancellation so canceled jobs remove the temporary assistant placeholder from the transcript and leave Retry available.
+- Upgraded the Benchmarks screen to show richer result cards with generated text, layer count, ready/blocked state, tensor-cache hits, resident cache size, and latest runtime settings.
+- Reworked the Load Model screen to show active direct runtime status, the local model folder, and the current support plan for Qwen, Kimi, Kronos/Kronk, and Gemma.
+- Re-ran the full unit suite after chat/benchmark/load product cleanup: `109` tests passed.
+- Restarted the web app on `http://127.0.0.1:8765` and verified the new runtime/load/benchmark page assets are served.
+- Ran a live cancel smoke check after the UI cleanup. The job reached final status `canceled`, kept no result, and had no error.
+- Ran a live normal web background-job smoke check after the cancellation check. Quality generated `Hello`, ready with no blockers, in about `23.6` seconds for `1` token.
+- Added persisted per-model profile records under `models/<model_id>/profiles`, seeded from the three free templates.
+- Added profile comparison summaries that compare saved profile targets against the current default Quality baseline and latest benchmark cases when available.
+- Updated `/api/status` to return saved profile records and the profile comparison payload.
+- Added a Compare screen to the web UI and changed Personalize to render saved profile records instead of unsaved templates.
+- Re-ran focused profile/web tests after saved profile and Compare wiring: `15` tests passed.
+- Re-ran the full unit suite after saved profile and Compare wiring: `111` tests passed.
+- Restarted the web app on `http://127.0.0.1:8765`; `/api/status` returned saved profile ids `balanced-local`, `agent-coder`, and `low-memory`, with `profile_compare.profile_count: 3`.
+- Ran a live normal web background-job smoke check after the profile/Compare wiring. Quality generated `Hello`, ready with no blockers, in about `25.1` seconds for `1` token.
+- Added operation-level timing inside the layer bridge so full-stack runs now report tensor-load time, norms, Q/K/V projection, RoPE, attention, output projection, MLP, and decode-tail costs.
+- Added scaled-dot-product attention as the default attention implementation with manual attention as a fallback, plus cached causal masks for repeated decode shapes.
+- Tested persistent safetensors handle caching against the real Qwen model. Unit tests passed, but the real process exited silently, so the cache was made opt-in through `PCKETLM_SAFETENSOR_HANDLE_CACHE=1` instead of default.
+- Added safe batched tensor loading by shard and a batched residency path for cache misses.
+- Wired the layer bridge to batch-load norms, Q/K/V tensors, and MLP projection weights. A measured attempt to also batch the output projection was slower, so it was reverted.
+- Re-ran focused runtime/tensor tests after the heavy loading pass: `38` tests passed.
+- Re-ran the full unit suite after the heavy loading pass: `113` tests passed.
+- Re-ran a clean real Qwen Quality timing check. `hello world` with `max_new_tokens=2` generated `Hello!`, ready with no blockers, in about `40.5` seconds. Timing showed prefill stack about `19.9s`, continuation stack about `18.4s`, and each decode tail below `1.0s`.
+- Restarted the web app on `http://127.0.0.1:8765` and verified `/api/status` still reports the direct Pocket runtime as working.
+- Re-ran a live web background-job smoke check after the heavy loading pass. Quality generated `Hello`, ready with no blockers, in about `20.7` seconds for `1` token.
+- Tested a larger front-layer residency window under the existing `256 MB` cap. `PCKETLM_TENSOR_CACHE_FRONT_LAYERS=12` kept resident cache at about `253 MB`, had no evictions, and moved the clean real Qwen Quality 2-token timing to about `35.3` seconds.
+- Changed the default front-layer residency window from `6` to `12` while keeping the total cache cap unchanged.
+- Added regression coverage for the default `12`-front-layer policy.
+- Re-ran focused runtime/tensor tests after the residency-window pass: `39` tests passed.
+- Re-ran a clean real Qwen Quality timing check after making the `12`-layer window default. `hello world` with `max_new_tokens=2` generated `Hello!`, ready with no blockers, in about `36.1` seconds. Cache stats showed `265` stores, `265` hits, `0` evictions, and about `253 MB` resident.
+- Re-ran the full unit suite after the residency-window pass: `114` tests passed.
+- Re-ran a longer real Qwen Quality check with `max_new_tokens=4`. It generated `Hello! How can`, completed all `4` steps, stayed ready with no blockers, and took about `85.0` seconds.
+- Restarted the web app on `http://127.0.0.1:8765`; `/api/status` reported the direct Pocket runtime as working.
+- Re-ran a live web background-job smoke check after the residency-window pass. Quality generated `Hello`, ready with no blockers, in about `26.9` seconds for `1` token. The web process reported very low free RAM at status time, so this smoke confirms stability more than best-case speed.
+- Added a low-memory guard to tensor residency. When free RAM is below `2 GB`, the default policy now downgrades to `128 MB` resident cache and `6` front layers, while explicit `PCKETLM_TENSOR_CACHE_MB` and `PCKETLM_TENSOR_CACHE_FRONT_LAYERS` overrides are still honored.
+- Added a short-lived memory-snapshot cache so the guard does not call the Windows memory API for every tensor load. A 1000-policy-check timing took about `0.005s` after the cache.
+- Exposed the effective residency policy in web runtime settings as `tensor_residency_policy`, including max cache, front-layer count, free memory, and whether the guard is active.
+- Re-ran focused runtime/web/tensor tests after the low-memory guard: `47` tests passed.
+- Re-ran the full unit suite after the low-memory guard: `116` tests passed.
+- Re-ran the standalone real Qwen Quality timing check after the guard. `hello world` with `max_new_tokens=2` generated `Hello!`, ready with no blockers, in about `41.5` seconds. Policy was not guarded on that run because free RAM was about `4.05 GB`; resident cache was about `253 MB`, with no evictions.
+- Restarted the web app on `http://127.0.0.1:8765`; `/api/status` showed the direct runtime working and included the effective tensor residency policy.
+- Re-ran a live web background-job smoke check after the guard pass. Quality generated `Hello`, ready with no blockers, in about `21.9` seconds for `1` token.
+- Added `build_measured_benchmark_history`, which reads persisted measured benchmark JSON files and summarizes best, average, and worst timings for each mode.
+- Added benchmark history to `/api/status` and rendered it on the Benchmarks screen.
+- Added `get_saved_profile` and light saved-profile behavior in web chat. A chat request can now include `profile_id`; the backend can apply profile runtime mode and default max-new-token settings, and the result reports the active profile id/label.
+- Added a profile picker to the web Chat composer. Selecting a profile updates mode/default token controls on the client and sends the profile id to the backend.
+- Added cache policy and cache cap to runtime detail grids so users can see when the low-RAM guard changes behavior.
+- Re-ran focused benchmark/profile/web tests after the medium groundwork pass: `20` tests passed.
+- Re-ran the full unit suite after benchmark-history and profile behavior wiring: `118` tests passed.
+- Re-ran two short real Qwen CLI prompt checks beyond `hello world`. Both were ready with no blockers, but 2-token outputs (`Pocket L`, `Certainly!`) confirmed that quality cannot be judged from tiny token budgets and should move to the high-effort decode-quality phase.
+- Restarted the web app on `http://127.0.0.1:8765`; `/api/status` reported direct runtime `Working`, `2` benchmark history runs, `3` saved profiles, and memory guard inactive.
+- Ran a web smoke through the `low-memory` profile without explicit mode/token fields. It completed ready with no blockers, used `profile_id: low-memory`, carried `32` layers, generated `3` tokens, and took about `47.6` seconds. Output was mixed-language/rough, so profile routing works but Balanced/Low-Memory quality needs the next high-effort decode pass.
+- Ran the high-phase quality pass for the first Qwen path. The main finding was that Low Memory was customer-facing but still using the known-rough 32-layer Balanced preview path.
+- Changed Low Memory defaults to Quality while preserving short responses and high memory priority, so weak-hardware users get the safer full-stack answer path instead of mixed-language partial-layer output.
+- Added migration for saved built-in profiles: when a built-in default profile exists locally but its template defaults changed and no optimized artifact is ready, `ensure_default_profiles` refreshes the saved runtime/settings defaults.
+- Added default Qwen chat stop markers to web chat requests and trimmed generated stop markers from visible assistant text in the runtime result.
+- Re-ran focused runtime/profile/web tests after the high-phase quality pass: `44` tests passed.
+- Re-ran the full unit suite after the high-phase quality pass: `120` tests passed.
+- Restarted the web app on `http://127.0.0.1:8765`. Status reported direct runtime `Working`, Low Memory runtime mode `Quality`, and the saved profile comparison now maps Low Memory to the Quality baseline.
+- Ran a 3-token real Low Memory web smoke after the profile change. It generated `Hello! How`, ready with no blockers, in about `57.6` seconds.
+- Restarted again after the stop-marker trim and ran a shorter real Low Memory web smoke. It generated `Hello`, ready with no blockers, in about `26.6` seconds for `1` token.
+- Updated the current Qwen heavy-engineering foundation estimate to about `52%`: profile quality routing and stop-marker cleanup are better, but speed, longer conversation quality, and real optimized profile artifacts remain unfinished.
+- Ran the medium prep phase before the next high-speed phase. The live status was healthy: direct runtime `Working`, Low Memory mode `Quality`, and benchmark history had `2` measured runs.
+- Added persisted timing summaries to measured benchmark cases. Fresh benchmark cases now include stack time, tensor-load time, decode-tail time, total time, and the current bottleneck alongside the raw runtime timings.
+- Added timing-summary aggregation to benchmark history. Fresh history labels can now show average stack, average tensor-load, and average decode-tail time per mode.
+- Updated the Benchmarks screen so fresh benchmark data displays timing chips in the app surface, not only in terminal/debug output.
+- Re-ran focused benchmark and web tests after the timing-summary pass: `16` tests passed.
+- Re-ran the full unit suite after the timing-summary pass: `120` tests passed.
+- Ran `python -m compileall src tests -q` cleanly.
+- Restarted the web app on `http://127.0.0.1:8765` and ran a real Low Memory web smoke. It generated `Hello`, ready with no blockers, in about `19.0` seconds for `1` token. The returned timings showed total about `19.0s` and prefill stack about `17.7s`, confirming the next high phase should target full-stack speed.
+- Updated the current Qwen heavy-engineering foundation estimate to about `56%`: measurement and next-phase visibility are better, while the next high phase still needs actual speed gains.
+- Ran the high-phase runtime identity/fidelity pass. The main user-visible issue was that Qwen did not know it was running inside Pocket LLM or which model was loaded unless that context was explicitly in the prompt.
+- Added a runtime identity system prompt for web chat. It tells the model it is answering inside Pocket LLM, gives the current loaded model id/name, runtime mode, active profile, and tells it how to answer model-identity questions.
+- Added `runtime_context` to web chat responses so the frontend/debug surface can confirm the actual model/profile/mode used.
+- Added a small safe speed cleanup around metadata: Qwen chat-token support is cached per model id, and tokenizer/generation JSON reads now use an mtime-aware cache.
+- Re-ran focused web/runtime tests after the identity pass: `40` tests passed.
+- Re-ran the full unit suite after the identity pass: `121` tests passed.
+- Ran `python -m compileall src tests -q` cleanly.
+- Restarted the web app on `http://127.0.0.1:8765` and ran a model-identity smoke. It generated `Qwen2.5-14`, ready with no blockers, in about `184.8` seconds for `8` tokens, while `runtime_context.model_label` reported `Qwen2.5-14B-Instruct`.
+- Ran a basic logic smoke. It generated `YES` for `If 2 plus 3 equals 5, answer YES only.`, ready with no blockers, in about `27.0` seconds for `1` token.
+- Updated the current Qwen heavy-engineering foundation estimate to about `61%`: context/identity and basic logic are now proven, but speed remains the central blocker because 8 tokens took over three minutes.
+- Started the Quality speed phase by inspecting the live runtime status and stack/tensor paths. Status was healthy: direct runtime `Working`, Low Memory mode `Quality`, and the resident cache held about `253 MB`.
+- Added a local runtime-context answer path for clear model-identity questions. Pocket LLM now answers known app/runtime facts itself instead of sending them through a full Qwen decode.
+- Added mtime-aware caching for the built layer bridge config object, reducing repeated config construction during full-stack layer passes.
+- Added regression coverage proving model-identity questions do not call `run_prompt_decode_loop`.
+- Re-ran focused web/runtime tests after the speed shortcut: `42` tests passed.
+- Re-ran the full unit suite after the speed shortcut: `123` tests passed.
+- Ran `python -m compileall src tests -q` cleanly.
+- Restarted the web app on `http://127.0.0.1:8765`. `Which model do you run on?` now returned `Qwen2.5-14B-Instruct (qwen2.5-14b-instruct)` in about `0.015` seconds with strategy `local-runtime-context-answer`, instead of the previous Qwen path that took about `184.8` seconds for a partial identity answer.
+- Re-ran the real Qwen logic path after the shortcut. `If 2 plus 3 equals 5, answer YES only.` generated `YES`, ready with no blockers, in about `29.0` seconds for `1` token, with prefill stack about `27.4s`.
+- Updated the current Qwen heavy-engineering foundation estimate to about `64%`: deterministic runtime facts are now fast and reliable, but general Quality generation is still slow and needs deeper full-stack optimization.
+- Continued the full-stack speed phase with a real timing probe. A normal Qwen logic request caused the web connection to close after about `93s`; checking status showed the local server process was gone.
+- Restarted with the residency guard raised to `3 GB`, then tried the logic prompt while status reported about `1.21 GB` free RAM. The server still crashed, proving that very low RAM needs a hard pre-run block, not only a smaller residency cache.
+- Added a hard web-chat memory guard: below `2 GB` free RAM, Pocket LLM now returns a clear `memory-guard` blocker instead of starting model generation.
+- Added `PCKETLM_TENSOR_CACHE_LOW_MEMORY_GUARD_MB` so the conservative residency threshold can be overridden for advanced experiments, while defaulting to `3 GB`.
+- Re-ran focused web/tensor/runtime tests after the hard memory guard: `56` tests passed.
+- Re-ran the full unit suite after the hard memory guard: `127` tests passed.
+- Ran `python -m compileall src tests -q` cleanly.
+- Restarted the web app on `http://127.0.0.1:8765`. With about `0.74 GB` free RAM, `Which model do you run on?` still returned instantly through the local context path, and the real Qwen logic prompt returned a clean `memory-guard` blocker instead of crashing.
+- Updated the current Qwen heavy-engineering foundation estimate to about `65%`: low-RAM stability improved, but real general-generation speed still requires enough free RAM to run benchmarks safely.
+- Continued the Quality speed phase after freeing RAM. A fresh Low Memory/Quality logic smoke returned `YES` in about `24.6s`; timings showed tensor loading as the largest cost at about `17.7s`.
+- Added an mtime-aware tensor-name index and wired it through tensor catalog lookup users, replacing repeated full-list scans in hot runtime paths.
+- Re-ran focused runtime/tensor tests after the tensor-index pass: `19` tests passed.
+- Re-ran the full unit suite after the tensor-index pass: `127` tests passed.
+- Restarted the web app and re-ran the real logic smoke. The stable path remained correct (`YES`), with a warm repeat around `21.9s`, though cold timings remained noisy.
+- Tested persistent safetensors handle caching as a default speed lever in batched tensor loading. It passed focused and full tests, but the real Qwen web request dropped the connection and killed the server after about `24s`, so the default was reverted to opt-in.
+- Shortened the web runtime identity prompt to reduce repeated prompt prefill work while still telling Qwen the app, model, mode, profile, and model-identity answer.
+- Re-ran focused web/runtime/tensor tests after the prompt-speed pass: `36` tests passed.
+- Re-ran the full unit suite after the prompt-speed pass: `127` tests passed.
+- Restarted the web app and re-ran the same Low Memory/Quality logic smoke twice. It returned `YES` with no blockers, prompt tokens dropped from `135` to `121`, cold-ish wall time was about `23.1s`, and warm wall time was about `22.1s`.
+- Updated the current Qwen heavy-engineering foundation estimate to about `68%`: the app is safer and a little faster, but full-stack tensor loading is still the central speed blocker.
+- Added a request-scoped safetensors handle cache as a safer alternative to persistent handle caching. Unit coverage proved it can reuse one shard handle across multiple load calls inside a scope.
+- Wired the request-scoped handle cache into the prompt loop and re-ran focused tests: `50` tests passed, then the full suite passed with `128` tests.
+- Real web validation showed the request-scoped handle cache still crashed the server, even with enough free RAM. It is now guarded behind `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1` and remains off by default.
+- Raised the hard web-chat memory guard from `2 GB` to `3 GB` because a live run crashed around `2.8 GB` free RAM.
+- Tightened the runtime identity prompt further to reduce repeated prefill cost. Focused tests passed (`50`), then the full suite passed (`128`).
+- Restarted the web app and re-ran the same Low Memory/Quality logic smoke twice. It returned `YES` with no blockers, prompt tokens dropped to `76`, cold-ish wall time was about `22.8s`, and warm wall time was about `21.3s`.
+- Updated the current Qwen heavy-engineering foundation estimate to about `70%`: prompt cost and crash resistance improved, while tensor loading remains the main speed bottleneck.
+- Added cumulative tensor-load diagnostics to the runtime. Web status and chat results now expose tensor requests, loaded bytes, shard opens, and handle-reuse counters.
+- Added lightweight conversation-state metadata to chat results so the product can distinguish today's bounded prompt replay from future true KV/session reuse.
+- Added the first optimized-artifact planning module and tests. The manifest is planning-only by design: it creates a reversible artifact target without pretending a derived weight pack exists yet.
+- Built the Qwen Low Memory runtime-pack plan. It wrote `models/qwen2.5-14b-instruct/artifacts/runtime-pack-plan.low-memory.artifact.json`, ready with `579` source tensors, `8` shards, and `48` layers.
+- Re-ran focused diagnostics/artifact/web tests: `24` tests passed.
+- Re-ran the full suite after the artifact pass: `129` tests passed.
+- Restarted the app and confirmed status exposes the ready artifact plan and zeroed tensor-load counters on fresh launch.
+- Ran a real Qwen Low Memory/Quality smoke while free RAM was marginal. It returned `YES`, ready with no blockers, but took about `97.7s`; diagnostics showed `577` tensors loaded, about `25.2 GB` moved, and `198` shard opens.
+- Raised the hard web-chat generation guard from `3 GB` to `4 GB` because live evidence showed `3 GB` still allowed severe memory-pressure runs.
+- Restarted the app again and verified the guard: at about `3.13 GB` free RAM, the same prompt returned `memory-guard` immediately instead of starting generation.
+- Re-ran the full suite after the final guard change: `129` tests passed.
+- Updated the current Qwen heavy-engineering foundation estimate to about `73%`: diagnostics, guard behavior, conversation-state groundwork, and artifact planning are stronger, but real speed still needs a derived runtime pack.
+- Extended the optimized artifact layer from manifest-only to a real small-tensor safetensors pack. The builder clones tensor data out of the original safetensors handles before saving so the pack materialization stays stable.
+- Added artifact-aware tensor loading with safe fallback. Packed tensors are loaded from the Pocket runtime pack when present; all missing tensors still load from the original source shards.
+- Added diagnostics for artifact pack opens and artifact tensor hits.
+- Added tests for pack materialization and artifact-backed tensor loading.
+- Built the real Qwen Low Memory small pack. It contains `97` repeated small tensors, is about `0.95 MB`, and is recorded in `runtime-pack-plan.low-memory.artifact.json`.
+- Re-ran focused runtime/artifact/web tests after artifact-aware loading: `26` tests passed.
+- Re-ran the full suite after artifact-aware loading: `131` tests passed.
+- Restarted the app and verified `/api/status` reports the artifact ready with `97` packed tensors and zeroed tensor-load counters.
+- Ran the real Low Memory/Quality logic smoke through the artifact path. It returned `YES`, ready with no blockers, in about `22.3s`; diagnostics showed `97` artifact tensor hits and `148` original shard opens.
+- Ran a warm repeat. It returned `YES`, ready with no blockers, in about `20.9s`; small tensors were resident by then, so the pack did not need to be hit again.
+- Updated the current Qwen heavy-engineering foundation estimate to about `78%`: real artifact loading exists and is proven, but the remaining speed bottleneck is still the large projection tensors.
+- Added Tier 2 artifact pack selection for front-layer Q/K/V projection tensors. The default Tier 2 target is the first `2` layers, bounded so the pack does not become a full-model duplicate.
+- Added regression coverage for front-attention packing and verified that only the configured front layer is included in the fixture test.
+- Built the real Qwen Tier 2 Low Memory pack. It now contains `109` tensors and is about `140.97 MB`, combining the small repeated tensors with front `2` layers of Q/K/V projection tensors.
+- Re-ran focused artifact/runtime/web tests after Tier 2: `27` tests passed.
+- Re-ran the full suite after Tier 2: `132` tests passed.
+- Restarted the app and verified status reports direct runtime `Working`, artifact ready, `109` packed tensors, and about `140.97 MB` packed size.
+- Live RAM was below the `4 GB` guard after restart, around `2.31 GB`, so a real generation speed run was correctly blocked. The Qwen logic prompt returned `memory-guard` instead of starting a pressure run.
+- Updated the current Qwen heavy-engineering foundation estimate to about `81%`: Tier 2 artifact creation and loading support are in place, while speed proof requires enough RAM for a guarded run.
+- Ran the next speed-core phase with enough RAM and built a larger `speed-core` runtime pack. It contains `125` tensors and is about `481.0 MB`.
+- Added runtime-pack auto-selection so the app chooses a safe pack for current free RAM. The bigger pack is retained as an artifact, but not selected under the current weak-hardware budget.
+- Added `speed_status` to web status so the app can report selected pack, shard opens, artifact hits, resident cache state, and loaded MB.
+- Live validation rejected the bigger pack as a default: the same `OK` smoke slowed to about `54.9s` and free RAM fell to about `1.77 GB`.
+- Re-tested larger adaptive residency and rolled it back after cache churn produced no useful warm-hit improvement.
+- Final safe real web smoke returned `OK`, ready with no blockers, in about `37.4s` for `2` tokens, with the safer `140.97 MB` Low Memory pack selected.
+- Updated the current Qwen heavy-engineering foundation estimate to about `83%`: the runtime is better guarded and instrumented, but real customer-grade speed needs a deeper execution/backend phase rather than simply larger safetensors packs.
+- Added exact-result response reuse for chat requests. It keys on model, profile, mode, prompt, normalized messages, system prompt, generation settings, and stop strings.
+- Added response-cache status to runtime settings and speed status.
+- Added runtime engine decision diagnostics. Current status reports `direct-cpu` / `torch-cpu` because no supported GPU backend is visible to the current runtime.
+- Live validation: after one real Queen `OK` run, the same `/api/chat` request returned from cache in about `0.454s` wall time with `response_reuse.hit: true`, strategy `+response-cache`, and model elapsed `0.0s`.
+- Re-ran the full unit suite after the reuse/engine phase: `138` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `85%`: exact retries are fast and engine choice is explicit, but new general prompts still need true session-prefix/KV reuse or a different backend.
+- Extended exact-result reuse to the `/api/chat/start` background-job flow. Cached results are now returned as already completed jobs, so the UI does not wait for the polling interval.
+- Updated the web chat UI to finish immediately for already completed jobs and label reused output as cached.
+- Live validation: one real Queen `OK` run filled the cache in about `37.83s`; the repeated `/api/chat/start` request returned a completed cached job in about `0.007s` with `job_fast_path: response-cache` and model elapsed `0.0s`.
+- Re-ran the full unit suite after the instant cached-job phase: `139` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `86%`: product-path retries are instant, while new prompts still require true prefix/KV reuse or backend acceleration.
+- Added `Quick` mode as a full-stack short-answer path: it keeps Quality's full layer count and caps output to `1` token.
+- Request-scoped safetensors handle reuse is now automatic only for one-token runs; live two-token tests proved it must not be forced across continuation decode yet.
+- Selected runtime-pack handles now participate in the scoped one-token path, reducing the live Quick smoke to `8` shard opens and `1` artifact-pack open.
+- Live web API proof: Quick returned `OK`, ready with no blockers, in about `19.4s` wall time; Quality remained stable at about `36.1s` for `2` tokens.
+- Re-ran the full unit suite after the Quick-speed phase: `140` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `88%`: the first fresh short-answer path is now in the 20-second target zone, but longer new prompts still need session-prefix reuse or backend work.
+- Added the first real session-prefix KV reuse mechanism. Web chat now sends a session id, successful runs can store an in-memory KV prefix, and the next run can pass that prefix back into the prompt runtime.
+- The prompt runtime now validates exact token-prefix matches before reuse and falls back to full prefill if model/profile/mode/layer path or token prefix does not match.
+- Added a default append safety cap of `8` tokens because the current CPU append path processes suffix tokens one-by-one; longer suffixes can be slower than normal full prefill.
+- Live proof after restart: first Quick run stored a `64` token reusable prefix; the follow-up matched the `64` token prefix but needed `14` append tokens, so Pocket LLM safely used full prefill and reported the reason.
+- Re-ran the full unit suite after the session-prefix phase: `141` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `89%`: session-prefix machinery is real and guarded, but normal follow-up speed needs batched suffix append or a backend change before it becomes a big speed win.
+- Replaced the one-token prefix append path with batched suffix prefill. The runtime now processes all matched follow-up suffix tokens in one layer-stack pass against the stored KV cache.
+- Raised the default prefix append limit to `64` tokens for the batched path.
+- Live proof after restart: first Quick prompt took about `20.7s`; the follow-up reused `64` prefix tokens, batch-appended `14` new prompt tokens, and returned `OK` in about `17.2s` with no blockers.
+- The reused follow-up spent about `14.1s` in the batched prefix stack and about `1.1s` in decode tail; tensor loading remains the dominant wall.
+- Re-ran the full unit suite after the batched-prefix phase: `141` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `91%`: follow-up reuse now creates a real speed win, while the next large gain needs reducing repeated weight movement or using a different backend.
+- Added a selectable tensor residency boost. The safe default remains conservative, and users can choose the Boosted preset for `288 MB` and `13` front layers when they have more RAM.
+- Rejected the larger `320 MB` / `15` layer residency experiment after live validation showed it made the follow-up path slower instead of faster.
+- Restarted the web app and live-tested the adaptive path. First Quick `OK` took about `19.6s`; the follow-up reused `64` prefix tokens, batch-appended `14`, and returned `OK` in about `17.5s`.
+- Added a Settings screen selector and saved runtime setting for the tensor cache preset, so the boost is opt-in instead of automatic.
+- Re-ran the full unit suite after the selectable residency phase: `144` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `92%`: the policy is more adaptive, but future speed work needs a deeper weight-layout or backend step.
+- Added a front K/V projection pack tier for the optional Boosted path.
+- Built the real Qwen Boosted pack with `153` tensors and about `361.02 MB` of derived weights.
+- Verified selector behavior after restart: Standard selects the `140.97 MB` Low Memory pack; Boosted selects the `361.02 MB` Boosted pack.
+- Verified the rejected `481 MB` speed-core pack no longer becomes the normal high-RAM path.
+- Ran live Quick smokes: Standard returned `OK` in about `18.5s`; Boosted returned `OK` in about `17.9s`.
+- Added cache clearing when runtime presets change and included speed status in chat responses after real runs.
+- Re-ran the full unit suite after the boosted-pack phase: `146` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `94%`: the optional boosted pack is real, but it is not a breakthrough speed layer.
+- Added local backend capability reporting for Direct CPU, CUDA, DirectML, and llama.cpp/GGUF.
+- Live backend report: Direct CPU is active; CUDA is not visible to Torch; DirectML package is missing; llama.cpp/GGUF is recommended but needs `llama-cpp-python` and a GGUF model file.
+- Added backend report output to `/api/status` and the Settings screen.
+- Re-ran the full unit suite after the backend-report phase: `148` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `95%`: the app now knows the next backend target, but the actual backend prototype requires an install/conversion decision.
+- Added `gguf_backend.py` with local GGUF discovery, readiness status, and a prompt-runner interface.
+- Added `gguf_sidecar_runner.py` for a future Python `3.12` llama.cpp sidecar.
+- Created the sidecar environment under `state/backend-envs/gguf-py312`.
+- Tried installing `llama-cpp-python` in the main Python `3.14` runtime with binary wheels only; no matching distribution was available.
+- Tried installing through the documented prebuilt-wheel extra index in the Python `3.12` sidecar; pip downloaded source and failed at native build setup because `nmake`/C++ compiler are missing.
+- Live status now reports the sidecar Python path and still correctly marks GGUF not ready.
+- Re-ran the full unit suite after the GGUF adapter phase: `152` tests passed, and compile verification was clean.
+- Updated the current Qwen heavy-engineering foundation estimate to about `96%`: implementation is ready to plug in a real GGUF runtime once the native package/binary and model artifact are available.

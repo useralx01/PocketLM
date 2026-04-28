@@ -1,0 +1,26 @@
+# big assets — never commit
+models/
+state/llama-server.*.log
+state/streaming/
+state/backend-runtimes/
+state/backend-envs/
+
+# python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# generated runtime state — keep out of source
+state/gguf-smoke-*.txt
+state/runtime-settings.json
+state/llama-server.json
