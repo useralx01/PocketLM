@@ -426,3 +426,8 @@ Latest Qwen 32B policy update:
 Latest verification update:
 - full test suite passed after the 32B default, guardrail, and policy work: `185 passed in 18.90s`
 - current Phase 2 recovery estimate: about `88%` complete. The branch is green after the 32B stability and product-policy changes.
+
+Latest 32B experimental-run preflight:
+- skipped the experimental `8` token 32B live proof because free RAM was about `4830 MB`, below the new `5120 MB` recommended headroom
+- the guardrail correctly reports `stable-low-headroom` and warns that longer-than-`4` token runs are experimental
+- current Phase 2 recovery estimate remains about `88%` complete until the longer proof can run with enough RAM.

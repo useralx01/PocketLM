@@ -1494,3 +1494,25 @@ status=stable-low-headroom
 proven_max_new_tokens=4
 scoped_safetensor_handle_cache.default_enabled=False
 ```
+
+## Phase 2 / Recovery 10 / experimental 8-token preflight
+
+Self-prompt:
+
+```text
+Before trying any longer 32B proof, check current RAM against the new guardrail. If the machine is below the recommended 5 GB headroom, do not start a 5-minute experimental model run; record the blocker instead.
+```
+
+Preflight evidence:
+
+```text
+model_id=qwen2.5-32b-instruct
+requested_max_new_tokens=8
+status=stable-low-headroom
+ready=True
+free_ram_mb=4830
+min_free_ram_mb=4096
+recommended_free_ram_mb=5120
+warning=Qwen 32B is proven to 4 new tokens on this machine; longer runs are experimental.
+decision=do not run experimental 8-token live proof until free RAM is at least 5120 MB
+```
