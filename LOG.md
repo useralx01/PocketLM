@@ -796,3 +796,49 @@ expected_bytes_gb: 61.04
 present_expected_file_count: 3
 expected_file_count: 24
 ```
+## Phase 2 / Step 6
+
+Qwen2.5-32B-Instruct download verification:
+
+```text
+download status: complete
+progress_pct: 100.0
+bytes_on_disk_gb: 61.04
+expected_bytes_gb: 61.04
+present_expected_file_count: 24
+expected_file_count: 24
+folder status: ready
+present_shards: 17
+expected_shards: 17
+missing_core_files: []
+total file bytes: 65539393631
+```
+
+Files in `models/qwen2.5-32b-instruct/original`:
+
+```text
+config.json 663
+generation_config.json 242
+merges.txt 1671839
+model.safetensors.index.json 63248
+model-00001-of-00017.safetensors 3916539832
+model-00002-of-00017.safetensors 3900847496
+model-00003-of-00017.safetensors 3900847480
+model-00004-of-00017.safetensors 3900847544
+model-00005-of-00017.safetensors 3900847544
+model-00006-of-00017.safetensors 3900847544
+model-00007-of-00017.safetensors 3900847544
+model-00008-of-00017.safetensors 3900847544
+model-00009-of-00017.safetensors 3900847544
+model-00010-of-00017.safetensors 3900847544
+model-00011-of-00017.safetensors 3900847544
+model-00012-of-00017.safetensors 3900847544
+model-00013-of-00017.safetensors 3900847544
+model-00014-of-00017.safetensors 3900847544
+model-00015-of-00017.safetensors 3900847544
+model-00016-of-00017.safetensors 3900847544
+model-00017-of-00017.safetensors 3098588976
+tokenizer.json 7031645
+tokenizer_config.json 7305
+vocab.json 2776833
+```
