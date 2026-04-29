@@ -67,6 +67,12 @@ class TensorCatalog:
     tensor_count: int
     shard_count: int
     layer_count: int
+    hidden_size: int | None = None
+    num_hidden_layers: int | None = None
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    vocab_size: int | None = None
+    intermediate_size: int | None = None
     dtype_counts: dict[str, int] = field(default_factory=dict)
     component_group_counts: dict[str, int] = field(default_factory=dict)
     tensors: list[TensorCatalogEntry] = field(default_factory=list)
@@ -81,6 +87,12 @@ class TensorCatalog:
             "tensor_count": self.tensor_count,
             "shard_count": self.shard_count,
             "layer_count": self.layer_count,
+            "hidden_size": self.hidden_size,
+            "num_hidden_layers": self.num_hidden_layers,
+            "num_attention_heads": self.num_attention_heads,
+            "num_key_value_heads": self.num_key_value_heads,
+            "vocab_size": self.vocab_size,
+            "intermediate_size": self.intermediate_size,
             "dtype_counts": dict(self.dtype_counts),
             "component_group_counts": dict(self.component_group_counts),
             "tensors": [entry.to_dict() for entry in self.tensors],
@@ -97,6 +109,12 @@ class TensorCatalog:
             tensor_count=int(payload.get("tensor_count", 0)),
             shard_count=int(payload.get("shard_count", 0)),
             layer_count=int(payload.get("layer_count", 0)),
+            hidden_size=_optional_int(payload.get("hidden_size")),
+            num_hidden_layers=_optional_int(payload.get("num_hidden_layers")),
+            num_attention_heads=_optional_int(payload.get("num_attention_heads")),
+            num_key_value_heads=_optional_int(payload.get("num_key_value_heads")),
+            vocab_size=_optional_int(payload.get("vocab_size")),
+            intermediate_size=_optional_int(payload.get("intermediate_size")),
             dtype_counts={str(key): int(value) for key, value in (payload.get("dtype_counts") or {}).items()},
             component_group_counts={
                 str(key): int(value) for key, value in (payload.get("component_group_counts") or {}).items()
@@ -114,6 +132,22 @@ def tensor_catalog_path(model_id: str) -> Path:
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
+def _model_config_values(model_dir: Path) -> dict[str, int | None]:
+    payload = _read_json(model_dir / "config.json")
+    return {
+        "hidden_size": _optional_int(payload.get("hidden_size")),
+        "num_hidden_layers": _optional_int(payload.get("num_hidden_layers")),
+        "num_attention_heads": _optional_int(payload.get("num_attention_heads")),
+        "num_key_value_heads": _optional_int(payload.get("num_key_value_heads")),
+        "vocab_size": _optional_int(payload.get("vocab_size")),
+        "intermediate_size": _optional_int(payload.get("intermediate_size")),
+    }
 
 
 def _read_safetensors_header(shard_path: Path) -> dict:
@@ -177,6 +211,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
         )
 
     index_payload = _read_json(source.index_path)
+    config_values = _model_config_values(model_dir)
     weight_map = index_payload.get("weight_map") or {}
     if not weight_map:
         return _empty_catalog(model_id, model_dir, ["Safetensors index does not contain a weight map."])
@@ -230,6 +265,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
         tensor_count=len(tensors),
         shard_count=len({entry.shard_name for entry in tensors}),
         layer_count=len(seen_layers),
+        **config_values,
         dtype_counts=dtype_counts,
         component_group_counts=component_group_counts,
         tensors=tensors,

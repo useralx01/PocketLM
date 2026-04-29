@@ -12,6 +12,11 @@
 - Qwen2.5-14B-Instruct reference values from `models/qwen2.5-14b-instruct/original/config.json`: `num_hidden_layers=48`, `hidden_size=5120`, `num_attention_heads=40`, `num_key_value_heads=8`, `vocab_size=152064`, `intermediate_size=13824`.
 - Audit result: no hardcoded 14B architectural shape values were found in the direct page-runtime path that needed replacing. The relevant bridge/runtime code reads these values from `config.json` or safetensors metadata already.
 
+### Phase 2 / Step 3 / Qwen2.5-32B-Instruct reference config
+
+- Reference source: `https://huggingface.co/Qwen/Qwen2.5-32B-Instruct/raw/main/config.json`.
+- Values used by synthetic 32B-shape tests: `num_hidden_layers=64`, `hidden_size=5120`, `num_attention_heads=40`, `num_key_value_heads=8`, `vocab_size=152064`, `intermediate_size=27648`, `max_position_embeddings=32768`, `torch_dtype=bfloat16`.
+
 ### 2026-04-23
 
 - Working name is `pcketlm`.

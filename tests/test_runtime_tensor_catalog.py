@@ -111,3 +111,63 @@ def test_build_tensor_catalog_blocks_on_incomplete_source(tmp_path: Path, monkey
     assert catalog.tensor_count == 0
     assert catalog.catalog_path.exists() is False
     assert catalog.blockers
+
+
+def test_build_tensor_catalog_records_qwen32b_config_values(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+
+    model_id = "qwen32b-test"
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "model_type": "qwen2",
+                "hidden_size": 5120,
+                "num_hidden_layers": 64,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "intermediate_size": 27648,
+                "max_position_embeddings": 32768,
+                "vocab_size": 152064,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
+    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    tensors = {
+        "model.embed_tokens.weight": torch.zeros((2, 1), dtype=torch.bfloat16),
+        "lm_head.weight": torch.ones((2, 1), dtype=torch.bfloat16),
+    }
+    tensors.update({f"model.layers.{index}.input_layernorm.weight": torch.ones((1,), dtype=torch.bfloat16) for index in range(64)})
+    save_file(tensors, str(shard))
+
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard.stat().st_size},
+                "weight_map": {tensor_name: shard.name for tensor_name in tensors},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = build_tensor_catalog(model_id, model_dir)
+
+    assert catalog.ready is True
+    assert catalog.layer_count == 64
+    assert catalog.num_hidden_layers == 64
+    assert catalog.hidden_size == 5120
+    assert catalog.num_attention_heads == 40
+    assert catalog.num_key_value_heads == 8
+    assert catalog.intermediate_size == 27648
+    assert catalog.vocab_size == 152064

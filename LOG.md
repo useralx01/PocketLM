@@ -69,6 +69,26 @@ tests/test_registry_repository.py::test_registry_lists_qwen_14b_and_32b_entries 
 ============================== 3 passed in 0.12s ==============================
 ```
 
+## Phase 2 / Step 3
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\isale\AppData\Local\Python\pythoncore-3.14-64\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\isale\Documents\pcketlm
+configfile: pyproject.toml
+collecting ... collected 6 items
+
+tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_reads_tensor_headers_and_groups_layers PASSED [ 16%]
+tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_blocks_on_incomplete_source PASSED [ 33%]
+tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_records_qwen32b_config_values PASSED [ 50%]
+tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_groups_tensors_into_runtime_units PASSED [ 66%]
+tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_blocks_when_catalog_is_not_ready PASSED [ 83%]
+tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_handles_qwen32b_layer_count PASSED [100%]
+
+============================== 6 passed in 1.82s ==============================
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.
