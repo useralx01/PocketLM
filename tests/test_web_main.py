@@ -432,6 +432,92 @@ def test_run_chat_payload_includes_qwen_32b_guardrails(monkeypatch) -> None:
     assert payload["model_guardrails"]["scoped_safetensor_handle_cache"]["default_enabled"] is False
 
 
+def test_run_chat_payload_caps_qwen_32b_to_proven_token_range(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="Hello World! It",
+            full_text="Hello World! It",
+            generated_token_ids=[9707, 4337, 0, 1084],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=4,
+            max_new_tokens=kwargs["max_new_tokens"],
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 34},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-32b-instruct",
+            "prompt": "hello world",
+            "mode": "Quality",
+            "max_new_tokens": 12,
+        }
+    )
+
+    assert captured["max_new_tokens"] == 4
+    assert payload["max_new_tokens"] == 4
+    assert payload["model_guardrails"]["requested_max_new_tokens"] == 4
+    assert payload["model_guardrails"]["warnings"] == []
+
+
+def test_run_chat_payload_allows_explicit_experimental_qwen_32b_length(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="longer",
+            full_text="longer",
+            generated_token_ids=[1] * kwargs["max_new_tokens"],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=kwargs["max_new_tokens"],
+            max_new_tokens=kwargs["max_new_tokens"],
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 40},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-32b-instruct",
+            "prompt": "hello world",
+            "mode": "Quality",
+            "max_new_tokens": 8,
+            "allow_experimental_32b_tokens": True,
+        }
+    )
+
+    assert captured["max_new_tokens"] == 8
+    assert payload["max_new_tokens"] == 8
+    assert "proven to 4 new tokens" in payload["model_guardrails"]["warnings"][0]
+
+
 def test_run_chat_payload_reuses_session_prefix_when_followup_matches(monkeypatch) -> None:
     from pcketlm.app import web
 

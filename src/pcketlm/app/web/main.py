@@ -809,6 +809,13 @@ def _chat_request_runtime_defaults(payload: dict) -> tuple[str, str, Any | None,
     )
     if mode.strip().lower().startswith("quick"):
         max_new_tokens = 1
+    if (
+        _is_qwen_32b_model(model_id)
+        and not _is_gguf_mode(mode)
+        and max_new_tokens > QWEN_32B_PROVEN_MAX_NEW_TOKENS
+        and not bool(payload.get("allow_experimental_32b_tokens"))
+    ):
+        max_new_tokens = QWEN_32B_PROVEN_MAX_NEW_TOKENS
     min_new_tokens = _clamp_int(payload.get("min_new_tokens"), default=1, minimum=1, maximum=max_new_tokens)
     repetition_penalty = float(payload.get("repetition_penalty") or 1.1)
     return model_id, prompt, profile, mode, max_new_tokens, min_new_tokens, repetition_penalty

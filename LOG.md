@@ -1428,3 +1428,34 @@ Web regression evidence:
 tests/test_web_main.py
 32 passed in 7.11s
 ```
+
+## Phase 2 / Recovery 7 / 32B proven-token policy
+
+Self-prompt:
+
+```text
+Turn the 32B proven-token guardrail into actual web-chat policy: keep normal 32B direct chat inside the proven 4-token range unless the request explicitly opts into experimental longer output, and prove it with tests.
+```
+
+Change:
+
+```text
+Normal direct web chat for qwen2.5-32b-instruct is capped to 4 new tokens.
+Requests can opt into longer experimental 32B output with allow_experimental_32b_tokens=true.
+Experimental longer requests keep the guardrail warning in the response payload.
+```
+
+Focused test evidence:
+
+```text
+tests/test_web_main.py::test_run_chat_payload_caps_qwen_32b_to_proven_token_range PASSED
+tests/test_web_main.py::test_run_chat_payload_allows_explicit_experimental_qwen_32b_length PASSED
+2 passed in 1.44s
+```
+
+Web regression evidence:
+
+```text
+tests/test_web_main.py
+34 passed in 7.03s
+```

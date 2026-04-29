@@ -416,3 +416,9 @@ Latest Qwen 32B guardrail update:
 - the guardrail payload explicitly says scoped safetensor handle caching is disabled by default for 32B because that path caused native Windows access violations
 - web regression suite passed with `32` tests
 - current Phase 2 recovery estimate: about `84%` complete. The stable 32B path now has product-facing safety labels, but the next work should prove or block longer 32B runs through policy instead of relying on hidden engineering knowledge.
+
+Latest Qwen 32B policy update:
+- normal direct web chat for Qwen 32B is now capped to the proven `4` new-token range
+- longer 32B output requires `allow_experimental_32b_tokens=true`, and the response keeps the guardrail warning
+- web regression suite passed with `34` tests
+- current Phase 2 recovery estimate: about `87%` complete. 32B now has a stable default path, customer-facing safety labels, and an enforced short-output policy.

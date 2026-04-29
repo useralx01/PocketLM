@@ -251,7 +251,8 @@ Guardrail policy:
 - Minimum free RAM for direct web chat remains `4 GB`.
 - Recommended free RAM for Qwen 32B is `5 GB`.
 - The proven local 32B range is currently `4` new tokens.
-- Requests above `4` new tokens should be marked experimental until a longer live proof passes.
+- Normal direct web chat caps Qwen 32B requests to `4` new tokens.
+- Requests above `4` new tokens require `allow_experimental_32b_tokens=true` and should be marked experimental until a longer live proof passes.
 - Scoped safetensor handle caching remains disabled by default for Qwen 32B and is surfaced in the guardrail payload.
 
 Why:

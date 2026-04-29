@@ -418,3 +418,4 @@
 - Regression proof: Qwen 14B `full --max-new-tokens 4` still generated `Hello! How can` in `69.39s`.
 - Extended 32B stability proof: Qwen 32B `full --max-new-tokens 4` generated `Hello World! It` in `156.6s` with working set `1278 MB`.
 - Added customer-facing Qwen 32B guardrails to status, speed status, chat responses, and the Load Model UI. The app now labels 32B as stable/slow, warns above the proven `4` token range, blocks below the `4 GB` RAM floor, and explains that scoped safetensor handle caching is disabled by default for 32B.
+- Enforced the Qwen 32B proven-token policy in web chat: normal direct 32B requests cap at `4` new tokens, while `allow_experimental_32b_tokens=true` explicitly opts into longer unproven output with a warning.
