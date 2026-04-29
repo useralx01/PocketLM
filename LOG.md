@@ -1474,3 +1474,23 @@ Full suite evidence:
 py -3.14 -m pytest tests/ -v
 185 passed in 18.90s
 ```
+
+## Phase 2 / Recovery 9 / guardrail UI smoke
+
+Self-prompt:
+
+```text
+Since the Load Model UI changed, run a lightweight frontend syntax check and a live guardrail payload smoke without touching the model.
+```
+
+Evidence:
+
+```text
+node --check src/pcketlm/app/web/static/app.js
+exit=0
+
+_direct_model_guardrails("qwen2.5-32b-instruct", 4)
+status=stable-low-headroom
+proven_max_new_tokens=4
+scoped_safetensor_handle_cache.default_enabled=False
+```
