@@ -223,3 +223,8 @@ Evidence:
 - `full --max-new-tokens 1` still crashed natively with exit `-1073741819` / `0xC0000005` after the diagnostic emitted `before full-prompt-decode` and before it could emit `after full-prompt-decode`.
 
 Verdict: decode-loop bug. The KV cache is small relative to system RAM and grows successfully by one token, and the continuation step successfully reloads/runs all 64 layers while carrying KV. The crash correlates with the full wrapper path rather than isolated KV budget or weight reload behavior.
+
+Follow-up evidence:
+- Running the exact full path with `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` passed on Qwen 32B: generated text `Hello`, token id `[9707]`, operation time `40.317s`, final working set `1410 MB`.
+
+Updated verdict: scoped safetensor handle-cache bug. The full decode-loop math is viable when scoped handle caching is disabled, so the release-safe path should keep `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` for Qwen 32B/full prompt decode until the native handle lifecycle is fixed.

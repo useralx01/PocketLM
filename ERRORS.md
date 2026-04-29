@@ -50,6 +50,10 @@ Template:
 - fix: do not patch yet. Next session should instrument inside `run_prompt_decode_loop` itself around the same sub-operations, especially the wrapper's lifecycle/timing/final-result path, to find the difference from the split diagnostic path.
 - lesson: when isolated runtime pieces pass but the wrapper dies natively, the next evidence must come from inside the wrapper, not broader retries or lower-level tensor changes.
 
+Follow-up:
+- Setting `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` made `full --max-new-tokens 1` pass on Qwen 32B with generated text `Hello` in `40.317s`.
+- Updated fix direction: keep scoped safetensor handle caching disabled for the 32B/full path and audit the scoped handle lifecycle before re-enabling it.
+
 ## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import

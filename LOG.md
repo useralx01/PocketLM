@@ -1279,3 +1279,34 @@ The split path proves prompt prefill with KV, first-token tail/selection, and on
 The original full wrapper still crashes natively before it can emit an after full-prompt-decode checkpoint.
 max_new_tokens=2 full was not run because max_new_tokens=1 already localized the native crash to the full decode-loop wrapper path.
 ```
+
+## Phase 2 / Recovery 3 / scoped safetensor cache disabled check
+
+Command:
+
+```text
+$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'
+python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --max-new-tokens 1
+```
+
+Result:
+
+```text
+exit=0
+start: free_ram_mb=3888, process_working_set_mb=204
+before full-prompt-decode: free_ram_mb=3888, process_working_set_mb=204
+after full-prompt-decode: elapsed_seconds=40.319, operation_seconds=40.317, free_ram_mb=3617, process_working_set_mb=1410
+generated_token_ids=[9707]
+generated_text="Hello"
+steps_completed=1
+cache_sequence_lengths=31 for layers 0..63
+prefill_stack_total=38.9542
+prefill_decode_tail=1.0183
+```
+
+Updated localization:
+
+```text
+Disabling PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE made the same 32B full path pass.
+The native crash correlates with scoped safetensor handle caching, not the full decode-loop math itself.
+```
