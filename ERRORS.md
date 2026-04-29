@@ -27,6 +27,14 @@ Template:
 - lesson: once a direct 32B run exits with `0xC0000005`, do not keep retrying the same full command. Capture the exit code, residency policy, RAM state, and stop.
 
 ## Error
+- date: 2026-04-29
+- area: Phase 2 / Recovery / 14B baseline
+- what went wrong: the recovery diagnostic passed Qwen 14B slices through `layer-0-15`, but the required 14B `full` slice exited natively with code `-1073741819` (`0xC0000005`) before emitting an `after` checkpoint. stdout stopped at `before full-prompt-decode`; stderr was empty.
+- why it happened: the full prompt path crashes independently of Qwen 32B on this run, so the recovery diagnostic cannot honestly localize the 32B crash yet. The smaller layer-stack slices are healthy, which points toward the full prompt/decode-tail path or the environment, not embedding or early layers.
+- fix: stop before touching 32B. Next, split the diagnostic further between full prompt prefill stack and final norm + lm_head/decode tail on 14B, then repeat only after the 14B full baseline is stable.
+- lesson: do not use 32B as the first crash-localization target when 14B full prompt decode is also producing the same native access violation.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files

@@ -178,3 +178,13 @@
 - Exact support definition for the first non-Qwen model family
 - Exact public/private documentation boundary for release packaging
 - Exact desktop shell technology for the finished product UI
+## Phase 2 / Recovery / Crash class
+
+No 32B crash class was assigned in this recovery pass because the required Qwen 14B baseline did not pass end-to-end.
+
+Evidence:
+- `load-config`, `embedding-only`, `embed-forward`, `layer-0`, `layer-0-1`, `layer-0-7`, and `layer-0-15` succeeded on Qwen 14B.
+- Qwen 14B `full` exited with `-1073741819` / `0xC0000005` before the diagnostic emitted an `after full-prompt-decode` checkpoint.
+- Per the recovery brief, 32B was not touched after the failed 14B baseline.
+
+Verdict for this session: diagnostic recovery is blocked at the full prompt/decode-tail boundary on 14B. The next diagnostic should split `full` into prompt prefill stack versus final norm + lm_head/decode tail before retrying 32B.

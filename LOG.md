@@ -910,3 +910,120 @@ STOP reason:
 ```text
 Native access violation during Qwen 32B first run. No more full-run retries in this session.
 ```
+## Phase 2 / Recovery / Setup
+
+```text
+git checkout phase-2-page-runtime-generalization
+fatal: Unable to create 'C:/Users/isale/Documents/pcketlm/.git/index.lock': File exists.
+
+git branch --show-current
+phase-2-page-runtime-generalization
+
+stale lock recheck:
+NO_LOCK
+
+git branch --show-current
+phase-2-page-runtime-generalization
+```
+## Phase 2 / Recovery / Step 2 / Qwen 14B baseline
+
+14B baseline was required to pass before touching 32B. It did not pass end-to-end.
+
+Environment note:
+
+```text
+Ollama runner was holding about 4439.5 MB working set.
+Free RAM before stopping Ollama: 0.54 GB.
+Free RAM after stopping Ollama: 4.83 GB.
+```
+
+Diagnostic instrumentation verification:
+
+```text
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_load_config_outputs_checkpoints PASSED [100%]
+============================== 1 passed in 2.78s ==============================
+```
+
+14B slice results:
+
+```text
+slice=load-config
+exit=0
+elapsed_seconds=0.003
+free_ram_mb=4598
+process_working_set_mb=203
+ready=true
+hidden_size=5120
+num_hidden_layers=48
+
+slice=embedding-only
+exit=0
+elapsed_seconds=0.043
+free_ram_mb=2947
+process_working_set_mb=206
+ready=true
+tensor_name=model.embed_tokens.weight
+loaded_nbytes=1557135360
+shape=[152064, 5120]
+
+slice=embed-forward
+exit=0
+elapsed_seconds=4.523
+free_ram_mb=3577
+process_working_set_mb=398
+ready=true
+token_id=14990
+shape=[1, 1, 5120]
+
+slice=layer-0
+exit=0
+elapsed_seconds=3.495
+free_ram_mb=3765
+process_working_set_mb=474
+ready=true
+executed_layers=[0]
+output_shape=[1, 1, 5120]
+
+slice=layer-0-1
+exit=0
+elapsed_seconds=3.384
+free_ram_mb=4096
+process_working_set_mb=494
+ready=true
+executed_layers=[0, 1]
+output_shape=[1, 1, 5120]
+
+slice=layer-0-7
+exit=0
+elapsed_seconds=5.967
+free_ram_mb=3508
+process_working_set_mb=1020
+ready=true
+executed_layers=[0, 1, 2, 3, 4, 5, 6, 7]
+output_shape=[1, 1, 5120]
+
+slice=layer-0-15
+exit=0
+elapsed_seconds=11.511
+free_ram_mb=3897
+process_working_set_mb=1054
+ready=true
+executed_layers=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+output_shape=[1, 1, 5120]
+
+slice=full
+exit=-1073741819
+last_checkpoint=before full-prompt-decode
+elapsed_seconds=0.001
+free_ram_mb=4592
+process_working_set_mb=203
+stdout stopped before an after/complete event
+stderr was empty
+```
+
+STOP:
+
+```text
+The 14B baseline failed at the full prompt path with Windows native access violation 0xC0000005.
+Per the recovery brief, 32B recovery was not run because the diagnostic baseline did not pass end-to-end.
+```
