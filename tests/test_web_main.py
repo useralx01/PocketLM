@@ -743,6 +743,36 @@ def test_status_payload_includes_engine_decision(monkeypatch) -> None:
     assert payload["engine_decision"]["selected_engine"] == "direct-cpu"
 
 
+def test_status_payload_includes_live_download_meter(monkeypatch, tmp_path) -> None:
+    from pcketlm.app import web
+
+    download_root = tmp_path / "downloads"
+    download_root.mkdir()
+    (download_root / "qwen2.5-32b-instruct.json").write_text(
+        """
+        {
+          "model_id": "qwen2.5-32b-instruct",
+          "repo_id": "Qwen/Qwen2.5-32B-Instruct",
+          "status": "downloading",
+          "bytes_on_disk_gb": 1.25,
+          "expected_bytes_gb": 61.04,
+          "progress_pct": 2.05,
+          "expected_file_count": 24,
+          "present_expected_file_count": 3
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web.main, "state_root", lambda: tmp_path)
+
+    payload = web.main._download_status_payload()
+
+    assert payload["active_count"] == 1
+    assert payload["records"][0]["model_id"] == "qwen2.5-32b-instruct"
+    assert payload["records"][0]["progress_pct"] == 2.05
+    assert payload["active"][0]["status"] == "downloading"
+
+
 def test_update_runtime_settings_selects_boosted_cache(monkeypatch, tmp_path) -> None:
     from pcketlm.app import web
 

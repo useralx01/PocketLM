@@ -10,6 +10,7 @@ const state = {
   lastRequest: null,
   lastRuntimeDetails: null,
   activeProfileId: "",
+  statusRefreshTimer: null,
   sessionId: globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
 };
 
@@ -78,6 +79,7 @@ function renderStatus(payload) {
   });
   renderBackendReport(payload.backend_report);
   renderLoadRuntime(payload);
+  renderDownloadMeters(payload.downloads);
   renderGgufServer(payload);
   renderProfileSelect(payload.profiles || []);
   renderRuntimePresetControls(payload);
@@ -179,6 +181,41 @@ function renderLoadRuntime(payload) {
   `).join("");
 }
 
+function renderDownloadMeters(downloads) {
+  const element = $("#download-meter-card");
+  if (!element) return;
+  const records = downloads?.records || [];
+  if (!records.length) {
+    element.innerHTML = `<p class="muted">No active model downloads.</p>`;
+    return;
+  }
+  element.innerHTML = records.map((item) => {
+    const pct = Number(item.progress_pct ?? 0);
+    const boundedPct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+    const label = item.model_id || "model";
+    const status = item.status || "unknown";
+    const onDisk = item.bytes_on_disk_gb ?? bytesToGiB(item.bytes_on_disk);
+    const expected = item.expected_bytes_gb ?? bytesToGiB(item.expected_bytes);
+    const fileCount = `${item.present_expected_file_count ?? 0}/${item.expected_file_count ?? "?"} files`;
+    const updated = item.updated_at ? `updated ${formatClockTime(item.updated_at)}` : "waiting";
+    return `
+      <div class="item">
+        <div class="item-title"><span>${escapeText(label)}</span><span class="pill">${escapeText(status)}</span></div>
+        <div class="progress-track" aria-label="${escapeText(label)} download progress">
+          <div class="progress-fill" style="width: ${boundedPct.toFixed(2)}%"></div>
+        </div>
+        <div class="mini-metrics">
+          <span>${boundedPct.toFixed(2)}%</span>
+          <span>${escapeText(onDisk)} / ${escapeText(expected)}</span>
+          <span>${escapeText(fileCount)}</span>
+          <span>${escapeText(updated)}</span>
+        </div>
+        ${item.error ? `<p class="muted">Error: ${escapeText(item.error)}</p>` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
 function renderGgufServer(payload) {
   const element = $("#gguf-server-card");
   if (!element) return;
@@ -222,6 +259,18 @@ function formatBytes(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number) || number <= 0) return "0 MB";
   return `${(number / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function bytesToGiB(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return "0 GB";
+  return `${(number / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatClockTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function runtimeRows(details) {
@@ -653,6 +702,14 @@ async function boot() {
   setMode("Quality");
   try {
     renderStatus(await api("/api/status"));
+    state.statusRefreshTimer = window.setInterval(async () => {
+      if (!state.status?.downloads?.active_count) return;
+      try {
+        renderStatus(await api("/api/status"));
+      } catch (error) {
+        $("#sidebar-runtime").textContent = error.message;
+      }
+    }, 5000);
   } catch (error) {
     $("#sidebar-model").textContent = "Status failed";
     $("#sidebar-runtime").textContent = error.message;

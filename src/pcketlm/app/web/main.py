@@ -58,6 +58,7 @@ SINGLE_INSTANCE_LOCK_PORT = 8764
 MIN_CHAT_FREE_MEMORY_MB = 4 * 1024
 RUNTIME_SETTINGS_FILE_NAME = "runtime-settings.json"
 VALID_TENSOR_CACHE_PRESETS = {"standard", "boosted"}
+DOWNLOAD_STATUS_DIR_NAME = "downloads"
 
 
 @dataclass(slots=True)
@@ -103,6 +104,34 @@ _INSTANCE_LOCK_SOCKET: socket.socket | None = None
 
 def _runtime_settings_path() -> Path:
     return state_root() / RUNTIME_SETTINGS_FILE_NAME
+
+
+def _download_status_root() -> Path:
+    return state_root() / DOWNLOAD_STATUS_DIR_NAME
+
+
+def _download_status_payload() -> dict:
+    """Return live model download progress records written by import_cli."""
+    root = _download_status_root()
+    records: list[dict] = []
+    if root.exists():
+        for path in sorted(root.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("model_id", path.stem)
+            payload.setdefault("status", "unknown")
+            records.append(payload)
+    active_statuses = {"starting", "downloading"}
+    active = [item for item in records if str(item.get("status") or "").lower() in active_statuses]
+    return {
+        "records": records,
+        "active": active,
+        "active_count": len(active),
+    }
 
 
 def _normalize_tensor_cache_preset(value: object) -> str:
@@ -1098,6 +1127,7 @@ def _status_payload() -> dict:
         "profile_compare": build_profile_compare_summary(model_id, latest_benchmark),
         "optimized_artifact": None if latest_artifact is None else latest_artifact.to_dict(),
         "speed_status": _speed_status_payload(model_id),
+        "downloads": _download_status_payload(),
         "benchmark": latest_benchmark,
         "benchmark_history": build_measured_benchmark_history(model_id),
     }

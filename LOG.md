@@ -737,3 +737,33 @@ Focused verification after adding the monitored downloader:
 - Live status now reports the sidecar Python path and still correctly marks GGUF not ready.
 - Re-ran the full unit suite after the GGUF adapter phase: `152` tests passed, and compile verification was clean.
 - Updated the current Qwen heavy-engineering foundation estimate to about `96%`: implementation is ready to plug in a real GGUF runtime once the native package/binary and model artifact are available.
+## Phase 2 / Step 6 / app download meter
+
+- Added a Load Model download meter that reads `state/downloads/*.json` through `/api/status`.
+- The meter shows model id, status, percent complete, downloaded GB / expected GB, expected file count, and last update time.
+- The web UI now refreshes `/api/status` every 5 seconds while a download is active, so the user can watch progress while other engineering work continues.
+
+Focused verification:
+
+```text
+tests/test_web_main.py::test_status_payload_includes_live_download_meter PASSED [ 92%]
+============================= 28 passed in 7.26s ==============================
+```
+
+Compile verification:
+
+```text
+py -3.14 -m compileall src tests -q
+exit code 0
+```
+
+Live download status while this was implemented:
+
+```text
+status: downloading
+progress_pct: 2.03
+bytes_on_disk_gb: 1.24
+expected_bytes_gb: 61.04
+present_expected_file_count: 3
+expected_file_count: 24
+```
