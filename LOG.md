@@ -1,5 +1,34 @@
 # Log
 
+## Phase 2 / Setup
+
+```text
+phase-2-page-runtime-generalization
+```
+
+Working tree after checkout:
+
+```text
+On branch phase-2-page-runtime-generalization
+nothing to commit, working tree clean
+```
+
+Python dependency check:
+
+```text
+py -3.14 -c "import torch; import safetensors; import tokenizers; import transformers; print('ok')"
+ok
+```
+
+Disk check:
+
+```text
+C: free bytes: 719585067008
+C: free GB: 670.17
+Required minimum: 80 GB
+Result: pass
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.

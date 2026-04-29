@@ -2,6 +2,10 @@
 
 ## Decision Log
 
+### Phase 2 / Setup
+
+- Phase 2 uses `py -3.14` for Python invocations because `py -3.14 -c "import torch; import safetensors; import tokenizers; import transformers; print('ok')"` returned `ok`.
+
 ### 2026-04-23
 
 - Working name is `pcketlm`.
