@@ -409,3 +409,10 @@ Latest Qwen 32B recovery update:
 - extended 32B proof: `max_new_tokens=4` generated `Hello World! It` in about `156.6s`, proving the default path survives multiple continuation steps
 - 14B regression still passes: `max_new_tokens=4` generated the known baseline `Hello! How can` in about `69.4s`
 - current Phase 2 recovery estimate: about `80%` complete. The native crash is fixed for the default path and 4-token 32B continuation is proven, but customer-facing guardrails and longer-run policy still need tightening before calling the 32B path production-stable.
+
+Latest Qwen 32B guardrail update:
+- added customer-facing direct-runtime guardrails for Qwen 32B across `/api/status`, speed status, chat responses, and the Load Model panel
+- the app now reports `stable-slow`, `stable-low-headroom`, or `blocked-low-ram` for 32B, with the current free RAM, `4 GB` minimum, `5 GB` recommended headroom, and `4` proven new-token range
+- the guardrail payload explicitly says scoped safetensor handle caching is disabled by default for 32B because that path caused native Windows access violations
+- web regression suite passed with `32` tests
+- current Phase 2 recovery estimate: about `84%` complete. The stable 32B path now has product-facing safety labels, but the next work should prove or block longer 32B runs through policy instead of relying on hidden engineering knowledge.

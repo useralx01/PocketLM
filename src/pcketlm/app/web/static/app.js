@@ -158,10 +158,20 @@ function renderCompare(compare) {
 function renderLoadRuntime(payload) {
   const model = payload.active_model || {};
   const direct = payload.direct_runtime || {};
+  const guardrails = payload.model_guardrails || payload.speed_status?.model_guardrails || {};
   $("#load-runtime-card").innerHTML = `
     <div class="item">
       <div class="item-title"><span>${escapeText(model.label || model.model_id)}</span><span class="pill">${escapeText(model.effective_runtime_status || model.runtime_status || "Unknown")}</span></div>
       <p>${escapeText(direct.summary || model.effective_summary || model.summary || "")}</p>
+    </div>
+    <div class="item compact-item">
+      <div class="item-title"><span>Direct runtime guard</span><span class="pill">${escapeText(guardrails.status || "standard")}</span></div>
+      <p>${escapeText(guardrails.summary || "Standard direct-runtime safety checks are active.")}</p>
+      <div class="mini-metrics">
+        <span>${escapeText(guardrails.free_ram_mb ? `${guardrails.free_ram_mb} MB free` : "RAM n/a")}</span>
+        <span>${escapeText(guardrails.proven_max_new_tokens ? `${guardrails.proven_max_new_tokens} tokens proven` : "standard model")}</span>
+        <span>${escapeText(guardrails.scoped_safetensor_handle_cache?.default_enabled === false ? "safe handles" : "auto handles")}</span>
+      </div>
     </div>
     <div class="item">
       <div class="item-title"><span>Model folder</span><span class="pill">Local</span></div>

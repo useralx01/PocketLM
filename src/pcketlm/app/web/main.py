@@ -56,6 +56,9 @@ CHAT_SESSION_PREFIX_MAX_ENTRIES = 8
 DEFAULT_WEB_PORT = 8765
 SINGLE_INSTANCE_LOCK_PORT = 8764
 MIN_CHAT_FREE_MEMORY_MB = 4 * 1024
+QWEN_32B_MODEL_IDS = {"qwen2.5-32b-instruct", "qwen-2.5-32b-instruct"}
+QWEN_32B_PROVEN_MAX_NEW_TOKENS = 4
+QWEN_32B_RECOMMENDED_FREE_MEMORY_MB = 5 * 1024
 RUNTIME_SETTINGS_FILE_NAME = "runtime-settings.json"
 VALID_TENSOR_CACHE_PRESETS = {"standard", "boosted"}
 DOWNLOAD_STATUS_DIR_NAME = "downloads"
@@ -219,8 +222,76 @@ def _normalize_chat_messages(raw_messages: Any) -> list[dict[str, str]]:
 def _display_model_name(model_id: str) -> str:
     known = {
         "qwen2.5-14b-instruct": "Qwen2.5-14B-Instruct",
+        "qwen2.5-32b-instruct": "Qwen2.5-32B-Instruct",
     }
     return known.get(model_id, model_id)
+
+
+def _is_qwen_32b_model(model_id: str) -> bool:
+    return model_id.strip().lower() in QWEN_32B_MODEL_IDS
+
+
+def _bytes_to_mb(value: int) -> int:
+    return int(round(value / (1024**2)))
+
+
+def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
+    """Describe customer-facing safety bounds for the direct runtime path."""
+    policy = tensor_residency_policy_snapshot()
+    free_bytes = policy.get("free_memory_bytes")
+    free_ram_mb = None if free_bytes is None else _bytes_to_mb(int(free_bytes))
+    is_32b = _is_qwen_32b_model(model_id)
+    min_free_ram_mb = MIN_CHAT_FREE_MEMORY_MB
+    recommended_free_ram_mb = QWEN_32B_RECOMMENDED_FREE_MEMORY_MB if is_32b else MIN_CHAT_FREE_MEMORY_MB
+    requested_tokens = None if requested_max_new_tokens is None else int(requested_max_new_tokens)
+    below_min = free_ram_mb is not None and free_ram_mb < min_free_ram_mb
+    above_proven = is_32b and requested_tokens is not None and requested_tokens > QWEN_32B_PROVEN_MAX_NEW_TOKENS
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if below_min:
+        blockers.append(f"Free RAM is below the direct-runtime guard of {round(min_free_ram_mb / 1024, 1)} GB.")
+    if above_proven:
+        warnings.append(
+            f"Qwen 32B is proven to {QWEN_32B_PROVEN_MAX_NEW_TOKENS} new tokens on this machine; longer runs are experimental."
+        )
+
+    if not is_32b:
+        status = "standard"
+        summary = "This model uses the standard direct-runtime guardrails."
+    elif below_min:
+        status = "blocked-low-ram"
+        summary = "Qwen 32B is available but should not start while free RAM is below the direct-runtime guard."
+    elif free_ram_mb is not None and free_ram_mb < recommended_free_ram_mb:
+        status = "stable-low-headroom"
+        summary = "Qwen 32B can run, but it is slow and close to the RAM floor; keep replies short."
+    else:
+        status = "stable-slow"
+        summary = "Qwen 32B is stable for short direct-runtime replies, but it is still a slow power-user path."
+
+    return {
+        "model_id": model_id,
+        "model_label": _display_model_name(model_id),
+        "model_size_class": "direct-32b" if is_32b else "direct-standard",
+        "status": status,
+        "ready": not blockers,
+        "summary": summary,
+        "free_ram_mb": free_ram_mb,
+        "min_free_ram_mb": min_free_ram_mb,
+        "recommended_free_ram_mb": recommended_free_ram_mb,
+        "requested_max_new_tokens": requested_tokens,
+        "proven_max_new_tokens": QWEN_32B_PROVEN_MAX_NEW_TOKENS if is_32b else None,
+        "scoped_safetensor_handle_cache": {
+            "default_enabled": not is_32b,
+            "override_env": "PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE",
+            "summary": (
+                "Disabled by default for Qwen 32B because the scoped handle path caused native Windows access violations."
+                if is_32b
+                else "Automatic one-token scoped handle reuse may be used on standard direct models."
+            ),
+        },
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def _runtime_identity_system_prompt(
@@ -533,6 +604,7 @@ def _local_runtime_context_answer(prompt: str, model_id: str, mode: str, profile
         "profile_id": context["profile_id"],
         "profile_label": context["profile_label"],
         "runtime_context": context,
+        "model_guardrails": _direct_model_guardrails(model_id),
     }
 
 
@@ -567,6 +639,7 @@ def _memory_guard_response(prompt: str, model_id: str, mode: str, profile: Any |
         "profile_id": context["profile_id"],
         "profile_label": context["profile_label"],
         "runtime_context": context,
+        "model_guardrails": _direct_model_guardrails(model_id),
     }
 
 
@@ -889,6 +962,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "profile_label": None if profile is None else profile.label,
             "runtime_context": _runtime_context_payload(model_id, mode, profile),
             "speed_status": speed_status,
+            "model_guardrails": _direct_model_guardrails(model_id, max_new_tokens),
             "gguf_backend": {
                 "model_id": model_id,
                 "ready": bool(gguf_result.ready),
@@ -950,6 +1024,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
     response["profile_label"] = None if profile is None else profile.label
     response["runtime_context"] = _runtime_context_payload(model_id, mode, profile)
     response["speed_status"] = _speed_status_payload(model_id)
+    response["model_guardrails"] = _direct_model_guardrails(model_id, max_new_tokens)
     response["conversation_state"] = _conversation_state_payload(
         conversation_turn_count,
         preformatted_chat,
@@ -1079,6 +1154,7 @@ def _speed_status_payload(model_id: str) -> dict:
         "loaded_mb": load_stats.get("loaded_mb", 0.0),
         "response_cache": _chat_response_cache_status(),
         "session_prefix_cache": _session_prefix_cache_status(),
+        "model_guardrails": _direct_model_guardrails(model_id),
     }
 
 
@@ -1127,6 +1203,7 @@ def _status_payload() -> dict:
         "profile_compare": build_profile_compare_summary(model_id, latest_benchmark),
         "optimized_artifact": None if latest_artifact is None else latest_artifact.to_dict(),
         "speed_status": _speed_status_payload(model_id),
+        "model_guardrails": _direct_model_guardrails(model_id),
         "downloads": _download_status_payload(),
         "benchmark": latest_benchmark,
         "benchmark_history": build_measured_benchmark_history(model_id),

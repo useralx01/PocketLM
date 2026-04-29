@@ -17,6 +17,7 @@ from pcketlm.app.web.main import (
     _CHAT_JOBS,
     _CHAT_JOBS_LOCK,
     _conversation_prompt,
+    _direct_model_guardrails,
     _formatted_chat_prompt,
     _local_runtime_context_answer,
     _memory_guard_response,
@@ -158,6 +159,62 @@ def test_memory_guard_response_blocks_generation_when_free_ram_is_too_low(monkey
     assert payload["strategy"] == "local-memory-guard"
     assert "too low" in payload["blockers"][0]
     assert payload["profile_label"] == "Low Memory"
+
+
+def test_direct_model_guardrails_marks_qwen_32b_as_stable_slow(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_main,
+        "tensor_residency_policy_snapshot",
+        lambda: {
+            "free_memory_bytes": 6 * 1024**3,
+            "free_memory_gb": 6.0,
+            "memory_guard_active": False,
+        },
+    )
+
+    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=4)
+
+    assert payload["ready"] is True
+    assert payload["status"] == "stable-slow"
+    assert payload["proven_max_new_tokens"] == 4
+    assert payload["scoped_safetensor_handle_cache"]["default_enabled"] is False
+    assert payload["warnings"] == []
+
+
+def test_direct_model_guardrails_warns_on_unproven_qwen_32b_length(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_main,
+        "tensor_residency_policy_snapshot",
+        lambda: {
+            "free_memory_bytes": 6 * 1024**3,
+            "free_memory_gb": 6.0,
+            "memory_guard_active": False,
+        },
+    )
+
+    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=8)
+
+    assert payload["ready"] is True
+    assert payload["status"] == "stable-slow"
+    assert "proven to 4 new tokens" in payload["warnings"][0]
+
+
+def test_direct_model_guardrails_blocks_qwen_32b_below_ram_floor(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_main,
+        "tensor_residency_policy_snapshot",
+        lambda: {
+            "free_memory_bytes": 3 * 1024**3,
+            "free_memory_gb": 3.0,
+            "memory_guard_active": True,
+        },
+    )
+
+    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=1)
+
+    assert payload["ready"] is False
+    assert payload["status"] == "blocked-low-ram"
+    assert "below the direct-runtime guard" in payload["blockers"][0]
 
 
 def test_formatted_chat_prompt_uses_qwen_chat_turns(tmp_path, monkeypatch) -> None:
@@ -333,6 +390,46 @@ def test_run_chat_payload_quick_mode_caps_tokens_without_reduced_layers(monkeypa
     assert captured["layer_count"] is None
     assert captured["max_new_tokens"] == 1
     assert captured["min_new_tokens"] == 1
+
+
+def test_run_chat_payload_includes_qwen_32b_guardrails(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        return SimpleNamespace(
+            ready=True,
+            generated_text="Hello World! It",
+            full_text="Hello World! It",
+            generated_token_ids=[9707, 4337, 0, 1084],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=4,
+            max_new_tokens=4,
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 34},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-32b-instruct",
+            "prompt": "hello world",
+            "mode": "Quality",
+            "max_new_tokens": 4,
+        }
+    )
+
+    assert payload["ready"] is True
+    assert payload["model_guardrails"]["status"] == "stable-slow"
+    assert payload["model_guardrails"]["proven_max_new_tokens"] == 4
+    assert payload["model_guardrails"]["scoped_safetensor_handle_cache"]["default_enabled"] is False
 
 
 def test_run_chat_payload_reuses_session_prefix_when_followup_matches(monkeypatch) -> None:

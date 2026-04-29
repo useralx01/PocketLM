@@ -1394,3 +1394,37 @@ prefill_decode_tail=1.0355
 continuation_stack_total=114.1655
 continuation_steps=117.3197
 ```
+
+## Phase 2 / Recovery 6 / 32B customer guardrails
+
+Self-prompt:
+
+```text
+Make customer-facing 32B guardrails, so the app clearly knows when 32B is stable, slow, or too risky instead of treating it like normal chat.
+```
+
+Change:
+
+```text
+Added a direct model guardrail payload for Qwen 32B.
+It reports RAM floor, recommended free RAM, proven token length, scoped safetensor handle-cache safety, status, warnings, and blockers.
+The payload is now included in status, speed status, direct chat responses, GGUF chat responses, local identity answers, and memory-guard responses.
+The Load Model panel now renders the guardrail status and key metrics.
+```
+
+Focused test evidence:
+
+```text
+tests/test_web_main.py::test_direct_model_guardrails_marks_qwen_32b_as_stable_slow PASSED
+tests/test_web_main.py::test_direct_model_guardrails_warns_on_unproven_qwen_32b_length PASSED
+tests/test_web_main.py::test_direct_model_guardrails_blocks_qwen_32b_below_ram_floor PASSED
+tests/test_web_main.py::test_run_chat_payload_includes_qwen_32b_guardrails PASSED
+4 passed in 2.42s
+```
+
+Web regression evidence:
+
+```text
+tests/test_web_main.py
+32 passed in 7.11s
+```

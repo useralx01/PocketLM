@@ -242,3 +242,19 @@ Why:
 Explicit override:
 - `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1` still opts into scoped handle reuse for advanced debugging.
 - `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` still forces it off for every model.
+
+## Phase 2 / Recovery 6 / Qwen 32B customer guardrails
+
+Qwen 32B direct runtime should be presented as a stable but slow power-user path, not as a normal lightweight chat path.
+
+Guardrail policy:
+- Minimum free RAM for direct web chat remains `4 GB`.
+- Recommended free RAM for Qwen 32B is `5 GB`.
+- The proven local 32B range is currently `4` new tokens.
+- Requests above `4` new tokens should be marked experimental until a longer live proof passes.
+- Scoped safetensor handle caching remains disabled by default for Qwen 32B and is surfaced in the guardrail payload.
+
+Why:
+- Live proof shows 32B can run through full prompt/decode for `1`, `2`, and `4` new tokens.
+- The same proof also shows the path is very slow on this machine: `44.501s`, `77.28s`, and `156.6s`.
+- Beginners should see plain status labels and blockers instead of needing to know the env var or native crash history.
