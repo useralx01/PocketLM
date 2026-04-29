@@ -1027,3 +1027,186 @@ STOP:
 The 14B baseline failed at the full prompt path with Windows native access violation 0xC0000005.
 Per the recovery brief, 32B recovery was not run because the diagnostic baseline did not pass end-to-end.
 ```
+## Phase 2 / Recovery 2 / Setup
+
+```text
+git checkout phase-2-page-runtime-generalization
+Already on 'phase-2-page-runtime-generalization'
+
+git branch --show-current
+phase-2-page-runtime-generalization
+```
+## Phase 2 / Recovery 2 / 14B Localization
+
+14B finer slices after clearing local Ollama background processes:
+
+```text
+slice=all-layers
+exit=0
+elapsed_seconds=28.172
+free_ram_start_mb=3045
+free_ram_last_mb=2912
+process_working_set_last_mb=936
+executed_layers=[0..47]
+output_shape=[1, 1, 5120]
+
+slice=all-layers-norm
+exit=0
+elapsed_seconds=30.505
+free_ram_last_mb=2140
+process_working_set_last_mb=1057
+executed_layers=[0..47]
+normalized_shape=[1, 1, 5120]
+
+slice=all-layers-norm-lm
+exit=0
+elapsed_seconds=29.969
+free_ram_last_mb=1906
+process_working_set_last_mb=936
+executed_layers=[0..47]
+lm_head_chunk_count=19
+top_token_ids=[3837, 11, 1052, 5019, 284]
+
+slice=full
+exit=0
+elapsed_seconds=22.917
+free_ram_last_mb=8509
+process_working_set_last_mb=517
+generated_text="Hello"
+```
+
+14B prior baseline check:
+
+```text
+command: py -3.14 -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 4
+exit=0
+free_ram_start_mb=7360
+free_ram_after_mb=5767
+process_working_set_after_mb=1020
+operation_seconds=69.759
+generated_token_ids=[9707, 0, 2585, 646]
+generated_text="Hello! How can"
+timings.total=69.7585
+timings.prefill_stack=17.094
+timings.prefill_decode_tail=0.9317
+timings.continuation_stack=48.5209
+timings.continuation_decode_tail=2.8514
+```
+
+Recovery 2 localization result:
+
+```text
+The previous 14B native crash did not reproduce after clearing local background model pressure.
+all-layers, final norm, lm_head, and full decode all passed.
+No surgical runtime fix was applied because no code regression was reproducible in the localized slices.
+```
+## Phase 2 / Recovery 2 / Tests
+
+```text
+py -3.14 -m pytest tests/ -v
+============================ 177 passed in 20.29s =============================
+
+py -3.14 -m compileall src tests -q
+exit code 0
+```
+
+## Phase 2 / Recovery 2 / 32B Localization
+
+32B full retry:
+
+```text
+slice=full
+exit=-1073741819
+last_checkpoint=before full-prompt-decode
+free_ram_mb=6062
+process_working_set_mb=203
+stderr=empty
+```
+
+32B progressive slices:
+
+```text
+slice=load-config
+exit=0
+elapsed_seconds=0.003
+free_ram_mb=7117
+process_working_set_mb=204
+num_hidden_layers=64
+
+slice=embedding-only
+exit=0
+elapsed_seconds=0.028
+free_ram_mb=7117
+process_working_set_mb=206
+tensor_name=model.embed_tokens.weight
+shape=[152064, 5120]
+loaded_nbytes=1557135360
+
+slice=embed-forward
+exit=0
+elapsed_seconds=7.538
+free_ram_mb=6922
+process_working_set_mb=400
+token_id=14990
+shape=[1, 1, 5120]
+
+slice=layer-0
+exit=0
+elapsed_seconds=4.307
+free_ram_mb=6512
+process_working_set_mb=475
+executed_layers=[0]
+
+slice=layer-0-1
+exit=0
+elapsed_seconds=4.703
+free_ram_mb=6476
+process_working_set_mb=495
+executed_layers=[0, 1]
+
+slice=layer-0-7
+exit=0
+elapsed_seconds=9.702
+free_ram_mb=5259
+process_working_set_mb=1426
+executed_layers=[0..7]
+
+slice=layer-0-15
+exit=0
+elapsed_seconds=15.827
+free_ram_mb=5550
+process_working_set_mb=1459
+executed_layers=[0..15]
+
+slice=all-layers
+exit=0
+elapsed_seconds=49.281
+free_ram_mb=5421
+process_working_set_mb=1465
+executed_layers=[0..63]
+
+slice=all-layers-norm
+exit=0
+elapsed_seconds=49.272
+free_ram_mb=5472
+process_working_set_mb=1459
+executed_layers=[0..63]
+normalized_shape=[1, 1, 5120]
+
+slice=all-layers-norm-lm
+exit=0
+elapsed_seconds=51.126
+free_ram_mb=5896
+process_working_set_mb=1460
+executed_layers=[0..63]
+lm_head_chunk_count=19
+top_token_ids=[284, 600, 11, 358, 5019]
+```
+
+STOP:
+
+```text
+14B full is green and generated the baseline "Hello! How can".
+32B passes all smaller slices but crashes only at full prompt decode.
+This is a different failing slice than the recovered 14B path, so Recovery 2 stops here and leaves the 32B decode-loop/KV issue for the next session.
+```

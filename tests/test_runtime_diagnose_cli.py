@@ -38,3 +38,39 @@ def test_runtime_diagnose_cli_load_config_outputs_checkpoints(monkeypatch, capsy
     assert lines[0]["process_working_set_mb"] == 123
     assert lines[2]["result"]["num_hidden_layers"] == 64
     assert lines[-1]["ready"] is True
+
+
+def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    captured = {}
+
+    class _FakeResult:
+        def to_dict(self) -> dict:
+            return {
+                "ready": True,
+                "generated_text": "Hello! How can",
+                "blockers": [],
+            }
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return _FakeResult()
+
+    monkeypatch.setattr(runtime_diagnose_cli, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+
+    exit_code = runtime_diagnose_cli.main(
+        ["--model", "qwen-test", "--slice", "full", "--max-new-tokens", "4"]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert captured["max_new_tokens"] == 4
+    assert lines[2]["result"]["generated_text"] == "Hello! How can"

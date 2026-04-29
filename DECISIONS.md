@@ -188,3 +188,26 @@ Evidence:
 - Per the recovery brief, 32B was not touched after the failed 14B baseline.
 
 Verdict for this session: diagnostic recovery is blocked at the full prompt/decode-tail boundary on 14B. The next diagnostic should split `full` into prompt prefill stack versus final norm + lm_head/decode tail before retrying 32B.
+
+## Phase 2 / Recovery 2 / 14B crash class
+
+The 14B crash did not reproduce after clearing local Ollama/model background pressure.
+
+Evidence:
+- `all-layers` passed through all 48 layers.
+- `all-layers-norm` passed final norm.
+- `all-layers-norm-lm` passed lm_head streaming.
+- `full --max-new-tokens 4` generated the prior baseline text: `Hello! How can`.
+
+Verdict: environmental/native pressure was the likely cause of the prior 14B access violation in this recovery path. No layer-bridge or tensor-loader behavior fix was applied because the localized runtime components passed with real output.
+
+## Phase 2 / Recovery 2 / 32B crash class
+
+Qwen 32B is localized to the full prompt decode/KV path.
+
+Evidence:
+- `load-config`, `embedding-only`, `embed-forward`, `layer-0`, `layer-0-1`, `layer-0-7`, `layer-0-15`, `all-layers`, `all-layers-norm`, and `all-layers-norm-lm` all passed.
+- `full` crashed with `-1073741819` / `0xC0000005` before emitting an `after full-prompt-decode` checkpoint.
+- Qwen 14B `full --max-new-tokens 4` passed and generated `Hello! How can`.
+
+Verdict: bug in 32B full prompt decode/KV path, not a 32B catalog/layer/final-norm/lm-head bug and not a proven hardware ceiling. Per the Recovery 2 stop condition, leave the 32B fix for the next session because it fails at a different slice than 14B.

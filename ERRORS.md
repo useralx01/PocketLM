@@ -35,6 +35,14 @@ Template:
 - lesson: do not use 32B as the first crash-localization target when 14B full prompt decode is also producing the same native access violation.
 
 ## Error
+- date: 2026-04-29
+- area: Phase 2 / Recovery 2 / 32B full prompt decode
+- what went wrong: Qwen 32B `full` still exits natively with `-1073741819` / `0xC0000005` at the `before full-prompt-decode` checkpoint, while all progressive 32B slices through `all-layers-norm-lm` pass.
+- why it happened: the 32B weights, embedding lookup, all 64 layers, final norm, and lm_head can run in isolation. The remaining failure is specific to the full prompt decode loop/KV path, likely prompt-length prefill with KV state or scoped handle behavior rather than a layer-shape/catalog issue.
+- fix: stop this session per the recovery rule because 32B now fails at a different slice than the recovered 14B path. Next session should split 32B `full` into prompt token-entry, prompt-length prefill stack with `return_kv_cache=True`, prefill decode tail, and first continuation step.
+- lesson: the 32B problem is not model-file access, early layers, all layers, final norm, or lm_head alone; localize inside full prompt/KV decode before applying any fix.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files
