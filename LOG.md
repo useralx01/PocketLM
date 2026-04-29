@@ -52,6 +52,23 @@ tests/test_tensor_residency.py::test_clear_tensor_residency_cache_resets_counter
 ============================= 84 passed in 25.56s =============================
 ```
 
+## Phase 2 / Step 2
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\isale\AppData\Local\Python\pythoncore-3.14-64\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\isale\Documents\pcketlm
+configfile: pyproject.toml
+collecting ... collected 3 items
+
+tests/test_registry_catalog.py::test_build_model_catalog PASSED          [ 33%]
+tests/test_registry_repository.py::test_load_model_registry_relocates_stale_project_paths PASSED [ 66%]
+tests/test_registry_repository.py::test_registry_lists_qwen_14b_and_32b_entries PASSED [100%]
+
+============================== 3 passed in 0.12s ==============================
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.
