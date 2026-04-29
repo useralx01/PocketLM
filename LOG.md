@@ -89,6 +89,36 @@ tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_ha
 ============================== 6 passed in 1.82s ==============================
 ```
 
+## Phase 2 / Step 4
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\isale\AppData\Local\Python\pythoncore-3.14-64\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\isale\Documents\pcketlm
+configfile: pyproject.toml
+collecting ... collected 24 items
+
+tests/test_tensor_residency.py::test_tensor_residency_policy_uses_model_aware_budget_for_deep_models PASSED [ 37%]
+tests/test_tensor_residency.py::test_load_resident_tensors_batches_misses_and_reuses_cached_results PASSED [ 41%]
+tests/test_tensor_residency.py::test_load_resident_tensors_evicts_under_small_budget_for_32b_shaped_catalog PASSED [ 45%]
+tests/test_tensor_residency.py::test_load_resident_tensor_skips_tensors_larger_than_policy PASSED [ 50%]
+tests/test_tensor_residency.py::test_load_resident_tensor_skips_layers_outside_front_cache_window PASSED [ 54%]
+tests/test_tensor_residency.py::test_load_resident_tensor_keeps_small_tensors_across_all_layers PASSED [ 58%]
+tests/test_tensor_residency.py::test_load_resident_tensor_clones_same_dtype_safetensors_view PASSED [ 62%]
+tests/test_tensor_residency.py::test_clear_tensor_residency_cache_resets_counters PASSED [ 66%]
+tests/test_runtime_tensor_loader.py::test_load_tensor_by_name_reads_real_tensor PASSED [ 70%]
+tests/test_runtime_tensor_loader.py::test_load_tensor_by_name_prefers_runtime_pack_when_available PASSED [ 75%]
+tests/test_runtime_tensor_loader.py::test_runtime_pack_selection_snapshot_reports_selected_pack PASSED [ 79%]
+tests/test_runtime_tensor_loader.py::test_load_tensors_by_name_reads_real_tensors_in_one_call PASSED [ 83%]
+tests/test_runtime_tensor_loader.py::test_scoped_tensor_handle_cache_reuses_handle_across_load_calls PASSED [ 87%]
+tests/test_runtime_tensor_loader.py::test_load_execution_unit_reads_grouped_runtime_unit PASSED [ 91%]
+tests/test_runtime_tensor_loader.py::test_verify_loaded_tensor_matches_catalog_metadata PASSED [ 95%]
+tests/test_runtime_tensor_loader.py::test_verify_execution_unit_matches_plan_metadata PASSED [100%]
+
+============================= 24 passed in 1.95s ==============================
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.

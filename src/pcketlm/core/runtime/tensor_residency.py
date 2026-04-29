@@ -27,6 +27,8 @@ BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
 LOW_MEMORY_FRONT_LAYER_COUNT = 6
 LOW_MEMORY_GUARD_THRESHOLD_MB = 3 * 1024
+MODEL_AWARE_SAFETY_MARGIN_MB = 4 * 1024
+MODEL_AWARE_MAX_CACHE_MB = 4 * 1024
 MEMORY_SNAPSHOT_CACHE_SECONDS = 2.0
 _memory_snapshot_cache: tuple[float, int | None] = (0.0, None)
 
@@ -75,10 +77,11 @@ class TensorResidencyPolicy:
     tensor_cache_preset: str = "standard"
     memory_guard_active: bool = False
     adaptive_boost_active: bool = False
+    model_aware_budget_active: bool = False
     free_memory_bytes: int | None = None
 
     @classmethod
-    def from_environment(cls) -> "TensorResidencyPolicy":
+    def from_environment(cls, model_id: str | None = None) -> "TensorResidencyPolicy":
         requested_preset = os.environ.get("PCKETLM_TENSOR_CACHE_PRESET", "standard").strip().lower() or "standard"
         tensor_cache_preset = "boosted" if requested_preset in {"boost", "boosted", "high-ram", "high_ram"} else "standard"
         max_resident_mb = max(0, _env_int("PCKETLM_TENSOR_CACHE_MB", DEFAULT_TENSOR_CACHE_MB))
@@ -87,6 +90,7 @@ class TensorResidencyPolicy:
         front_layer_count = max(0, _env_int("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", DEFAULT_FRONT_LAYER_COUNT))
         memory_guard_active = False
         adaptive_boost_active = False
+        model_aware_budget_active = False
         guard_threshold_mb = max(0, _env_int("PCKETLM_TENSOR_CACHE_LOW_MEMORY_GUARD_MB", LOW_MEMORY_GUARD_THRESHOLD_MB))
         free_memory_bytes = _free_memory_bytes() if _env_enabled("PCKETLM_TENSOR_CACHE_MEMORY_GUARD") else None
         if free_memory_bytes is not None and free_memory_bytes < guard_threshold_mb * 1024 * 1024:
@@ -101,6 +105,19 @@ class TensorResidencyPolicy:
                 max_resident_mb = max(max_resident_mb, BOOSTED_TENSOR_CACHE_MB)
             if not _env_is_set("PCKETLM_TENSOR_CACHE_FRONT_LAYERS"):
                 front_layer_count = max(front_layer_count, BOOSTED_FRONT_LAYER_COUNT)
+        elif model_id and free_memory_bytes is not None and not _env_is_set("PCKETLM_TENSOR_CACHE_MB"):
+            try:
+                from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+                catalog = load_tensor_catalog(model_id)
+                deep_model = bool(catalog.num_hidden_layers and catalog.num_hidden_layers > DEFAULT_FRONT_LAYER_COUNT * 4)
+            except Exception:
+                deep_model = False
+            available_mb = int(free_memory_bytes // (1024**2))
+            model_budget_mb = max(0, min(available_mb - MODEL_AWARE_SAFETY_MARGIN_MB, MODEL_AWARE_MAX_CACHE_MB))
+            if deep_model and model_budget_mb > max_resident_mb:
+                max_resident_mb = model_budget_mb
+                model_aware_budget_active = True
         return cls(
             enabled=os.environ.get("PCKETLM_TENSOR_CACHE", "1").strip().lower() not in {"0", "false", "no"},
             max_resident_bytes=max_resident_mb * 1024 * 1024,
@@ -110,6 +127,7 @@ class TensorResidencyPolicy:
             tensor_cache_preset=tensor_cache_preset,
             memory_guard_active=memory_guard_active,
             adaptive_boost_active=adaptive_boost_active,
+            model_aware_budget_active=model_aware_budget_active,
             free_memory_bytes=free_memory_bytes,
         )
 
@@ -124,6 +142,7 @@ class TensorResidencyPolicy:
             "tensor_cache_preset": self.tensor_cache_preset,
             "memory_guard_active": self.memory_guard_active,
             "adaptive_boost_active": self.adaptive_boost_active,
+            "model_aware_budget_active": self.model_aware_budget_active,
             "free_memory_bytes": self.free_memory_bytes,
             "free_memory_gb": None if self.free_memory_bytes is None else round(self.free_memory_bytes / (1024**3), 2),
         }
@@ -279,7 +298,7 @@ def load_resident_tensor(
     policy: TensorResidencyPolicy | None = None,
 ) -> LoadedTensorSlice:
     """Load a tensor and keep its converted CPU form resident when it fits policy."""
-    effective_policy = TensorResidencyPolicy.from_environment() if policy is None else policy
+    effective_policy = TensorResidencyPolicy.from_environment(model_id) if policy is None else policy
     entry = _find_tensor_entry(model_id, tensor_name)
     if entry is None:
         loaded = load_tensor_by_name(model_id, tensor_name)
@@ -324,7 +343,7 @@ def load_resident_tensors(
     policy: TensorResidencyPolicy | None = None,
 ) -> dict[str, LoadedTensorSlice]:
     """Load several tensors through residency, batching misses by shard."""
-    effective_policy = TensorResidencyPolicy.from_environment() if policy is None else policy
+    effective_policy = TensorResidencyPolicy.from_environment(model_id) if policy is None else policy
     results: dict[str, LoadedTensorSlice] = {}
     entries_by_name: dict[str, TensorCatalogEntry] = {}
     missing_names: list[str] = []

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -183,6 +184,24 @@ def test_tensor_residency_policy_honors_explicit_cache_overrides_when_memory_is_
     assert policy.front_layer_count == 3
 
 
+def test_tensor_residency_policy_uses_model_aware_budget_for_deep_models(monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_PRESET", raising=False)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 10 * 1024**3)
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_catalog.load_tensor_catalog",
+        lambda _model_id: SimpleNamespace(num_hidden_layers=64),
+    )
+
+    policy = TensorResidencyPolicy.from_environment("qwen32b-test")
+
+    assert policy.model_aware_budget_active is True
+    assert policy.max_resident_bytes == 4 * 1024**3
+    assert policy.free_memory_bytes == 10 * 1024**3
+
+
 def test_load_resident_tensors_batches_misses_and_reuses_cached_results(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-batch-cache-test"
@@ -219,6 +238,43 @@ def test_load_resident_tensors_batches_misses_and_reuses_cached_results(tmp_path
     assert stats.hits == 2
     assert stats.misses == 2
     assert stats.stores == 2
+
+
+def test_load_resident_tensors_evicts_under_small_budget_for_32b_shaped_catalog(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "qwen32b-resident-test"
+    entries = {
+        f"model.layers.{index}.input_layernorm.weight": _entry(
+            tmp_path,
+            tensor_name=f"model.layers.{index}.input_layernorm.weight",
+        )
+        for index in range(64)
+    }
+    for index, entry in enumerate(entries.values()):
+        entry.layer_index = index
+
+    def fake_load_tensors_by_name(model_id_arg: str, tensor_names: list[str]) -> dict[str, LoadedTensorSlice]:
+        return {tensor_name: _loaded_tensor(model_id_arg, entries[tensor_name], value=1.0) for tensor_name in tensor_names}
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensors_by_name", fake_load_tensors_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=64,
+        max_tensor_bytes=1024,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=64,
+    )
+    loaded = load_resident_tensors(model_id, list(entries), policy=policy)
+    stats = tensor_residency_stats()
+
+    assert all(result.ready for result in loaded.values())
+    assert stats.evictions > 0
+    assert stats.resident_bytes <= 64
+    assert stats.resident_count < 64
 
 
 def test_load_resident_tensor_skips_tensors_larger_than_policy(tmp_path: Path, monkeypatch) -> None:

@@ -1669,7 +1669,7 @@ def run_layer_bridge_stack(
     output_dtype = "unknown"
     cache_sequence_lengths: dict[str, int] = {}
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-    tensor_policy = TensorResidencyPolicy.from_environment()
+    tensor_policy = TensorResidencyPolicy.from_environment(model_id)
 
     for layer_index in range(start_layer, start_layer + layer_count):
         if _cancel_requested(should_cancel):
