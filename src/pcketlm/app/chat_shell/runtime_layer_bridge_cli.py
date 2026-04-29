@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 
+from pcketlm.core.runtime.load_attempt import _memory_snapshot
 from pcketlm.core.runtime import (
     DEFAULT_LM_HEAD_CHUNK_ROWS,
     run_decode_benchmark,
@@ -17,6 +20,49 @@ from pcketlm.core.runtime import (
     run_token_decode_step,
     run_token_entry_layer_bridge,
 )
+
+
+class _MemorySampler:
+    """Sample free system memory during a local runtime command."""
+
+    def __init__(self, interval_seconds: float = 0.25) -> None:
+        self.interval_seconds = interval_seconds
+        self.started_at = time.perf_counter()
+        self.start_memory = _memory_snapshot()
+        self.end_memory = self.start_memory
+        self.min_free_bytes = int(self.start_memory.free_bytes)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=1.0)
+        self.end_memory = _memory_snapshot()
+        self.min_free_bytes = min(self.min_free_bytes, int(self.end_memory.free_bytes))
+
+    def to_dict(self) -> dict:
+        elapsed_seconds = round(time.perf_counter() - self.started_at, 2)
+        peak_delta_bytes = max(0, int(self.start_memory.free_bytes) - int(self.min_free_bytes))
+        return {
+            "elapsed_seconds": elapsed_seconds,
+            "free_ram_start_mb": _bytes_to_mb(int(self.start_memory.free_bytes)),
+            "free_ram_end_mb": _bytes_to_mb(int(self.end_memory.free_bytes)),
+            "min_free_ram_mb": _bytes_to_mb(int(self.min_free_bytes)),
+            "peak_ram_delta_mb": _bytes_to_mb(peak_delta_bytes),
+            "total_ram_mb": _bytes_to_mb(int(self.start_memory.total_bytes)),
+        }
+
+    def _sample(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            snapshot = _memory_snapshot()
+            self.min_free_bytes = min(self.min_free_bytes, int(snapshot.free_bytes))
+
+
+def _bytes_to_mb(value: int) -> int:
+    return int(round(value / (1024**2)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     prompt: str | None = None
     system_prompt: str | None = None
     raw_prompt = False
+    measure_memory = False
     index = 1
     while index < len(args):
         flag = args[index]
@@ -188,96 +235,110 @@ def main(argv: list[str] | None = None) -> int:
             benchmark = True
             index += 1
             continue
-        print("Usage: py -m pcketlm.app.chat_shell.runtime_layer_bridge_cli <model-id> [--layer <index>] [--layers <count>] [--token-id <id>] [--prompt <text>] [--system-prompt <text>] [--raw-prompt] [--decode] [--loop-steps <n>] [--max-new-tokens <n>] [--min-new-tokens <n>] [--stop-token-ids <id,id,...>] [--stop-strings <value|value>] [--chunk-rows <rows>] [--history-window <n>] [--policy <greedy|top-k-sample>] [--temperature <float>] [--top-p <float>] [--repetition-penalty <float>] [--sample-seed <int>] [--kv-aware] [--benchmark]")
+        if flag == "--measure-memory":
+            measure_memory = True
+            index += 1
+            continue
+        print("Usage: py -m pcketlm.app.chat_shell.runtime_layer_bridge_cli <model-id> [--layer <index>] [--layers <count>] [--token-id <id>] [--prompt <text>] [--system-prompt <text>] [--raw-prompt] [--decode] [--loop-steps <n>] [--max-new-tokens <n>] [--min-new-tokens <n>] [--stop-token-ids <id,id,...>] [--stop-strings <value|value>] [--chunk-rows <rows>] [--history-window <n>] [--policy <greedy|top-k-sample>] [--temperature <float>] [--top-p <float>] [--repetition-penalty <float>] [--sample-seed <int>] [--kv-aware] [--benchmark] [--measure-memory]")
         return 1
 
-    if prompt is not None:
-        result = run_prompt_decode_loop(
-            model_id,
-            prompt=prompt,
-            steps=1 if loop_steps is None else loop_steps,
-            max_new_tokens=max_new_tokens,
-            start_layer=layer_index,
-            layer_count=layer_count if layers_explicit else None,
-            lm_head_chunk_rows=chunk_rows,
-            selection_policy=policy,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            min_new_tokens=min_new_tokens,
-            system_prompt=system_prompt,
-            apply_chat_format=not raw_prompt,
-            stop_token_ids=stop_token_ids,
-            stop_strings=stop_strings,
-            sample_seed=sample_seed,
-        )
-    elif token_id is not None and loop_steps is not None and benchmark:
-        result = run_decode_benchmark(
-            model_id,
-            seed_token_id=token_id,
-            steps=loop_steps,
-            start_layer=layer_index,
-            layer_count=layer_count,
-            lm_head_chunk_rows=chunk_rows,
-            history_window=history_window,
-            temperature=temperature,
-            sample_seed=sample_seed,
-        )
-    elif token_id is not None and loop_steps is not None and kv_aware:
-        result = run_kv_decode_loop(
-            model_id,
-            seed_token_id=token_id,
-            steps=loop_steps,
-            start_layer=layer_index,
-            layer_count=layer_count,
-            lm_head_chunk_rows=chunk_rows,
-            selection_policy=policy,
-            temperature=temperature,
-            sample_seed=sample_seed,
-        )
-    elif token_id is not None and loop_steps is not None:
-        result = run_repeated_decode_loop(
-            model_id,
-            seed_token_id=token_id,
-            steps=loop_steps,
-            start_layer=layer_index,
-            layer_count=layer_count,
-            lm_head_chunk_rows=chunk_rows,
-            history_window=history_window,
-            selection_policy=policy,
-            temperature=temperature,
-            sample_seed=sample_seed,
-        )
-    elif token_id is not None and decode:
-        result = run_token_decode_step(
-            model_id,
-            token_ids=[token_id],
-            start_layer=layer_index,
-            layer_count=layer_count,
-            lm_head_chunk_rows=chunk_rows,
-            history_window=history_window,
-            selection_policy=policy,
-            temperature=temperature,
-            sample_seed=sample_seed,
-        )
-    elif token_id is not None:
-        result = run_token_entry_layer_bridge(
-            model_id,
-            token_ids=[token_id],
-            start_layer=layer_index,
-            layer_count=layer_count,
-        )
-    elif decode:
-        stack_result = run_layer_bridge_stack(model_id, start_layer=layer_index, layer_count=layer_count)
-        if not stack_result.ready or stack_result.output_tensor is None:
-            result = stack_result
+    sampler = _MemorySampler() if measure_memory else None
+    if sampler is not None:
+        sampler.start()
+    try:
+        if prompt is not None:
+            result = run_prompt_decode_loop(
+                model_id,
+                prompt=prompt,
+                steps=1 if loop_steps is None else loop_steps,
+                max_new_tokens=max_new_tokens,
+                start_layer=layer_index,
+                layer_count=layer_count if layers_explicit else None,
+                lm_head_chunk_rows=chunk_rows,
+                selection_policy=policy,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                min_new_tokens=min_new_tokens,
+                system_prompt=system_prompt,
+                apply_chat_format=not raw_prompt,
+                stop_token_ids=stop_token_ids,
+                stop_strings=stop_strings,
+                sample_seed=sample_seed,
+            )
+        elif token_id is not None and loop_steps is not None and benchmark:
+            result = run_decode_benchmark(
+                model_id,
+                seed_token_id=token_id,
+                steps=loop_steps,
+                start_layer=layer_index,
+                layer_count=layer_count,
+                lm_head_chunk_rows=chunk_rows,
+                history_window=history_window,
+                temperature=temperature,
+                sample_seed=sample_seed,
+            )
+        elif token_id is not None and loop_steps is not None and kv_aware:
+            result = run_kv_decode_loop(
+                model_id,
+                seed_token_id=token_id,
+                steps=loop_steps,
+                start_layer=layer_index,
+                layer_count=layer_count,
+                lm_head_chunk_rows=chunk_rows,
+                selection_policy=policy,
+                temperature=temperature,
+                sample_seed=sample_seed,
+            )
+        elif token_id is not None and loop_steps is not None:
+            result = run_repeated_decode_loop(
+                model_id,
+                seed_token_id=token_id,
+                steps=loop_steps,
+                start_layer=layer_index,
+                layer_count=layer_count,
+                lm_head_chunk_rows=chunk_rows,
+                history_window=history_window,
+                selection_policy=policy,
+                temperature=temperature,
+                sample_seed=sample_seed,
+            )
+        elif token_id is not None and decode:
+            result = run_token_decode_step(
+                model_id,
+                token_ids=[token_id],
+                start_layer=layer_index,
+                layer_count=layer_count,
+                lm_head_chunk_rows=chunk_rows,
+                history_window=history_window,
+                selection_policy=policy,
+                temperature=temperature,
+                sample_seed=sample_seed,
+            )
+        elif token_id is not None:
+            result = run_token_entry_layer_bridge(
+                model_id,
+                token_ids=[token_id],
+                start_layer=layer_index,
+                layer_count=layer_count,
+            )
+        elif decode:
+            stack_result = run_layer_bridge_stack(model_id, start_layer=layer_index, layer_count=layer_count)
+            if not stack_result.ready or stack_result.output_tensor is None:
+                result = stack_result
+            else:
+                result = run_decode_tail(model_id, stack_result.output_tensor, lm_head_chunk_rows=chunk_rows)
+        elif layer_count > 1:
+            result = run_layer_bridge_stack(model_id, start_layer=layer_index, layer_count=layer_count)
         else:
-            result = run_decode_tail(model_id, stack_result.output_tensor, lm_head_chunk_rows=chunk_rows)
-    elif layer_count > 1:
-        result = run_layer_bridge_stack(model_id, start_layer=layer_index, layer_count=layer_count)
-    else:
-        result = run_minimal_layer_forward_bridge(model_id, layer_index=layer_index)
-    print(json.dumps(result.to_dict(), indent=2))
+            result = run_minimal_layer_forward_bridge(model_id, layer_index=layer_index)
+    finally:
+        if sampler is not None:
+            sampler.stop()
+    payload = result.to_dict()
+    if sampler is not None:
+        payload["measurement"] = sampler.to_dict()
+    print(json.dumps(payload, indent=2))
     return 0
 
 

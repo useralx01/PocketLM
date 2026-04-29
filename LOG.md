@@ -767,3 +767,32 @@ expected_bytes_gb: 61.04
 present_expected_file_count: 3
 expected_file_count: 24
 ```
+## Phase 2 / Step 7 / run measurement helper
+
+- Added `--measure-memory` to the layer-bridge CLI so the Qwen 32B first run can report elapsed seconds, free RAM at start/end, minimum free RAM, and peak RAM delta.
+- This uses the existing `_memory_snapshot()` helper from `src/pcketlm/core/runtime/load_attempt.py`; no psutil or new dependency was added.
+
+Focused verification:
+
+```text
+tests/test_runtime_layer_bridge_cli.py::test_runtime_layer_bridge_cli_measure_memory PASSED [100%]
+============================== 1 passed in 1.43s ==============================
+```
+
+Compile verification:
+
+```text
+py -3.14 -m compileall src tests -q
+exit code 0
+```
+
+Live download status while this was implemented:
+
+```text
+status: downloading
+progress_pct: 3.54
+bytes_on_disk_gb: 2.16
+expected_bytes_gb: 61.04
+present_expected_file_count: 3
+expected_file_count: 24
+```
