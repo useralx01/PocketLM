@@ -422,3 +422,7 @@ Latest Qwen 32B policy update:
 - longer 32B output requires `allow_experimental_32b_tokens=true`, and the response keeps the guardrail warning
 - web regression suite passed with `34` tests
 - current Phase 2 recovery estimate: about `87%` complete. 32B now has a stable default path, customer-facing safety labels, and an enforced short-output policy.
+
+Latest verification update:
+- full test suite passed after the 32B default, guardrail, and policy work: `185 passed in 18.90s`
+- current Phase 2 recovery estimate: about `88%` complete. The branch is green after the 32B stability and product-policy changes.

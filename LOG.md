@@ -1459,3 +1459,18 @@ Web regression evidence:
 tests/test_web_main.py
 34 passed in 7.03s
 ```
+
+## Phase 2 / Recovery 8 / full suite after 32B policy
+
+Self-prompt:
+
+```text
+Before moving deeper, run the full test suite because this branch now touches runtime defaults and web product policy.
+```
+
+Full suite evidence:
+
+```text
+py -3.14 -m pytest tests/ -v
+185 passed in 18.90s
+```
