@@ -156,6 +156,28 @@ tests/test_runtime_layer_bridge.py::test_prepare_prompt_text_supports_chat_wrapp
 ============================= 28 passed in 4.26s ==============================
 ```
 
+## Phase 2 / Step 6 / monitored download started
+
+The first blocking download attempt was interrupted before verification. The downloader now writes live status to `state/downloads/qwen2.5-32b-instruct.json`, and `download_status_cli --model-id qwen2.5-32b-instruct models/qwen2.5-32b-instruct/original` reports progress while the background download continues.
+
+```text
+live_status.status: downloading
+live_status.expected_bytes_gb: 61.04
+live_status.bytes_on_disk_gb: 0.06
+live_status.progress_pct: 0.1
+live_status.expected_file_count: 24
+live_status.present_expected_file_count: 3
+folder status: partial
+folder bytes_on_disk: 110577986
+missing_core_files: tokenizer.json, model.safetensors.index.json
+```
+
+Focused verification after adding the monitored downloader:
+
+```text
+53 passed in 4.02s
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.
