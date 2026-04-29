@@ -29,6 +29,29 @@ Required minimum: 80 GB
 Result: pass
 ```
 
+## Phase 2 / Step 1
+
+PowerShell wildcard note: the literal pytest argument `tests/test_runtime_*.py` does not expand under PowerShell, so the same test set was run with `Get-ChildItem tests -Filter 'test_runtime_*.py'`.
+
+```text
+tests/test_tensor_residency.py::test_load_resident_tensor_reuses_converted_tensor_when_within_policy PASSED [ 84%]
+tests/test_tensor_residency.py::test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom PASSED [ 85%]
+tests/test_tensor_residency.py::test_tensor_residency_policy_boosts_when_preset_is_selected PASSED [ 86%]
+tests/test_tensor_residency.py::test_default_tensor_residency_policy_stays_conservative_without_headroom PASSED [ 88%]
+tests/test_tensor_residency.py::test_tensor_residency_policy_reduces_cache_when_memory_is_low PASSED [ 89%]
+tests/test_tensor_residency.py::test_tensor_residency_policy_guards_below_three_gb_by_default PASSED [ 90%]
+tests/test_tensor_residency.py::test_tensor_residency_policy_honors_guard_threshold_override PASSED [ 91%]
+tests/test_tensor_residency.py::test_tensor_residency_policy_honors_explicit_cache_overrides_when_memory_is_low PASSED [ 92%]
+tests/test_tensor_residency.py::test_load_resident_tensors_batches_misses_and_reuses_cached_results PASSED [ 94%]
+tests/test_tensor_residency.py::test_load_resident_tensor_skips_tensors_larger_than_policy PASSED [ 95%]
+tests/test_tensor_residency.py::test_load_resident_tensor_skips_layers_outside_front_cache_window PASSED [ 96%]
+tests/test_tensor_residency.py::test_load_resident_tensor_keeps_small_tensors_across_all_layers PASSED [ 97%]
+tests/test_tensor_residency.py::test_load_resident_tensor_clones_same_dtype_safetensors_view PASSED [ 98%]
+tests/test_tensor_residency.py::test_clear_tensor_residency_cache_resets_counters PASSED [100%]
+
+============================= 84 passed in 25.56s =============================
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.

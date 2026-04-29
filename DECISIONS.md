@@ -5,6 +5,12 @@
 ### Phase 2 / Setup
 
 - Phase 2 uses `py -3.14` for Python invocations because `py -3.14 -c "import torch; import safetensors; import tokenizers; import transformers; print('ok')"` returned `ok`.
+- Phase 2 uses the existing memory helper at `src/pcketlm/core/runtime/load_attempt.py`, signature `def _memory_snapshot() -> MemorySnapshot`. The helper returns `MemorySnapshot(total_bytes: int, free_bytes: int)` plus `total_gb` and `free_gb`, so Phase 2 uses `free_bytes` for runtime free-RAM decisions.
+
+### Phase 2 / Step 1 / Hardcoded shapes that must be parameterized for 32B
+
+- Qwen2.5-14B-Instruct reference values from `models/qwen2.5-14b-instruct/original/config.json`: `num_hidden_layers=48`, `hidden_size=5120`, `num_attention_heads=40`, `num_key_value_heads=8`, `vocab_size=152064`, `intermediate_size=13824`.
+- Audit result: no hardcoded 14B architectural shape values were found in the direct page-runtime path that needed replacing. The relevant bridge/runtime code reads these values from `config.json` or safetensors metadata already.
 
 ### 2026-04-23
 
