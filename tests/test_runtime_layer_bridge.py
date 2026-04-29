@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
@@ -9,6 +10,7 @@ from tokenizers.pre_tokenizers import Whitespace
 
 from pcketlm.core.runtime.layer_bridge import (
     CANCEL_BLOCKER,
+    LayerBridgeResult,
     _recommended_prompt_layer_count,
     _trim_generated_text_at_stop_string,
     _auto_torch_thread_count,
@@ -306,6 +308,51 @@ def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: P
     assert all(summary.ready for summary in result.step_summaries)
     assert result.output_tensor is not None
     assert torch.isfinite(result.output_tensor).all()
+
+
+def test_run_layer_bridge_stack_iterates_qwen32b_layer_count(monkeypatch) -> None:
+    import pcketlm.core.runtime.layer_bridge as bridge_module
+
+    monkeypatch.setattr(
+        bridge_module,
+        "load_layer_bridge_config",
+        lambda _model_id: SimpleNamespace(ready=True, blockers=[], num_hidden_layers=64),
+    )
+
+    def fake_layer_forward(model_id: str, layer_index: int, input_hidden: torch.Tensor | None = None, **_kwargs) -> LayerBridgeResult:
+        output = torch.zeros((1, 1, 1), dtype=torch.float32) if input_hidden is None else input_hidden + 1
+        return LayerBridgeResult(
+            model_id=model_id,
+            layer_index=layer_index,
+            input_mode="mock",
+            input_shape=[1, 1, 1],
+            output_shape=[1, 1, 1],
+            output_dtype=str(output.dtype),
+            loaded_unit_ids=[f"layer-{layer_index:02d}-mock"],
+            attention_head_dim=1,
+            cache_sequence_length=1,
+            output_mean_abs=float(output.abs().mean().item()),
+            output_l2_norm=float(output.norm().item()),
+            blockers=[],
+            ready=True,
+            output_tensor=output,
+        )
+
+    monkeypatch.setattr(bridge_module, "run_minimal_layer_forward_bridge", fake_layer_forward)
+
+    result = run_layer_bridge_stack(
+        "qwen32b-loop-test",
+        start_layer=0,
+        layer_count=64,
+        input_hidden=torch.zeros((1, 1, 1), dtype=torch.float32),
+        collect_step_summaries=False,
+    )
+
+    assert result.ready is True
+    assert result.executed_layers == list(range(64))
+    assert result.output_shape == [1, 1, 1]
+    assert result.output_tensor is not None
+    assert result.output_tensor.item() == 64
 
 
 def test_load_token_entry_hidden_state_reads_one_embedding_row_without_full_table(tmp_path: Path, monkeypatch) -> None:

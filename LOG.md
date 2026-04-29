@@ -119,6 +119,43 @@ tests/test_runtime_tensor_loader.py::test_verify_execution_unit_matches_plan_met
 ============================= 24 passed in 1.95s ==============================
 ```
 
+## Phase 2 / Step 5
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\isale\AppData\Local\Python\pythoncore-3.14-64\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\isale\Documents\pcketlm
+configfile: pyproject.toml
+collecting ... collected 28 items
+
+tests/test_runtime_layer_bridge.py::test_run_minimal_layer_forward_bridge_supports_multi_token_input_with_causal_mask PASSED [ 21%]
+tests/test_runtime_layer_bridge.py::test_run_minimal_layer_forward_bridge_supports_bfloat16_math_mode PASSED [ 25%]
+tests/test_runtime_layer_bridge.py::test_run_layer_bridge_stack_executes_two_real_layers_in_sequence PASSED [ 28%]
+tests/test_runtime_layer_bridge.py::test_run_layer_bridge_stack_iterates_qwen32b_layer_count PASSED [ 32%]
+tests/test_runtime_layer_bridge.py::test_load_token_entry_hidden_state_reads_one_embedding_row_without_full_table PASSED [ 35%]
+tests/test_runtime_layer_bridge.py::test_run_token_entry_layer_bridge_executes_from_token_id PASSED [ 39%]
+tests/test_runtime_layer_bridge.py::test_run_decode_tail_streams_lm_head_and_returns_logits PASSED [ 42%]
+tests/test_runtime_layer_bridge.py::test_run_decode_tail_can_stream_topk_without_full_logits PASSED [ 46%]
+tests/test_runtime_layer_bridge.py::test_run_token_decode_step_produces_logits_from_real_token_entry PASSED [ 50%]
+tests/test_runtime_layer_bridge.py::test_run_repeated_decode_loop_greedily_selects_next_tokens PASSED [ 53%]
+tests/test_runtime_layer_bridge.py::test_build_history_summary_hidden_state_carries_recent_tokens PASSED [ 57%]
+tests/test_runtime_layer_bridge.py::test_run_token_decode_step_can_use_history_summary_context PASSED [ 60%]
+tests/test_runtime_layer_bridge.py::test_select_next_token_supports_greedy_and_top_k_sample PASSED [ 64%]
+tests/test_runtime_layer_bridge.py::test_select_next_token_applies_top_p_filtering PASSED [ 67%]
+tests/test_runtime_layer_bridge.py::test_run_repeated_decode_loop_can_use_top_k_sampling_policy PASSED [ 71%]
+tests/test_runtime_layer_bridge.py::test_run_kv_decode_loop_carries_cache_lengths_across_steps PASSED [ 75%]
+tests/test_runtime_layer_bridge.py::test_run_decode_benchmark_compares_history_and_kv_paths PASSED [ 78%]
+tests/test_runtime_layer_bridge.py::test_run_kv_decode_step_can_advance_explicit_decode_state PASSED [ 82%]
+tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_uses_real_prompt_tokenization PASSED [ 85%]
+tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_can_cancel_before_heavy_generation PASSED [ 89%]
+tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_supports_raw_prompt_and_custom_system_controls PASSED [ 92%]
+tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_supports_min_new_tokens_and_stop_strings PASSED [ 96%]
+tests/test_runtime_layer_bridge.py::test_prepare_prompt_text_supports_chat_wrapping_when_metadata_is_present PASSED [100%]
+
+============================= 28 passed in 4.26s ==============================
+```
+
 ## 2026-04-28
 
 - Added the first real GGUF/llama.cpp backend path for Queen/Qwen.
