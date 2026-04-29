@@ -43,6 +43,14 @@ Template:
 - lesson: the 32B problem is not model-file access, early layers, all layers, final norm, or lm_head alone; localize inside full prompt/KV decode before applying any fix.
 
 ## Error
+- date: 2026-04-29
+- area: Phase 2 / Recovery 3 / 32B full decode loop
+- what went wrong: Qwen 32B `full --max-new-tokens 1` still exits natively with `-1073741819` / `0xC0000005` after the diagnostic emits `before full-prompt-decode`. The split diagnostic path passes `prompt-prefill`, `decode-step-1`, and `decode-step-2`.
+- why it happened: KV creation and growth are not the immediate trigger: `prompt-prefill` created 64 KV layers for 31 tokens (`8,126,464` bytes), and `decode-step-2` grew them to 32 tokens (`8,388,608` bytes) while reloading/running all 64 layers. The failure correlates with the full decode-loop wrapper path, not isolated KV budget or weight reload.
+- fix: do not patch yet. Next session should instrument inside `run_prompt_decode_loop` itself around the same sub-operations, especially the wrapper's lifecycle/timing/final-result path, to find the difference from the split diagnostic path.
+- lesson: when isolated runtime pieces pass but the wrapper dies natively, the next evidence must come from inside the wrapper, not broader retries or lower-level tensor changes.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files

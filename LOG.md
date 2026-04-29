@@ -1210,3 +1210,72 @@ STOP:
 32B passes all smaller slices but crashes only at full prompt decode.
 This is a different failing slice than the recovered 14B path, so Recovery 2 stops here and leaves the 32B decode-loop/KV issue for the next session.
 ```
+
+## Phase 2 / Recovery 3 / 32B full split
+
+Setup:
+
+```text
+phase-2-page-runtime-generalization
+```
+
+Diagnostic test:
+
+```text
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_load_config_outputs_checkpoints PASSED
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_full_honors_max_new_tokens PASSED
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_summarizes_kv_cache_bytes PASSED
+3 passed in 1.83s
+```
+
+Qwen 32B prompt-prefill, prompt `hello world`, greedy, max_new_tokens=1:
+
+```text
+exit=0
+start: free_ram_mb=5160, process_working_set_mb=203
+prepare-prompt-and-generation after: free_ram_mb=5115, process_working_set_mb=241, prompt_token_count=31, num_hidden_layers=64
+prompt-token-entry after: free_ram_mb=5113, process_working_set_mb=244, shape=[1, 31, 5120], dtype=torch.bfloat16
+prompt-prefill-stack-with-kv after: elapsed_seconds=44.921, operation_seconds=44.645, free_ram_mb=4292, process_working_set_mb=1404
+kv_cache_layers=64, kv_cache_total_bytes=8126464, kv_cache_total_mb=8, cache_sequence_lengths=31 for layers 0..63
+```
+
+Qwen 32B decode-step-1, prompt `hello world`, greedy, max_new_tokens=1:
+
+```text
+exit=0
+start: free_ram_mb=5560, process_working_set_mb=203
+prompt-prefill-stack-with-kv after: elapsed_seconds=44.518, operation_seconds=44.242, free_ram_mb=4967, process_working_set_mb=1406
+prefill-decode-tail after: elapsed_seconds=45.836, operation_seconds=1.318, free_ram_mb=4961, process_working_set_mb=1403
+first-token-selection after: elapsed_seconds=45.843, operation_seconds=0.007, free_ram_mb=4962, process_working_set_mb=1403
+chosen_token_id=9707
+kv_cache_layers=64, kv_cache_total_bytes=8126464, kv_cache_total_mb=8, cache_sequence_lengths=31 for layers 0..63
+```
+
+Qwen 32B decode-step-2, prompt `hello world`, greedy, max_new_tokens=2:
+
+```text
+exit=0
+start: free_ram_mb=6094, process_working_set_mb=204
+prompt-prefill-stack-with-kv after: elapsed_seconds=46.926, operation_seconds=46.639, free_ram_mb=5649, process_working_set_mb=1406
+prefill-decode-tail after: elapsed_seconds=48.261, operation_seconds=1.335, free_ram_mb=5717, process_working_set_mb=1400
+first-token-selection after: elapsed_seconds=48.268, operation_seconds=0.007, free_ram_mb=5719, process_working_set_mb=1401, chosen_token_id=9707
+kv-decode-step-2 after: elapsed_seconds=94.357, operation_seconds=46.085, free_ram_mb=5857, process_working_set_mb=1413
+chosen_token_id=4337
+kv_cache_layers=64, kv_cache_total_bytes=8388608, kv_cache_total_mb=8, cache_sequence_lengths=32 for layers 0..63
+```
+
+Qwen 32B full confirmation, prompt `hello world`, greedy, max_new_tokens=1:
+
+```text
+start: free_ram_mb=7957, process_working_set_mb=204
+before full-prompt-decode: free_ram_mb=7957, process_working_set_mb=204
+exit=-1073741819 / 0xC0000005
+```
+
+STOP:
+
+```text
+The split path proves prompt prefill with KV, first-token tail/selection, and one true KV continuation step all pass on Qwen 32B.
+The original full wrapper still crashes natively before it can emit an after full-prompt-decode checkpoint.
+max_new_tokens=2 full was not run because max_new_tokens=1 already localized the native crash to the full decode-loop wrapper path.
+```

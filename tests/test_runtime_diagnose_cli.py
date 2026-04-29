@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import torch
+
 from pcketlm.app.chat_shell import runtime_diagnose_cli
 
 
@@ -74,3 +76,14 @@ def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tm
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert captured["max_new_tokens"] == 4
     assert lines[2]["result"]["generated_text"] == "Hello! How can"
+
+
+def test_runtime_diagnose_cli_summarizes_kv_cache_bytes() -> None:
+    key = torch.zeros((1, 8, 3, 128), dtype=torch.float16)
+    value = torch.zeros((1, 8, 3, 128), dtype=torch.float16)
+
+    summary = runtime_diagnose_cli._kv_cache_summary({0: (key, value), 1: (key, value)})
+
+    assert summary["kv_cache_layers"] == 2
+    assert summary["kv_cache_total_bytes"] == key.nelement() * key.element_size() * 4
+    assert summary["kv_cache_by_layer"]["0"]["key_shape"] == [1, 8, 3, 128]

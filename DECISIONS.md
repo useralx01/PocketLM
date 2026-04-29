@@ -211,3 +211,15 @@ Evidence:
 - Qwen 14B `full --max-new-tokens 4` passed and generated `Hello! How can`.
 
 Verdict: bug in 32B full prompt decode/KV path, not a 32B catalog/layer/final-norm/lm-head bug and not a proven hardware ceiling. Per the Recovery 2 stop condition, leave the 32B fix for the next session because it fails at a different slice than 14B.
+
+## Phase 2 / Recovery 3 / 32B full split crash class
+
+Qwen 32B is now localized to the `run_prompt_decode_loop` full-wrapper path, not to KV cache size growth and not to weight reload with KV present.
+
+Evidence:
+- `prompt-prefill` passed with `return_kv_cache=True`: 31 prompt tokens, 64 KV cache layers, `8,126,464` KV bytes, `44.645s`, final working set `1404 MB`.
+- `decode-step-1` passed through prefill decode tail and first-token selection: chosen token id `9707`, final working set `1403 MB`.
+- `decode-step-2` passed one true continuation call through `run_kv_decode_step`: cache sequence length grew from `31` to `32`, KV bytes grew from `8,126,464` to `8,388,608`, chosen token id `4337`, operation time `46.085s`, final working set `1413 MB`.
+- `full --max-new-tokens 1` still crashed natively with exit `-1073741819` / `0xC0000005` after the diagnostic emitted `before full-prompt-decode` and before it could emit `after full-prompt-decode`.
+
+Verdict: decode-loop bug. The KV cache is small relative to system RAM and grows successfully by one token, and the continuation step successfully reloads/runs all 64 layers while carrying KV. The crash correlates with the full wrapper path rather than isolated KV budget or weight reload behavior.
