@@ -1370,3 +1370,27 @@ generated_token_ids=[9707, 0, 2585, 646]
 steps_completed=4
 cache_sequence_lengths=34 for layers 0..47
 ```
+
+## Phase 2 / Recovery 5 / 32B four-token stability proof
+
+Self-prompt:
+
+```text
+Prove the default-safe 32B path beyond two tokens without changing code: run max_new_tokens=4, record timing/RAM/output, and commit evidence if it passes.
+```
+
+Qwen 32B full, default environment, prompt `hello world`, greedy, max_new_tokens=4:
+
+```text
+exit=0
+start: free_ram_mb=5411, process_working_set_mb=204
+after full-prompt-decode: elapsed_seconds=156.6, operation_seconds=156.6, free_ram_mb=5305, process_working_set_mb=1278
+generated_text="Hello World! It"
+generated_token_ids=[9707, 4337, 0, 1084]
+steps_completed=4
+cache_sequence_lengths=34 for layers 0..63
+prefill_stack_total=37.9279
+prefill_decode_tail=1.0355
+continuation_stack_total=114.1655
+continuation_steps=117.3197
+```

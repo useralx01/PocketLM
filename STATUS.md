@@ -406,5 +406,6 @@ Latest GGUF adapter update:
 Latest Qwen 32B recovery update:
 - Qwen 32B direct page runtime now has a stable default for full prompt/decode: scoped safetensor handle reuse is disabled by default for `qwen2.5-32b-instruct`, while the explicit env override still exists for debugging
 - live 32B proof without any env workaround: `max_new_tokens=1` generated `Hello` in about `44.5s`, and `max_new_tokens=2` generated `Hello World` in about `77.3s`
+- extended 32B proof: `max_new_tokens=4` generated `Hello World! It` in about `156.6s`, proving the default path survives multiple continuation steps
 - 14B regression still passes: `max_new_tokens=4` generated the known baseline `Hello! How can` in about `69.4s`
-- current Phase 2 recovery estimate: about `75%` complete. The native crash is fixed for the default path, but longer 32B runs and customer-facing guardrails still need proof before calling the 32B path production-stable.
+- current Phase 2 recovery estimate: about `80%` complete. The native crash is fixed for the default path and 4-token 32B continuation is proven, but customer-facing guardrails and longer-run policy still need tightening before calling the 32B path production-stable.

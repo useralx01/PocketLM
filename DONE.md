@@ -416,3 +416,4 @@
 - Stabilized the Qwen 32B direct page-runtime full prompt path by disabling scoped safetensor handle reuse by default for `qwen2.5-32b-instruct`.
 - Live proof: Qwen 32B `full --max-new-tokens 1` generated `Hello` in `44.501s` with working set `1410 MB`; Qwen 32B `full --max-new-tokens 2` generated `Hello World` in `77.28s` with working set `1418 MB`.
 - Regression proof: Qwen 14B `full --max-new-tokens 4` still generated `Hello! How can` in `69.39s`.
+- Extended 32B stability proof: Qwen 32B `full --max-new-tokens 4` generated `Hello World! It` in `156.6s` with working set `1278 MB`.
