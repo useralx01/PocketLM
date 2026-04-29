@@ -19,6 +19,14 @@ Template:
 - lesson:
 
 ## Error
+- date: 2026-04-29
+- area: Phase 2 / Qwen 32B first run
+- what went wrong: the first full Qwen2.5-32B-Instruct direct runtime attempt exited natively with Windows exit code `-1073741819` (`0xC0000005`, access violation). The command wrote an empty stdout file and an empty stderr file, so there was no Python traceback to capture.
+- why it happened: the model files and tensor catalog were present, but the native runtime process crashed before returning a `PromptDecodeLoopResult`. This is likely a native memory/access fault in the Torch/safetensors path under the current machine pressure, not a normal Python exception.
+- fix: stop Phase 2 Step 7 here. The next session should add narrower crash-localization instrumentation or run a smaller isolated token-entry/layer diagnostic before retrying the full 64-layer 32B prompt.
+- lesson: once a direct 32B run exits with `0xC0000005`, do not keep retrying the same full command. Capture the exit code, residency policy, RAM state, and stop.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files

@@ -842,3 +842,71 @@ tokenizer.json 7031645
 tokenizer_config.json 7305
 vocab.json 2776833
 ```
+## Phase 2 / Step 7 / STOP
+
+Qwen 32B first run was blocked by a native crash.
+
+Command:
+
+```text
+py -3.14 -m pcketlm.app.chat_shell.runtime_layer_bridge_cli qwen2.5-32b-instruct --prompt "hello world" --policy greedy --max-new-tokens 1 --measure-memory
+```
+
+First corrected run after building the real 32B tensor catalog exited with empty stdout and empty stderr. A controlled retry with an exit-code wrapper produced:
+
+```text
+exit code: -1073741819
+hex: 0xC0000005
+meaning: Windows access violation
+stdout length: 0
+stderr length: 0
+```
+
+Real 32B tensor metadata before the run:
+
+```text
+catalog_ready: True
+tensor_count: 771
+shard_count: 17
+layer_count: 64
+catalog_blockers: []
+plan_ready: True
+unit_count: 195
+plan_blockers: []
+```
+
+RAM and residency policy captured after the failed controlled run:
+
+```text
+free_memory_gb: 4.4
+total_memory_gb: 15.31
+max_resident_mb: 414.0
+front_layer_count: 12
+tensor_cache_preset: standard
+memory_guard_active: false
+model_aware_budget_active: true
+```
+
+32B config reference for the failed target:
+
+```text
+num_hidden_layers: 64
+hidden_size: 5120
+num_attention_heads: 40
+num_key_value_heads: 8
+intermediate_size: 27648
+vocab_size: 152064
+torch_dtype: bfloat16
+```
+
+Observed layer progress:
+
+```text
+No layer-progress result was emitted before the native crash. The target run was the full 64-layer prompt path; observed completed layer count is unknown / 0 emitted.
+```
+
+STOP reason:
+
+```text
+Native access violation during Qwen 32B first run. No more full-run retries in this session.
+```
