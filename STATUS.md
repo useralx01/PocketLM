@@ -402,3 +402,9 @@ Latest GGUF adapter update:
 - live status now reports the sidecar path, while still marking GGUF as not ready because `llama_cpp` is not installed and no GGUF Queen file exists yet
 - the latest full unit suite passes with `152` tests, and compile verification is clean
 - current Qwen heavy-engineering foundation estimate: about `96%` complete. Pocket has the GGUF adapter and sidecar shape ready, but the real speed prototype still needs a usable llama.cpp package/binary and a GGUF Queen artifact.
+
+Latest Qwen 32B recovery update:
+- Qwen 32B direct page runtime now has a stable default for full prompt/decode: scoped safetensor handle reuse is disabled by default for `qwen2.5-32b-instruct`, while the explicit env override still exists for debugging
+- live 32B proof without any env workaround: `max_new_tokens=1` generated `Hello` in about `44.5s`, and `max_new_tokens=2` generated `Hello World` in about `77.3s`
+- 14B regression still passes: `max_new_tokens=4` generated the known baseline `Hello! How can` in about `69.4s`
+- current Phase 2 recovery estimate: about `75%` complete. The native crash is fixed for the default path, but longer 32B runs and customer-facing guardrails still need proof before calling the 32B path production-stable.

@@ -413,3 +413,6 @@
 - Tried installing `llama-cpp-python` safely. The main Python `3.14` environment had no matching binary wheel; the Python `3.12` sidecar install fell back to source build and failed because native Windows build tools are missing.
 - Re-ran the full unit suite after the GGUF adapter phase: `152` tests passed, and compile verification was clean.
 - Updated the current Qwen heavy-engineering foundation estimate to about `96%`: the adapter shape is ready, but GGUF runtime is not ready until package/binary and GGUF Queen artifact exist.
+- Stabilized the Qwen 32B direct page-runtime full prompt path by disabling scoped safetensor handle reuse by default for `qwen2.5-32b-instruct`.
+- Live proof: Qwen 32B `full --max-new-tokens 1` generated `Hello` in `44.501s` with working set `1410 MB`; Qwen 32B `full --max-new-tokens 2` generated `Hello World` in `77.28s` with working set `1418 MB`.
+- Regression proof: Qwen 14B `full --max-new-tokens 4` still generated `Hello! How can` in `69.39s`.

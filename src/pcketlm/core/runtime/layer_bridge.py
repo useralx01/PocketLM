@@ -2750,15 +2750,25 @@ def run_prompt_decode_loop(
         "initial_decode_state": initial_decode_state,
         "initial_token_ids": initial_token_ids,
     }
-    scoped_setting = os.environ.get("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", "auto").strip().lower()
     effective_steps = steps if max_new_tokens is None else max_new_tokens
-    use_scoped_handles = scoped_setting in {"1", "true", "yes"} or (
-        scoped_setting in {"", "auto"} and effective_steps <= 1
-    )
+    use_scoped_handles = _use_scoped_safetensor_handles(model_id, effective_steps)
     if use_scoped_handles:
         with scoped_tensor_handle_cache():
             return _run_prompt_decode_loop(model_id, prompt, **kwargs)
     return _run_prompt_decode_loop(model_id, prompt, **kwargs)
+
+
+def _use_scoped_safetensor_handles(model_id: str, effective_steps: int) -> bool:
+    """Return whether one prompt call should reuse safetensors handles."""
+    scoped_setting = os.environ.get("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", "auto").strip().lower()
+    if scoped_setting in {"1", "true", "yes"}:
+        return True
+    if scoped_setting in {"0", "false", "no"}:
+        return False
+    normalized_model_id = model_id.strip().lower()
+    if normalized_model_id in {"qwen2.5-32b-instruct", "qwen-2.5-32b-instruct"}:
+        return False
+    return scoped_setting in {"", "auto"} and effective_steps <= 1
 
 
 @torch.inference_mode()

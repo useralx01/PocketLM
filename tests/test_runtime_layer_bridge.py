@@ -14,6 +14,7 @@ from pcketlm.core.runtime.layer_bridge import (
     _recommended_prompt_layer_count,
     _trim_generated_text_at_stop_string,
     _auto_torch_thread_count,
+    _use_scoped_safetensor_handles,
     build_history_summary_hidden_state,
     initialize_kv_decode_state,
     select_next_token,
@@ -54,6 +55,17 @@ def test_runtime_torch_thread_count_uses_safe_auto_and_env_override(monkeypatch)
     assert runtime_torch_thread_count() == 3
     monkeypatch.setenv("PCKETLM_TORCH_THREADS", "bad")
     assert runtime_torch_thread_count() >= 1
+
+
+def test_scoped_safetensor_handles_default_off_for_qwen_32b(monkeypatch) -> None:
+    monkeypatch.delenv("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", raising=False)
+
+    assert _use_scoped_safetensor_handles("qwen2.5-14b-instruct", 1) is True
+    assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 1) is False
+    assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 2) is False
+
+    monkeypatch.setenv("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", "1")
+    assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 1) is True
 
 
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:

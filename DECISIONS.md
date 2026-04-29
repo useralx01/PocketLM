@@ -228,3 +228,17 @@ Follow-up evidence:
 - Running the exact full path with `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` passed on Qwen 32B: generated text `Hello`, token id `[9707]`, operation time `40.317s`, final working set `1410 MB`.
 
 Updated verdict: scoped safetensor handle-cache bug. The full decode-loop math is viable when scoped handle caching is disabled, so the release-safe path should keep `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` for Qwen 32B/full prompt decode until the native handle lifecycle is fixed.
+
+## Phase 2 / Recovery 4 / Scoped cache default
+
+Default scoped safetensor handle reuse is disabled for `qwen2.5-32b-instruct`.
+
+Why:
+- The old `auto` default used scoped handles for one-token prompt runs.
+- Qwen 32B crashed natively with scoped handles but passed the same full prompt/decode path when scoped handles were disabled.
+- After making the default safe, Qwen 32B passed `full --max-new-tokens 1` with `Hello` in `44.501s` and `full --max-new-tokens 2` with `Hello World` in `77.28s`.
+- Qwen 14B still passed the regression baseline with `Hello! How can` in `69.39s`.
+
+Explicit override:
+- `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1` still opts into scoped handle reuse for advanced debugging.
+- `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0` still forces it off for every model.

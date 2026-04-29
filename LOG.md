@@ -1310,3 +1310,63 @@ Updated localization:
 Disabling PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE made the same 32B full path pass.
 The native crash correlates with scoped safetensor handle caching, not the full decode-loop math itself.
 ```
+
+## Phase 2 / Recovery 4 / safe scoped-cache default
+
+Change:
+
+```text
+Default scoped safetensor handle reuse is now disabled for qwen2.5-32b-instruct.
+Explicit PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1 still opts into the old scoped-handle path.
+Qwen 14B one-token auto behavior remains unchanged.
+```
+
+Focused tests:
+
+```text
+tests/test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b PASSED
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_load_config_outputs_checkpoints PASSED
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_full_honors_max_new_tokens PASSED
+tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_summarizes_kv_cache_bytes PASSED
+4 passed in 2.42s
+```
+
+Qwen 32B full, default environment, prompt `hello world`, greedy, max_new_tokens=1:
+
+```text
+exit=0
+start: free_ram_mb=3636, process_working_set_mb=203
+after full-prompt-decode: elapsed_seconds=44.502, operation_seconds=44.501, free_ram_mb=3455, process_working_set_mb=1410
+generated_text="Hello"
+generated_token_ids=[9707]
+steps_completed=1
+cache_sequence_lengths=31 for layers 0..63
+prefill_stack_total=43.027
+prefill_decode_tail=1.1513
+```
+
+Qwen 32B full, default environment, prompt `hello world`, greedy, max_new_tokens=2:
+
+```text
+exit=0
+start: free_ram_mb=4463, process_working_set_mb=204
+after full-prompt-decode: elapsed_seconds=77.281, operation_seconds=77.28, free_ram_mb=4400, process_working_set_mb=1418
+generated_text="Hello World"
+generated_token_ids=[9707, 4337]
+steps_completed=2
+cache_sequence_lengths=32 for layers 0..63
+prefill_stack_total=37.9764
+continuation_stack_total=36.9173
+```
+
+Qwen 14B regression, default environment, prompt `hello world`, greedy, max_new_tokens=4:
+
+```text
+exit=0
+start: free_ram_mb=5269, process_working_set_mb=203
+after full-prompt-decode: elapsed_seconds=69.39, operation_seconds=69.39, free_ram_mb=4949, process_working_set_mb=1022
+generated_text="Hello! How can"
+generated_token_ids=[9707, 0, 2585, 646]
+steps_completed=4
+cache_sequence_lengths=34 for layers 0..47
+```
