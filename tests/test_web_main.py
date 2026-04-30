@@ -1111,6 +1111,34 @@ def test_status_payload_includes_engine_decision(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         web.main,
+        "build_runtime_backend_report",
+        lambda model_id: SimpleNamespace(to_dict=lambda: {"recommended_backend_id": "llama-cpp-gguf"}),
+    )
+    monkeypatch.setattr(
+        web.main,
+        "build_gguf_backend_status",
+        lambda model_id: SimpleNamespace(
+            to_dict=lambda: {
+                "ready": True,
+                "model_files": [
+                    {
+                        "name": "queen-q4.gguf",
+                        "path": "C:/models/queen-q4.gguf",
+                        "size_gb": 8.37,
+                        "state": "ready",
+                    }
+                ],
+                "load_estimate": {
+                    "state": "ready",
+                    "model_file": "queen-q4.gguf",
+                    "expected_ram_mb": 9000,
+                    "estimated_cold_load_seconds": 52.0,
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        web.main,
         "warm_runner_status",
         lambda model_id: {"model_id": model_id, "state": "ready", "request_count": 2},
     )
@@ -1118,6 +1146,9 @@ def test_status_payload_includes_engine_decision(monkeypatch) -> None:
     payload = web.main._status_payload()
 
     assert payload["engine_decision"]["selected_engine"] == "direct-cpu"
+    assert payload["backend_report"]["recommended_backend_id"] == "llama-cpp-gguf"
+    assert payload["gguf_backend"]["load_estimate"]["expected_ram_mb"] == 9000
+    assert payload["gguf_backend"]["model_files"][0]["name"] == "queen-q4.gguf"
     assert payload["warm_runner"]["state"] == "ready"
     assert payload["warm_runner"]["request_count"] == 2
 

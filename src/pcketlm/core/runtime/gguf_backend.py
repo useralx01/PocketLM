@@ -7,6 +7,7 @@ import importlib.util
 import csv
 import io
 import json
+import math
 import os
 import subprocess
 import time
@@ -24,6 +25,8 @@ LLAMA_SERVER_PORT = 8767
 LLAMA_SERVER_HOST = "127.0.0.1"
 LLAMA_SERVER_START_TIMEOUT_SECONDS = 150
 LLAMA_SERVER_STATE_FILE_NAME = "llama-server.json"
+GGUF_EXPECTED_RAM_OVERHEAD = 1.05
+LLAMA_COLD_LOAD_SECONDS_PER_GB = 6.2
 
 
 @dataclass(slots=True)
@@ -36,8 +39,13 @@ class GGUFModelFile:
 
     def to_dict(self) -> dict:
         return {
+            "name": self.path.name,
             "path": str(self.path),
+            "directory": str(self.path.parent),
             "source": self.source,
+            "location": self.source,
+            "kind": "split-shard" if "-of-" in self.path.name else "complete",
+            "state": "ready",
             "size_bytes": self.size_bytes,
             "size_gb": round(self.size_bytes / (1024**3), 2),
         }
@@ -59,6 +67,7 @@ class GGUFBackendStatus:
     llama_server_url: str | None = None
     llama_server: dict = field(default_factory=dict)
     model_files: list[GGUFModelFile] = field(default_factory=list)
+    load_estimate: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     summary: str = ""
 
@@ -76,6 +85,7 @@ class GGUFBackendStatus:
             "llama_server_url": self.llama_server_url,
             "llama_server": dict(self.llama_server),
             "model_files": [model_file.to_dict() for model_file in self.model_files],
+            "load_estimate": dict(self.load_estimate),
             "blockers": list(self.blockers),
             "summary": self.summary,
         }
@@ -368,6 +378,8 @@ def build_gguf_backend_status(model_id: str) -> GGUFBackendStatus:
         blockers.append("No llama.cpp runtime is available yet.")
     if not model_files:
         blockers.append("No GGUF model file is present for this model.")
+    selected_model_file = _select_gguf_model_file(model_id)
+    load_estimate = estimate_gguf_load_cost(model_id, selected=selected_model_file, server_status=server_status)
     ready = package_available and bool(model_files)
     summary = (
         "GGUF backend is ready for a local smoke run."
@@ -387,6 +399,7 @@ def build_gguf_backend_status(model_id: str) -> GGUFBackendStatus:
         llama_server_url=llama_server_url() if server_binary_available else None,
         llama_server=server_status.to_dict(),
         model_files=model_files,
+        load_estimate=load_estimate,
         blockers=blockers,
         summary=summary,
     )
@@ -405,6 +418,62 @@ def _select_gguf_model_file(model_id: str, model_path: str | Path | None = None)
     complete_files = [model_file for model_file in files if "-of-" not in model_file.path.name]
     candidates = complete_files or files
     return max(candidates, key=lambda model_file: model_file.size_bytes)
+
+
+def estimate_gguf_load_cost(
+    model_id: str,
+    model_path: str | Path | None = None,
+    *,
+    selected: GGUFModelFile | None = None,
+    server_status: GGUFServerStatus | None = None,
+) -> dict:
+    """Estimate the visible cost of loading a GGUF artifact into llama-server."""
+    selected_file = selected if selected is not None else _select_gguf_model_file(model_id, model_path)
+    if selected_file is None:
+        return {
+            "model_id": model_id,
+            "model_path": None,
+            "model_file": None,
+            "model_size_gb": None,
+            "expected_ram_mb": None,
+            "estimated_cold_load_seconds": None,
+            "state": "missing",
+            "load_action": "unavailable",
+            "blockers": ["No GGUF model file is available to load."],
+            "basis": {
+                "expected_ram_overhead": GGUF_EXPECTED_RAM_OVERHEAD,
+                "cold_load_seconds_per_gb": LLAMA_COLD_LOAD_SECONDS_PER_GB,
+            },
+        }
+
+    server = server_status if server_status is not None else build_gguf_server_status(model_id)
+    server_path = None if server.model_path is None else Path(server.model_path)
+    same_loaded_file = bool(server.running and server_path is not None and server_path == selected_file.path)
+    compatible_loaded_file = bool(server.running and server_path is None and server.model_id == model_id)
+    state = "ready"
+    blockers: list[str] = []
+    if same_loaded_file or compatible_loaded_file:
+        state = "loaded" if server.ready else "loading"
+    elif server.running:
+        blockers.append("A llama.cpp server is already running with a different GGUF file.")
+
+    model_size_gb = selected_file.size_bytes / (1024**3)
+    expected_ram_mb = int(math.ceil(selected_file.size_bytes * GGUF_EXPECTED_RAM_OVERHEAD / (1024**2)))
+    return {
+        "model_id": model_id,
+        "model_path": str(selected_file.path),
+        "model_file": selected_file.path.name,
+        "model_size_gb": round(model_size_gb, 2),
+        "expected_ram_mb": expected_ram_mb,
+        "estimated_cold_load_seconds": round(model_size_gb * LLAMA_COLD_LOAD_SECONDS_PER_GB, 1),
+        "state": state,
+        "load_action": "unload" if state in {"loaded", "loading"} else "load",
+        "blockers": blockers,
+        "basis": {
+            "expected_ram_overhead": GGUF_EXPECTED_RAM_OVERHEAD,
+            "cold_load_seconds_per_gb": LLAMA_COLD_LOAD_SECONDS_PER_GB,
+        },
+    }
 
 
 def run_gguf_prompt(

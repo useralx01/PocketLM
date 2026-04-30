@@ -29,6 +29,7 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - GGUF/llama.cpp backend support is now real: Pocket can use a standalone llama.cpp runtime, a merged Qwen2.5-14B-Instruct Q4_K_M GGUF artifact, and a persistent `llama-server`.
 - Web GGUF mode can produce fast short answers after the server is loaded.
 - Load Model has GGUF server lifecycle controls for loading/unloading the persistent server and showing RAM/artifact state.
+- Load Model now shows the selected GGUF file, all discovered GGUF files, expected RAM, estimated cold-load time, and a single Load/Unload action.
 - GGUF prompts use Qwen instruct chat formatting and stop markers.
 - Fast GGUF benchmark flow exists and saves short-answer, logic, and agent-style checks.
 - Backend recommendation now prefers the ready GGUF path while keeping Direct CPU as the dense custom-runtime foundation and fallback.
@@ -38,6 +39,7 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - Persistent GGUF server load/unload works through Pocket APIs.
 - Loaded GGUF server uses roughly 8.6 GB to 10 GB RAM.
 - Latest Phase 3C GGUF proof: cold GGUF call took 52.26s because it included model load; warm server call with 4-token cap took 2.36s at about 2.30 tokens/sec with server working set around 8.64 GB.
+- Latest Phase 3D GGUF Load Model productization: expected RAM is file size times 1.05, cold-load estimate uses 6.2s/GB from local proof, and focused GGUF/web tests passed with 60 tests.
 - GGUF server was unloaded after the proof and state reported `running=false`.
 - Latest Warm Agent proof reused 64 prompt tokens, batch-appended 14 tokens, returned `Ok<|im_end|>` in 47.06s with roughly 1069 MB process working set.
 - Latest short GGUF checks returned `OK`, `YES`, and `SUN` in roughly sub-second to low-second app-reported times after the server was loaded.
@@ -52,8 +54,8 @@ Favor work that makes the real GGUF path safer and more product-grade while pres
 
 1. Decide how GGUF mode should sit beside Direct CPU Standard/Boosted in the customer UI.
 2. Add stronger agent-style GGUF checks for tool-planning wording, task decomposition, and follow-up consistency.
-3. Add a clean GGUF artifact manager so split downloads, merged artifacts, file sizes, and disk usage are visible from Load Model.
-4. Add a clear pre-load warning before loading the roughly 9 GB GGUF artifact, including expected cold-load time and RAM use.
+3. Extend the new GGUF file list into selectable artifact management when multiple complete artifacts exist.
+4. Add stronger disk-usage cleanup/status for merged GGUF artifacts versus downloaded split shards.
 5. Add a backend comparison runner for GGUF versus Direct CPU Standard/Boosted, gated by available RAM and safe server lifecycle behavior.
 
 ## Orchestration Checklist After Another Session

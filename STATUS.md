@@ -496,3 +496,10 @@ Latest GGUF recommendation update:
 Latest Load Model recommendation update:
 - Load Model / Active Runtime now shows the recommended backend beside the active dense fallback
 - current Phase 3 estimate: about `78%` complete. The proven speed path is now visible in the normal product surface, not only in diagnostics.
+
+Latest GGUF Load Model productization update:
+- GGUF backend status now reports all discovered `.gguf` files, including nested split shards, with name, location, kind, size, and ready state
+- Load Model now shows the selected GGUF file, expected RAM, estimated cold-load time, current state, and a single Load/Unload action
+- expected RAM is estimated as GGUF file size times `1.05`, and cold-load time uses the latest local measurement of about `6.2s/GB`
+- focused GGUF/web tests passed with `60` tests, frontend syntax check is clean, and Python compile verification is clean
+- current Phase 3 estimate: about `82%` complete. GGUF is now easier to understand and safer to load, but the next work is side-by-side backend comparison and stronger agent-style GGUF checks.

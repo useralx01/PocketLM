@@ -5,6 +5,7 @@ from pcketlm.core.runtime.gguf_backend import (
     _clean_llama_cli_output,
     build_gguf_backend_status,
     build_gguf_server_status,
+    estimate_gguf_load_cost,
     find_gguf_model_files,
     run_gguf_prompt,
     start_gguf_server,
@@ -26,6 +27,109 @@ def test_find_gguf_model_files_finds_artifact_files(tmp_path: Path, monkeypatch)
     assert len(files) == 1
     assert files[0].path == gguf_path
     assert files[0].source == "artifact"
+    assert files[0].to_dict()["name"] == "queen-q4.gguf"
+    assert files[0].to_dict()["kind"] == "complete"
+
+
+def test_find_gguf_model_files_handles_nested_split_files(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "qwen-test"
+    artifact_dir = tmp_path / "models" / model_id / "artifacts" / "gguf" / "q4"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "queen-q4-00001-of-00002.gguf").write_bytes(b"split-a")
+    (artifact_dir / "queen-q4-00002-of-00002.gguf").write_bytes(b"split-b")
+
+    files = find_gguf_model_files(model_id)
+
+    assert len(files) == 2
+    assert {file.to_dict()["kind"] for file in files} == {"split-shard"}
+
+
+def test_estimate_gguf_load_cost_reports_missing_model(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+
+    estimate = estimate_gguf_load_cost("qwen-test")
+
+    assert estimate["state"] == "missing"
+    assert estimate["load_action"] == "unavailable"
+    assert estimate["expected_ram_mb"] is None
+    assert "No GGUF model file" in estimate["blockers"][0]
+
+
+def test_estimate_gguf_load_cost_reports_ready_model(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+    from pcketlm.core.runtime import gguf_backend
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(gguf_backend, "build_gguf_server_status", lambda model_id: gguf_backend.GGUFServerStatus(running=False, ready=False, model_id=model_id))
+    model_id = "qwen-test"
+    gguf_path = tmp_path / "models" / model_id / "artifacts" / "queen-q4.gguf"
+    gguf_path.parent.mkdir(parents=True)
+    gguf_path.write_bytes(b"0" * (10 * 1024**2))
+
+    estimate = estimate_gguf_load_cost(model_id)
+
+    assert estimate["state"] == "ready"
+    assert estimate["load_action"] == "load"
+    assert estimate["model_file"] == "queen-q4.gguf"
+    assert estimate["expected_ram_mb"] == 11
+    assert estimate["estimated_cold_load_seconds"] > 0
+
+
+def test_estimate_gguf_load_cost_reports_loaded_model(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+    from pcketlm.core.runtime import gguf_backend
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "qwen-test"
+    gguf_path = tmp_path / "models" / model_id / "artifacts" / "queen-q4.gguf"
+    gguf_path.parent.mkdir(parents=True)
+    gguf_path.write_bytes(b"0" * (10 * 1024**2))
+    monkeypatch.setattr(
+        gguf_backend,
+        "build_gguf_server_status",
+        lambda model_id: gguf_backend.GGUFServerStatus(
+            running=True,
+            ready=True,
+            model_id=model_id,
+            model_path=gguf_path,
+        ),
+    )
+
+    estimate = estimate_gguf_load_cost(model_id)
+
+    assert estimate["state"] == "loaded"
+    assert estimate["load_action"] == "unload"
+
+
+def test_estimate_gguf_load_cost_reports_loading_model(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+    from pcketlm.core.runtime import gguf_backend
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "qwen-test"
+    gguf_path = tmp_path / "models" / model_id / "artifacts" / "queen-q4.gguf"
+    gguf_path.parent.mkdir(parents=True)
+    gguf_path.write_bytes(b"0" * (10 * 1024**2))
+    monkeypatch.setattr(
+        gguf_backend,
+        "build_gguf_server_status",
+        lambda model_id: gguf_backend.GGUFServerStatus(
+            running=True,
+            ready=False,
+            model_id=model_id,
+            model_path=gguf_path,
+        ),
+    )
+
+    estimate = estimate_gguf_load_cost(model_id)
+
+    assert estimate["state"] == "loading"
+    assert estimate["load_action"] == "unload"
 
 
 def test_build_gguf_backend_status_reports_missing_package_and_model(tmp_path: Path, monkeypatch) -> None:
@@ -47,6 +151,7 @@ def test_build_gguf_backend_status_reports_missing_package_and_model(tmp_path: P
     assert status.sidecar_package_available is False
     assert status.llama_cli_available is False
     assert len(status.blockers) == 2
+    assert status.load_estimate["state"] == "missing"
 
 
 def test_build_gguf_server_status_reports_running_process(tmp_path: Path, monkeypatch) -> None:

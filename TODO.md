@@ -9,8 +9,8 @@
 
 - Decide how GGUF mode should sit beside Direct CPU Standard/Boosted in the customer UI: default, power-user option, or auto-suggested when enough RAM is available.
 - Add stronger agent-style GGUF checks that test tool-planning wording, short task decomposition, and follow-up consistency beyond the first two-step checklist.
-- Add a clean model artifact manager for GGUF files so split downloads, merged artifacts, and disk usage are visible from Load Model instead of being hidden in folders.
-- Add a clearer pre-load warning before loading the 9 GB GGUF artifact, including expected cold-load time and RAM use.
+- Extend the new GGUF file list into a selectable artifact manager if multiple complete GGUF files exist for the same model.
+- Add a side-by-side disk usage summary for merged GGUF artifacts versus downloaded split shards.
 - Add full side-by-side GGUF vs Direct CPU Standard/Boosted comparison only when RAM is high enough or when Pocket can safely unload/reload GGUF between benchmark groups.
 - Next speed target: design a real reduction in repeated large tensor movement. Bigger resident-cache tweaks are now low-return; the next useful step should be a better derived weight layout/backend path that avoids reloading the same projection weights so often.
 - Keep the `288 MB` / `13` front-layer residency boost as a selectable preset, not an automatic default; do not expand it again without a live speed win.

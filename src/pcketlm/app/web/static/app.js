@@ -256,9 +256,28 @@ function renderGgufServer(payload) {
   const model = payload.active_model || {};
   const backend = payload.gguf_backend || {};
   const server = backend.llama_server || {};
-  const modelFile = (backend.model_files || []).find((file) => !file.path.includes("-of-")) || (backend.model_files || [])[0];
+  const files = backend.model_files || [];
+  const estimate = backend.load_estimate || {};
+  const modelFile = files.find((file) => file.path === estimate.model_path)
+    || files.find((file) => !(file.path || "").includes("-of-"))
+    || files[0];
   const stateLabel = server.ready ? "Ready" : server.running ? "Loading" : "Unloaded";
   const ram = server.working_set_bytes ? formatBytes(server.working_set_bytes) : "0 MB";
+  const expectedRam = estimate.expected_ram_mb ? `${estimate.expected_ram_mb} MB expected` : "RAM n/a";
+  const coldLoad = estimate.estimated_cold_load_seconds ? formatSeconds(estimate.estimated_cold_load_seconds) : "n/a";
+  const toggleAction = server.running ? "stop" : "start";
+  const toggleDisabled = (!server.running && !modelFile) || (server.ready && toggleAction === "start");
+  const artifactList = files.length
+    ? files.map((file) => `
+      <div class="mini-metrics artifact-row">
+        <span>${escapeText(file.name || "GGUF file")}</span>
+        <span>${escapeText(file.kind || "file")}</span>
+        <span>${escapeText(file.size_gb ? `${file.size_gb} GB` : formatBytes(file.size_bytes))}</span>
+        <span>${escapeText(file.location || file.source || "local")}</span>
+      </div>
+      <p class="muted">${escapeText(file.path || "")}</p>
+    `).join("")
+    : `<p class="muted">No GGUF artifact found for ${escapeText(model.model_id || "this model")}.</p>`;
   element.innerHTML = `
     <div class="item">
       <div class="item-title"><span>llama.cpp</span><span class="pill">${escapeText(stateLabel)}</span></div>
@@ -269,17 +288,26 @@ function renderGgufServer(payload) {
         <span>${escapeText(backend.llama_cli_available ? "runtime ready" : "runtime missing")}</span>
       </div>
       <div class="button-row">
-        <button class="secondary compact" id="gguf-start-button" ${server.ready ? "disabled" : ""}>Load server</button>
-        <button class="secondary compact" id="gguf-stop-button" ${server.running ? "" : "disabled"}>Unload</button>
+        <button class="secondary compact" id="gguf-toggle-button" data-action="${toggleAction}" ${toggleDisabled ? "disabled" : ""}>${server.running ? "Unload" : "Load"}</button>
       </div>
     </div>
     <div class="item compact-item">
-      <div class="item-title"><span>Artifact</span><span class="pill">${escapeText(modelFile ? "Local" : "Missing")}</span></div>
+      <div class="item-title"><span>Selected GGUF</span><span class="pill">${escapeText(estimate.state || (modelFile ? "ready" : "missing"))}</span></div>
       <p>${escapeText(modelFile?.path || `No GGUF artifact found for ${model.model_id || "this model"}.`)}</p>
+      <div class="mini-metrics">
+        <span>${escapeText(modelFile?.name || "missing")}</span>
+        <span>${escapeText(modelFile?.size_gb ? `${modelFile.size_gb} GB file` : "size n/a")}</span>
+        <span>${escapeText(expectedRam)}</span>
+        <span>${escapeText(`cold load ${coldLoad}`)}</span>
+      </div>
+      ${estimate.blockers?.length ? `<p class="muted">${escapeText(estimate.blockers.join(" "))}</p>` : ""}
+    </div>
+    <div class="item compact-item">
+      <div class="item-title"><span>GGUF files</span><span class="pill">${files.length}</span></div>
+      ${artifactList}
     </div>
   `;
-  $("#gguf-start-button")?.addEventListener("click", () => controlGgufServer("start"));
-  $("#gguf-stop-button")?.addEventListener("click", () => controlGgufServer("stop"));
+  $("#gguf-toggle-button")?.addEventListener("click", (event) => controlGgufServer(event.currentTarget.dataset.action || "status"));
 }
 
 function formatSeconds(value) {
@@ -727,10 +755,8 @@ async function controlWarmRunner(action) {
 
 async function controlGgufServer(action) {
   const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
-  const startButton = $("#gguf-start-button");
-  const stopButton = $("#gguf-stop-button");
-  if (startButton) startButton.disabled = true;
-  if (stopButton) stopButton.disabled = true;
+  const toggleButton = $("#gguf-toggle-button");
+  if (toggleButton) toggleButton.disabled = true;
   const label = action === "start" ? "Loading GGUF server..." : "Unloading GGUF server...";
   const card = $("#gguf-server-card");
   if (card) {
@@ -745,6 +771,7 @@ async function controlGgufServer(action) {
   } catch (error) {
     const working = $("#gguf-server-working");
     if (working) working.textContent = `GGUF action failed: ${error.message}`;
+    if (toggleButton) toggleButton.disabled = false;
   }
 }
 

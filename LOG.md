@@ -2201,3 +2201,41 @@ py -3.14 -m pytest tests/ -v
 py -3.14 -m compileall -q src tests
 exit=0
 ```
+
+## Phase 3D / GGUF Load Model productization
+
+Change:
+
+```text
+GGUF backend status now includes a load estimate with selected model file, expected RAM, estimated cold-load seconds, load state, and load/unload action.
+GGUF model files now serialize name, directory, location/source, kind, ready state, size bytes, and size GB.
+Load Model now shows one clear GGUF Load/Unload button, the selected GGUF file, expected RAM, estimated cold-load time, and all discovered GGUF files including nested split shards.
+```
+
+Measurement basis:
+
+```text
+LLAMA_COLD_LOAD_SECONDS_PER_GB=6.2
+Reason: latest local GGUF proof loaded an 8.37 GB Qwen2.5-14B-Instruct Q4_K_M artifact in 52.26s, which is about 6.2s/GB.
+Expected RAM estimate uses file_size * 1.05 and rounds up to MB.
+```
+
+Focused verification:
+
+```text
+python -m pytest tests/test_gguf_backend.py tests/test_web_main.py -v
+60 passed in 4.61s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+python -m compileall -q src tests
+exit=0
+```
+
+Full verification:
+
+```text
+python -m pytest tests/ -v
+202 passed in 17.24s
+```

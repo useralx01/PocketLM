@@ -37,6 +37,7 @@ Codex should operate autonomously by default on Pocket LLM:
 - Direct safetensors CPU remains important as Pocket's custom runtime foundation, but repeated large tensor movement is the wall.
 - GGUF is a power-user backend because the loaded server uses roughly 8.6 GB to 10 GB RAM on the current machine.
 - Warm Agent mode exists as an opt-in direct-runtime path, but current proof shows it is mostly a correctness/session-reuse feature, not yet a major speed breakthrough.
+- Load Model now exposes GGUF file list, selected artifact, expected RAM, cold-load estimate, state, and one Load/Unload action.
 - Next valuable work should improve GGUF management, stronger GGUF agent checks, backend comparison, and safe UI defaults rather than more blind safetensors cache expansion.
 - High effort is best for architecture, native crash debugging, large runtime changes, and phase planning. Medium is enough for docs, UI polish, focused tests, and small productization slices.
 

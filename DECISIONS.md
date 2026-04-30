@@ -341,3 +341,16 @@ Why:
 - The warm GGUF server call returned `4` tokens in `2.36s`, with llama.cpp reporting about `2.30 tokens/sec`.
 - The same class of direct CPU work takes tens of seconds because tensor movement dominates.
 - The GGUF server used about `8.64 GB` working set, so it must stay explicit and unloadable on 16 GB machines.
+
+## Phase 3D / GGUF Load Model UX
+
+Decision:
+- Treat GGUF load cost as first-class product state, not hidden runtime detail.
+- Load Model should show all discovered GGUF files, the selected file, expected RAM, estimated cold-load time, and current load state before the user presses Load.
+- The UI should expose one primary GGUF lifecycle action that flips between Load and Unload instead of making users reason about separate server buttons.
+
+Why:
+- GGUF is the practical speed path, but on this machine it costs about `8.64 GB` working set once loaded.
+- A user needs to know the RAM and cold-load cost before starting a persistent local server.
+- The latest measured cold load was `52.26s` for an about `8.37 GB` artifact, so Pocket uses `LLAMA_COLD_LOAD_SECONDS_PER_GB=6.2` as the current local estimate basis.
+- Expected RAM is estimated as `file_size * 1.05` and rounded up to MB so the UI stays conservative.
