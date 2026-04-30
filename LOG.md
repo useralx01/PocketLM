@@ -2960,3 +2960,20 @@ run=3 elapsed_seconds=53.685 generated_text=<think> peak_working_set_mb=2134 fre
 locked_warm_seconds_per_token=53.685
 locked_warm_tokens_per_second=0.01863
 ```
+
+## Phase MoE Speed / Stage 2 / baseline-with-telemetry
+
+```text
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=0
+qwen3-30b-a3b full max_new_tokens=1 repeat=3:
+run=1 elapsed_seconds=58.207 generated_text=<think> peak_working_set_mb=2107 free_ram_before_mb=4630 free_ram_after_mb=3384 tensor_load_seconds=44.5319
+run=2 elapsed_seconds=58.007 generated_text=<think> peak_working_set_mb=2441 free_ram_before_mb=3384 free_ram_after_mb=3506 tensor_load_seconds=44.8272
+run=3 elapsed_seconds=57.982 generated_text=<think> peak_working_set_mb=2475 free_ram_before_mb=3498 free_ram_after_mb=3607 tensor_load_seconds=44.5842
+expert_activation_total=8736
+total_expert_requests=26208
+expert_hits=0
+expert_misses=26208
+expert_hit_rate=0.0
+expert_resident_count=0
+expert_resident_bytes=0
+```
