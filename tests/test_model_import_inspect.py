@@ -13,6 +13,11 @@ def test_inspect_qwen_source_reads_config_and_index(tmp_path: Path) -> None:
                 "hidden_size": 5120,
                 "num_hidden_layers": 48,
                 "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "intermediate_size": 27648,
+                "moe_intermediate_size": 768,
+                "num_experts": 128,
+                "num_experts_per_tok": 8,
                 "max_position_embeddings": 32768,
                 "vocab_size": 152064,
                 "torch_dtype": "bfloat16",
@@ -36,6 +41,11 @@ def test_inspect_qwen_source_reads_config_and_index(tmp_path: Path) -> None:
 
     inspection = inspect_qwen_source(tmp_path)
     assert inspection.config.model_type == "qwen2"
+    assert inspection.config.num_key_value_heads == 8
+    assert inspection.config.intermediate_size == 27648
+    assert inspection.config.moe_intermediate_size == 768
+    assert inspection.config.num_experts == 128
+    assert inspection.config.num_experts_per_tok == 8
     assert inspection.expected_shards == 2
     assert inspection.present_shards == 1
     assert inspection.format_name == "safetensors-sharded"

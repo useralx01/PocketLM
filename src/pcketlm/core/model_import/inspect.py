@@ -16,6 +16,11 @@ class ConfigSummary:
     hidden_size: int | None = None
     num_hidden_layers: int | None = None
     num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    intermediate_size: int | None = None
+    moe_intermediate_size: int | None = None
+    num_experts: int | None = None
+    num_experts_per_tok: int | None = None
     max_position_embeddings: int | None = None
     vocab_size: int | None = None
     torch_dtype: str | None = None
@@ -28,6 +33,11 @@ class ConfigSummary:
             "hidden_size": self.hidden_size,
             "num_hidden_layers": self.num_hidden_layers,
             "num_attention_heads": self.num_attention_heads,
+            "num_key_value_heads": self.num_key_value_heads,
+            "intermediate_size": self.intermediate_size,
+            "moe_intermediate_size": self.moe_intermediate_size,
+            "num_experts": self.num_experts,
+            "num_experts_per_tok": self.num_experts_per_tok,
             "max_position_embeddings": self.max_position_embeddings,
             "vocab_size": self.vocab_size,
             "torch_dtype": self.torch_dtype,
@@ -65,6 +75,11 @@ def inspect_qwen_source(model_dir: Path) -> SourceInspection:
         hidden_size=config_payload.get("hidden_size"),
         num_hidden_layers=config_payload.get("num_hidden_layers"),
         num_attention_heads=config_payload.get("num_attention_heads"),
+        num_key_value_heads=config_payload.get("num_key_value_heads"),
+        intermediate_size=config_payload.get("intermediate_size"),
+        moe_intermediate_size=config_payload.get("moe_intermediate_size"),
+        num_experts=config_payload.get("num_experts"),
+        num_experts_per_tok=config_payload.get("num_experts_per_tok"),
         max_position_embeddings=config_payload.get("max_position_embeddings"),
         vocab_size=config_payload.get("vocab_size"),
         torch_dtype=config_payload.get("torch_dtype"),
