@@ -2748,3 +2748,26 @@ Kill-switch sanity: returned to baseline-speed territory, but not within 10% of 
 ## Phase Speed v2 / STOP
 
 STOP condition: after all tested levers, warm remains above `8s/token`. The only lever that reduced reported tensor-load time by more than 20% moved the cost into compute/page faults and did not reduce wall-clock latency. Direct paged Qwen 14B on this CPU path needs a deeper architectural change: packed quantized execution, a native fused backend, GPU execution, or a different direct-runtime design that does not stream the full dense 14B weights through Python/Torch per token.
+
+## Phase MoE / Setup
+
+```text
+phase-moe-foundation
+```
+
+## Phase MoE / Step 1 / 14B baseline
+
+```text
+model=qwen2.5-14b-instruct
+slice=full
+max_new_tokens=1
+generated_text=Hello
+elapsed_process_seconds=19.888
+runtime_total_seconds=18.8474
+prefill_stack_seconds=17.3150
+tensor_load_seconds=15.2449
+free_ram_start_mb=2567
+free_ram_end_mb=8193
+peak_working_set_mb=9031
+ready=true
+```
