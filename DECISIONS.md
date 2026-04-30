@@ -417,3 +417,14 @@ Why:
 - The live warmed app-path proof generated `19` tokens at `0.352s/token` / `2.843 tokens/sec`, beating the `2-4s/token` goal.
 - The direct dense runtime remains around `19-22s/token`, so it is not the release chat path on this hardware.
 - The speed improvement came from using the right backend path and making it the product default, not from another small safetensors cache tweak.
+
+## Phase Speed / Sticky residency stop
+
+Decision:
+- Add sticky residency metadata and eviction preference, but stop the direct paged speed phase after Step 2 because it did not improve `--slice=full` for Qwen 14B at `max_new_tokens=1`.
+
+Why:
+- Baseline best warm direct paged run was `17.407s/token`, with `14.334s` in tensor loading.
+- After sticky residency, best warm run was `17.684s/token`, with `14.554s` in tensor loading.
+- The single-token full-prompt path loads each layer's large tensors once during prefill; residency only helps when the same tensors are requested again inside the same process and budget window.
+- The 4-5s/token target for direct paged runtime needs an architectural lever that reduces first-pass tensor IO/copy cost, not only a cache eviction policy.

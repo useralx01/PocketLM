@@ -7,7 +7,9 @@ from pcketlm.core.runtime.tensor_catalog import TensorCatalogEntry
 from pcketlm.core.runtime.tensor_loader import LoadedTensorSlice
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
+    advance_tensor_residency_step,
     clear_tensor_residency_cache,
+    current_tensor_residency_step,
     load_resident_tensor,
     load_resident_tensors,
     tensor_residency_stats,
@@ -77,6 +79,43 @@ def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_pat
     assert stats.misses == 1
     assert stats.stores == 1
     assert stats.resident_count == 1
+
+
+def test_sticky_residency_prefers_evicting_stale_tensor_over_recent_tensor(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "resident-sticky-test"
+    entries = {
+        "a": _entry(tmp_path, tensor_name="a"),
+        "b": _entry(tmp_path, tensor_name="b"),
+        "c": _entry(tmp_path, tensor_name="c"),
+    }
+    calls: list[str] = []
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        calls.append(tensor_name)
+        return _loaded_tensor(model_id_arg, entries[tensor_name], value=float(len(calls)))
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(max_resident_bytes=32, max_tensor_bytes=1024, sticky_residency_steps=1)
+    load_resident_tensor(model_id, "a", policy=policy)
+    advance_tensor_residency_step()
+    load_resident_tensor(model_id, "b", policy=policy)
+    load_resident_tensor(model_id, "a", policy=policy)
+    advance_tensor_residency_step()
+    load_resident_tensor(model_id, "c", policy=policy)
+
+    stats = tensor_residency_stats()
+    load_resident_tensor(model_id, "b", policy=policy)
+    load_resident_tensor(model_id, "a", policy=policy)
+
+    assert current_tensor_residency_step() == 2
+    assert stats.evictions == 1
+    assert calls == ["a", "b", "c", "a"]
 
 
 def test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom(monkeypatch) -> None:

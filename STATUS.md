@@ -537,3 +537,10 @@ Latest Phase 4 speed target proof:
 - GGUF chat responses now include `generation_speed`, and the runtime panel shows Token speed plus whether the speed target was met.
 - Full suite passed with `211` tests, frontend syntax check is clean, and compile verification is clean.
 - Current Phase 4 speed estimate: about `65%` complete. The target speed is achieved for a warmed loaded server; remaining speed work is making the load/recovery/default state smoother and keeping RAM behavior understandable.
+
+Latest direct paged speed attempt:
+- A new direct-paged speed branch measured Qwen 14B `--slice=full --max-new-tokens=1` with GGUF unloaded.
+- Baseline three-run best warm result was `17.407s/token` / `0.0574 tokens/sec`, with `14.334s` spent loading tensors.
+- Sticky residency was implemented and tested, but Step 2 best warm result was `17.684s/token` / `0.0565 tokens/sec`, with `14.554s` spent loading tensors.
+- Per stop condition, the phase stopped at Lever 1. Sticky residency does not address the first-pass prefill IO wall for a one-token full prompt.
+- Outcome: direct paged runtime speed target not met. A real direct-speed phase must reduce first-pass tensor IO/copy cost, not just eviction behavior.

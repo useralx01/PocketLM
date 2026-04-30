@@ -2574,3 +2574,79 @@ best_warm_gap_vs_cold=4.044s faster
 best_warm_tensor_load_gap_vs_cold=3.526s faster
 best_warm_still_spends_14.334s in tensor loading
 ```
+
+## Phase Speed / Step 2 / pytest
+
+```text
+python -m pytest tests/test_tensor_residency.py::test_sticky_residency_prefers_evicting_stale_tensor_over_recent_tensor -v
+1 passed in 1.54s
+
+python -m pytest tests/test_tensor_residency.py tests/test_runtime_tensor_loader.py -v
+25 passed in 1.59s
+```
+
+## Phase Speed / Step 2 / measurement
+
+Run 1:
+
+```text
+exit=0
+wall_seconds=22.841
+diagnostic_total_seconds=20.753
+seconds_per_token=20.753
+tokens_per_second=0.0482
+tensor_load_seconds=17.252
+layer_compute_plus_other_seconds=3.500
+free_ram_before_mb=4706
+free_ram_after_mb=3120
+working_set_after_mb=930
+generated_text="Hello"
+```
+
+Run 2:
+
+```text
+exit=0
+wall_seconds=22.748
+diagnostic_total_seconds=20.515
+seconds_per_token=20.515
+tokens_per_second=0.0487
+tensor_load_seconds=17.243
+layer_compute_plus_other_seconds=3.273
+free_ram_before_mb=3806
+free_ram_after_mb=2357
+working_set_after_mb=930
+generated_text="Hello"
+```
+
+Run 3:
+
+```text
+exit=0
+wall_seconds=20.133
+diagnostic_total_seconds=17.684
+seconds_per_token=17.684
+tokens_per_second=0.0565
+tensor_load_seconds=14.554
+layer_compute_plus_other_seconds=3.131
+free_ram_before_mb=3618
+free_ram_after_mb=5247
+working_set_after_mb=998
+generated_text="Hello"
+```
+
+## Phase Speed / STOP
+
+```text
+step=2
+condition=Lever 1 alone produces no measurable improvement
+baseline_best_warm_seconds_per_token=17.407
+baseline_best_warm_tokens_per_second=0.0574
+baseline_best_warm_tensor_load_seconds=14.334
+step2_best_warm_seconds_per_token=17.684
+step2_best_warm_tokens_per_second=0.0565
+step2_best_warm_tensor_load_seconds=14.554
+verdict=not met
+reason=Sticky residency does not help the single-token full-prompt benchmark because Qwen 14B prefill loads each layer's large tensors once, then moves on. There is almost no same-process tensor reuse for sticky residency to exploit before the first generated token.
+architectural_conclusion=The requested 4-5s/token direct paged runtime target needs a different lever than residency pinning, most likely persistent per-layer weight service, memory-mapped packed weights with lower copy cost, larger contiguous derived packs, or backend execution changes.
+```

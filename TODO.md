@@ -7,6 +7,8 @@
 
 ## Next
 
+- Re-scope direct paged runtime speed around first-pass tensor IO/copy reduction. Sticky residency did not improve Qwen 14B `--slice=full` at one generated token.
+- Investigate architecture-level direct runtime levers: persistent per-layer weight service, memory-mapped packed weights, larger contiguous derived packs, or a backend execution change that avoids reopening/copying large projection tensors per prompt.
 - Phase 4 hardening: make the loaded GGUF path smooth across app refresh/restart where practical.
 - Improve RAM messaging and recovery for the loaded GGUF server because this machine can drop below `1 GB` free RAM while the fast path is loaded.
 - Add a visible loaded-speed proof in the UI after GGUF server is ready: seconds/token, server RAM, and last warm prompt latency.

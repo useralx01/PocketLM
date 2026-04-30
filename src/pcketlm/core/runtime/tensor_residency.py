@@ -22,6 +22,7 @@ from pcketlm.core.runtime.tensor_loader import (
 DEFAULT_TENSOR_CACHE_MB = 256
 DEFAULT_FRONT_LAYER_COUNT = 12
 DEFAULT_MAX_TENSOR_CACHE_MB = 32
+DEFAULT_STICKY_RESIDENCY_STEPS = 1
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -79,6 +80,7 @@ class TensorResidencyPolicy:
     adaptive_boost_active: bool = False
     model_aware_budget_active: bool = False
     free_memory_bytes: int | None = None
+    sticky_residency_steps: int = DEFAULT_STICKY_RESIDENCY_STEPS
 
     @classmethod
     def from_environment(cls, model_id: str | None = None) -> "TensorResidencyPolicy":
@@ -129,6 +131,7 @@ class TensorResidencyPolicy:
             adaptive_boost_active=adaptive_boost_active,
             model_aware_budget_active=model_aware_budget_active,
             free_memory_bytes=free_memory_bytes,
+            sticky_residency_steps=max(0, _env_int("PCKETLM_TENSOR_CACHE_STICKY_STEPS", DEFAULT_STICKY_RESIDENCY_STEPS)),
         )
 
     def to_dict(self) -> dict:
@@ -145,6 +148,7 @@ class TensorResidencyPolicy:
             "model_aware_budget_active": self.model_aware_budget_active,
             "free_memory_bytes": self.free_memory_bytes,
             "free_memory_gb": None if self.free_memory_bytes is None else round(self.free_memory_bytes / (1024**3), 2),
+            "sticky_residency_steps": self.sticky_residency_steps,
         }
 
 
@@ -178,6 +182,7 @@ class _ResidentTensor:
     entry: TensorCatalogEntry
     nbytes: int
     dtype: str
+    loaded_step: int
 
 
 _CacheKey = tuple[str, str, str, int, int, str]
@@ -186,6 +191,21 @@ _cache_lock = threading.RLock()
 _resident_tensors: OrderedDict[_CacheKey, _ResidentTensor] = OrderedDict()
 _stats = TensorResidencyStats()
 _resident_bytes = 0
+_residency_step = 0
+
+
+def advance_tensor_residency_step(steps: int = 1) -> int:
+    """Advance the logical decode step used by sticky residency."""
+    global _residency_step
+    with _cache_lock:
+        _residency_step += max(1, int(steps))
+        return _residency_step
+
+
+def current_tensor_residency_step() -> int:
+    """Return the current logical decode step used by sticky residency."""
+    with _cache_lock:
+        return _residency_step
 
 
 def _find_tensor_entry(model_id: str, tensor_name: str) -> TensorCatalogEntry | None:
@@ -274,7 +294,10 @@ def _store_resident_tensor(
             _resident_bytes -= old.nbytes
 
         while _resident_tensors and _resident_bytes + nbytes > policy.max_resident_bytes:
-            _old_key, old = _resident_tensors.popitem(last=False)
+            evict_key = _select_eviction_key(policy)
+            if evict_key is None:
+                break
+            old = _resident_tensors.pop(evict_key)
             _resident_bytes -= old.nbytes
             _stats.evictions += 1
 
@@ -283,11 +306,23 @@ def _store_resident_tensor(
             entry=entry,
             nbytes=nbytes,
             dtype=str(tensor.dtype),
+            loaded_step=_residency_step,
         )
         _resident_bytes += nbytes
         _stats.stores += 1
         _stats.resident_bytes = _resident_bytes
         _stats.resident_count = len(_resident_tensors)
+
+
+def _select_eviction_key(policy: TensorResidencyPolicy) -> _CacheKey | None:
+    """Choose an eviction victim, preserving recently loaded tensors when possible."""
+    if not _resident_tensors:
+        return None
+    sticky_floor = _residency_step - int(policy.sticky_residency_steps)
+    for key, resident in _resident_tensors.items():
+        if resident.loaded_step < sticky_floor:
+            return key
+    return next(iter(_resident_tensors))
 
 
 def load_resident_tensor(
@@ -395,10 +430,11 @@ def load_resident_tensors(
 
 def clear_tensor_residency_cache() -> None:
     """Release resident tensors and reset cache counters."""
-    global _memory_snapshot_cache, _resident_bytes, _stats
+    global _memory_snapshot_cache, _resident_bytes, _residency_step, _stats
     with _cache_lock:
         _resident_tensors.clear()
         _resident_bytes = 0
+        _residency_step = 0
         _stats = TensorResidencyStats()
         _memory_snapshot_cache = (0.0, None)
     clear_tensor_handle_cache()
