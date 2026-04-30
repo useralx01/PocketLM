@@ -2789,3 +2789,12 @@ pytest tests/test_runtime_layer_bridge.py::test_run_moe_mlp_routes_top_k_experts
 ```
 
 Added router softmax/top-k expert math with `norm_topk_prob` support. Dense Qwen2 path remains covered by the existing real-layer test.
+
+## Phase MoE / Step 6 / registry
+
+```text
+pytest tests/test_model_families.py tests/test_registry_repository.py -v
+5 passed in 0.10s
+```
+
+Added registry entry `qwen3-30b-a3b` -> `models/qwen3-30b-a3b/original/`, repo `Qwen/Qwen3-30B-A3B`, family `qwen-moe`, model_type `moe`.

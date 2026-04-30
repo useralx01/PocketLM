@@ -27,9 +27,17 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
         notes="First dense text runtime target.",
     ),
     ModelFamily(
+        key="qwen-moe",
+        label="Qwen MoE",
+        priority=2,
+        runtime_status="active",
+        aliases=("qwen3-moe", "qwen3_moe", "qwen-moe", "moe-qwen"),
+        notes="Paged MoE runtime target for huge sparse models.",
+    ),
+    ModelFamily(
         key="kimi",
         label="Kimi",
-        priority=2,
+        priority=3,
         runtime_status="planned",
         aliases=("moonshot",),
         notes="Next priority after Qwen when a local open-weight path is selected.",
@@ -37,7 +45,7 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
     ModelFamily(
         key="kronos",
         label="Kronos/Kronk",
-        priority=3,
+        priority=4,
         runtime_status="planned",
         aliases=("kronk",),
         notes="Planned if a concrete supported local model target exists.",
@@ -45,7 +53,7 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
     ModelFamily(
         key="gemma",
         label="Gemma",
-        priority=4,
+        priority=5,
         runtime_status="planned",
         aliases=("gemma2", "gemma3"),
         notes="Planned after the earlier priority families.",
