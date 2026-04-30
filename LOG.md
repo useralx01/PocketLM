@@ -2934,3 +2934,9 @@ regression=pass
 pytest tests/ -q
 223 passed in 22.50s
 ```
+
+## Phase MoE Speed / Setup
+
+```text
+phase-moe-speed
+```
