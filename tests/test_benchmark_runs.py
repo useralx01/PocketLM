@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from pcketlm.core.benchmark.runs import (
     build_backend_comparison_record,
     build_measured_benchmark_history,
+    run_backend_comparison_benchmark,
     run_lightweight_benchmark,
     run_gguf_measured_benchmark,
     run_measured_benchmark,
@@ -76,6 +77,104 @@ def test_build_backend_comparison_record_marks_missing_boosted_honestly() -> Non
     assert boosted["ready"] is False
     assert boosted["status"] == "needs-benchmark"
     assert tags["recommended"] == "direct_standard"
+
+
+def test_run_backend_comparison_benchmark_persists_three_backend_rows(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import benchmark, storage
+    from pcketlm.core.benchmark.readiness import BenchmarkReadiness
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        benchmark.runs,
+        "build_benchmark_readiness",
+        lambda model_id, model_dir: BenchmarkReadiness(
+            model_id=model_id,
+            model_dir=model_dir,
+            ready=True,
+            status="Ready",
+            summary="Benchmark setup is ready.",
+            first_checks=[],
+            blockers=[],
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(benchmark.runs, "_free_ram_mb", lambda: 8192)
+    monkeypatch.setattr(
+        benchmark.runs,
+        "_run_gguf_backend_comparison_case",
+        lambda model_id, prompt, max_new_tokens: benchmark.runs.MeasuredBenchmarkCase(
+            label="GGUF Compare",
+            layer_count=None,
+            elapsed_seconds=0.5,
+            ready=True,
+            generated_text="OK",
+            backend="llama-cpp-gguf-server",
+            prompt_kind="backend-comparison",
+            max_new_tokens=max_new_tokens,
+            memory={"server_working_set_mb": 8600},
+        ),
+    )
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            generated_token_ids=[1],
+            stop_reason="step-limit",
+            blockers=[],
+            timings={"total": 20.0},
+        )
+
+    monkeypatch.setattr(benchmark.runs, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+
+    result = run_backend_comparison_benchmark("qwen-test", tmp_path / "model")
+
+    assert [case.label for case in result.cases] == ["Direct Standard", "Direct Boosted", "GGUF Compare"]
+    assert result.runtime_settings["benchmark_scope"] == "backend-comparison"
+    assert result.runtime_settings["backend_comparison"]["rows"][2]["backend_id"] == "direct_boosted"
+    assert (tmp_path / "models" / "qwen-test" / "benchmarks" / "latest.measured-benchmark.json").exists()
+
+
+def test_run_backend_comparison_benchmark_blocks_direct_rows_under_ram_floor(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import benchmark, storage
+    from pcketlm.core.benchmark.readiness import BenchmarkReadiness
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        benchmark.runs,
+        "build_benchmark_readiness",
+        lambda model_id, model_dir: BenchmarkReadiness(
+            model_id=model_id,
+            model_dir=model_dir,
+            ready=True,
+            status="Ready",
+            summary="Benchmark setup is ready.",
+            first_checks=[],
+            blockers=[],
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(benchmark.runs, "_free_ram_mb", lambda: 1024)
+    monkeypatch.setattr(
+        benchmark.runs,
+        "_run_gguf_backend_comparison_case",
+        lambda model_id, prompt, max_new_tokens: benchmark.runs.MeasuredBenchmarkCase(
+            label="GGUF Compare",
+            layer_count=None,
+            elapsed_seconds=0.5,
+            ready=True,
+            generated_text="OK",
+            backend="llama-cpp-gguf-server",
+            prompt_kind="backend-comparison",
+            max_new_tokens=max_new_tokens,
+        ),
+    )
+
+    result = run_backend_comparison_benchmark("qwen-test", tmp_path / "model")
+
+    direct_rows = [case for case in result.cases if case.backend == "direct-cpu"]
+    assert all(case.ready is False for case in direct_rows)
+    assert "below the 4096 MB direct benchmark guard" in direct_rows[0].blockers[0]
 
 
 def test_run_lightweight_benchmark_persists_run_and_latest(tmp_path: Path, monkeypatch) -> None:

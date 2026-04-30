@@ -258,6 +258,7 @@ function renderGgufServer(payload) {
   const backend = payload.gguf_backend || {};
   const server = backend.llama_server || {};
   const files = backend.model_files || [];
+  const artifactSummary = backend.artifact_summary || {};
   const estimate = backend.load_estimate || {};
   const modelFile = files.find((file) => file.path === estimate.model_path)
     || files.find((file) => !(file.path || "").includes("-of-"))
@@ -305,6 +306,12 @@ function renderGgufServer(payload) {
     </div>
     <div class="item compact-item">
       <div class="item-title"><span>GGUF files</span><span class="pill">${files.length}</span></div>
+      <p>${escapeText(artifactSummary.summary || "Disk usage unavailable.")}</p>
+      <div class="mini-metrics">
+        <span>${escapeText(`${artifactSummary.complete_file_count ?? 0} complete`)}</span>
+        <span>${escapeText(`${artifactSummary.split_shard_count ?? 0} split`)}</span>
+        <span>${escapeText(`${artifactSummary.total_size_gb ?? 0} GB total`)}</span>
+      </div>
       ${artifactList}
     </div>
   `;
@@ -777,6 +784,26 @@ async function updateRuntimePreset(event) {
   }
 }
 
+async function runComparisonBenchmark() {
+  const button = $("#run-comparison-benchmark");
+  const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
+  button.disabled = true;
+  button.textContent = "Running...";
+  $("#benchmark-status").textContent = "Running GGUF vs Direct Standard vs Direct Boosted.";
+  try {
+    await api("/api/benchmark/comparison", {
+      method: "POST",
+      body: JSON.stringify({ model_id: modelId }),
+    });
+    renderStatus(await api("/api/status"));
+  } catch (error) {
+    $("#benchmark-status").textContent = `Comparison failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Run comparison";
+  }
+}
+
 async function controlWarmRunner(action) {
   const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
   const startButton = $("#warm-runner-start");
@@ -828,6 +855,7 @@ async function boot() {
   $("#cancel-button").addEventListener("click", cancelChat);
   $("#retry-button").addEventListener("click", retryLastPrompt);
   $("#run-benchmark").addEventListener("click", runBenchmark);
+  $("#run-comparison-benchmark").addEventListener("click", runComparisonBenchmark);
   $("#run-gguf-benchmark").addEventListener("click", runGgufBenchmark);
   $("#tensor-cache-preset").addEventListener("change", updateRuntimePreset);
   $("#agent-warm-runner").addEventListener("change", updateRuntimePreset);

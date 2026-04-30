@@ -367,3 +367,27 @@ Why:
 - GGUF is the practical speed recommendation when ready, but Direct Standard/Boosted still matter as the dense custom-runtime path.
 - Best quality is treated as the full direct dense path, preferring Direct Boosted if it has real measured data and falling back to Direct Standard if Boosted is missing.
 - Lowest RAM is tagged only when a measured memory value exists.
+
+## Phase 3F / Final comparison benchmark
+
+Decision:
+- Add a dedicated backend-comparison benchmark separate from the GGUF-only benchmark.
+- Run Direct Standard and Direct Boosted before GGUF so llama-server RAM does not distort the dense-path measurement.
+- Block direct comparison rows below `4096 MB` free RAM instead of trying to force a risky run.
+- Keep the Benchmarks comparison table pinned to the newest `backend-comparison` scoped run, even if a later GGUF-only benchmark becomes the latest raw benchmark.
+
+Why:
+- The product needs one button that produces real numbers for GGUF, Direct Standard, and Direct Boosted instead of mixing partial benchmark histories.
+- A loaded GGUF server can consume about `9.3 GB` working set on this machine, so starting it first would make direct rows less fair and more likely to hit memory pressure.
+- GGUF-only benchmark runs are useful for agent quality checks, but they should not erase the comparison table's Direct rows.
+- The latest live comparison measured Direct Standard at `21.03s`, Direct Boosted at `19.81s`, and GGUF Compare at `26.05s` on a cold server-backed one-token `OK` prompt; after loading, GGUF remains the recommended practical backend for longer local chat/agent use.
+
+## Phase 3F / GGUF artifact and agent checks
+
+Decision:
+- GGUF status should include a disk artifact summary that counts complete `.gguf` files and split shards.
+- GGUF benchmarks should include agent-plan and follow-up prompts, not only short instruction and logic prompts.
+
+Why:
+- Power users need to see whether disk space is being spent on merged artifacts, split shards, or both.
+- The product direction is agent-first, so a GGUF backend that only answers `OK` is not enough evidence.

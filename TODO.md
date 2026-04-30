@@ -7,16 +7,13 @@
 
 ## Next
 
-- Decide how GGUF mode should sit beside Direct CPU Standard/Boosted in the customer UI: default, power-user option, or auto-suggested when enough RAM is available.
-- Add stronger agent-style GGUF checks that test tool-planning wording, short task decomposition, and follow-up consistency beyond the first two-step checklist.
 - Extend the new GGUF file list into a selectable artifact manager if multiple complete GGUF files exist for the same model.
-- Add a side-by-side disk usage summary for merged GGUF artifacts versus downloaded split shards.
-- Add a measured Direct Boosted benchmark row so the new backend comparison table can fill Direct Boosted with real numbers instead of `needs-benchmark`.
+- Add cleanup actions for redundant GGUF split shards or old merged artifacts after the user explicitly approves deletion.
 - Next speed target: design a real reduction in repeated large tensor movement. Bigger resident-cache tweaks are now low-return; the next useful step should be a better derived weight layout/backend path that avoids reloading the same projection weights so often.
 - Keep the `288 MB` / `13` front-layer residency boost as a selectable preset, not an automatic default; do not expand it again without a live speed win.
 - Treat the new `361.02 MB` Boosted pack as optional, not a default release path, until longer follow-up tests show a bigger win than the first roughly `0.6s` Quick improvement.
 - Next major speed path should investigate backend execution changes or more direct mapped-weight execution; safetensors repacking alone is now showing limited returns.
-- Extend the backend comparison runner so it can safely switch Standard/Boosted presets and compare them against GGUF on the same prompt.
+- Phase 4: build the first agent workflow foundation with plan/run/verify state, safe local file inspection, cancellation, logs, and model/backend choice.
 - Continue session-prefix/KV reuse work beyond the first guarded implementation; exact response reuse is instant for retries, and prefix reuse now exists but needs batched suffix append to speed up normal follow-ups
 - Next session-speed target: reduce repeated tensor loading during batched prefix reuse, because live follow-up proof now saves prompt work but still spends most time loading the same layer weights
 - Use the new engine-decision status as the base for future backend work: DirectML/Vulkan/llama.cpp-style CPU/GPU hybrid experiments should plug into this selector instead of being hardwired

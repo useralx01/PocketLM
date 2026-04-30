@@ -10,6 +10,7 @@ from pcketlm.core.runtime.gguf_backend import (
     run_gguf_prompt,
     start_gguf_server,
     stop_gguf_server,
+    summarize_gguf_artifacts,
 )
 
 
@@ -45,6 +46,31 @@ def test_find_gguf_model_files_handles_nested_split_files(tmp_path: Path, monkey
 
     assert len(files) == 2
     assert {file.to_dict()["kind"] for file in files} == {"split-shard"}
+
+
+def test_summarize_gguf_artifacts_counts_complete_and_split_files(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "qwen-test"
+    artifact_dir = tmp_path / "models" / model_id / "artifacts"
+    split_dir = artifact_dir / "gguf" / "q4"
+    artifact_dir.mkdir(parents=True)
+    split_dir.mkdir(parents=True)
+    merged = artifact_dir / "queen-q4.gguf"
+    merged.write_bytes(b"m" * 10)
+    (split_dir / "queen-q4-00001-of-00002.gguf").write_bytes(b"s" * 3)
+    (split_dir / "queen-q4-00002-of-00002.gguf").write_bytes(b"s" * 4)
+
+    summary = summarize_gguf_artifacts(model_id)
+
+    assert summary["file_count"] == 3
+    assert summary["complete_file_count"] == 1
+    assert summary["split_shard_count"] == 2
+    assert summary["total_size_bytes"] == 17
+    assert summary["complete_size_bytes"] == 10
+    assert summary["split_size_bytes"] == 7
+    assert summary["largest_complete_path"] == str(merged)
 
 
 def test_estimate_gguf_load_cost_reports_missing_model(tmp_path: Path, monkeypatch) -> None:
@@ -151,6 +177,7 @@ def test_build_gguf_backend_status_reports_missing_package_and_model(tmp_path: P
     assert status.sidecar_package_available is False
     assert status.llama_cli_available is False
     assert len(status.blockers) == 2
+    assert status.artifact_summary["file_count"] == 0
     assert status.load_estimate["state"] == "missing"
 
 

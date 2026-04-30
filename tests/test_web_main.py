@@ -1,3 +1,4 @@
+import json
 import socket
 from types import SimpleNamespace
 
@@ -1182,6 +1183,28 @@ def test_status_payload_includes_live_download_meter(monkeypatch, tmp_path) -> N
     assert payload["records"][0]["model_id"] == "qwen2.5-32b-instruct"
     assert payload["records"][0]["progress_pct"] == 2.05
     assert payload["active"][0]["status"] == "downloading"
+
+
+def test_latest_measured_benchmark_by_scope_finds_comparison_run(monkeypatch, tmp_path) -> None:
+    from pcketlm.app import web
+
+    model_id = "qwen-test"
+    root = tmp_path / "models" / model_id / "benchmarks"
+    root.mkdir(parents=True)
+    (root / "older.measured-benchmark.json").write_text(
+        json.dumps({"run_id": "older", "runtime_settings": {"benchmark_scope": "gguf"}}),
+        encoding="utf-8",
+    )
+    comparison_path = root / "newer.measured-benchmark.json"
+    comparison_path.write_text(
+        json.dumps({"run_id": "newer", "runtime_settings": {"benchmark_scope": "backend-comparison"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web.main, "benchmarks_root", lambda _model_id: root)
+
+    payload = web.main._latest_measured_benchmark_by_scope(model_id, "backend-comparison")
+
+    assert payload["run_id"] == "newer"
 
 
 def test_update_runtime_settings_selects_boosted_cache(monkeypatch, tmp_path) -> None:

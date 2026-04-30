@@ -2267,3 +2267,82 @@ exit=0
 python -m pytest tests/ -v
 204 passed in 15.36s
 ```
+
+## Phase 3F / Speed and reliability productization complete
+
+Change:
+
+```text
+Added a dedicated backend-comparison benchmark action that measures Direct Standard, Direct Boosted, and GGUF / llama.cpp on the same one-token instruction prompt.
+The comparison benchmark runs direct rows before GGUF so a loaded llama-server does not consume RAM before dense-path measurement.
+Direct benchmark rows are blocked below 4096 MB free RAM instead of risking a crash.
+GGUF benchmarks now include stronger agent-style plan and follow-up checks.
+GGUF backend status now includes an artifact disk summary for complete GGUF files and split shards.
+/api/status now keeps using the newest backend-comparison scoped run for the comparison table, so a later GGUF-only benchmark does not erase Direct Standard / Direct Boosted rows.
+```
+
+Live backend comparison:
+
+```text
+model=qwen2.5-14b-instruct
+prompt="Reply with OK only."
+
+Direct Standard: ready=true, elapsed=21.03s, text="OK", free_ram_before_mb=4734, free_ram_after_mb=9111, tensor_cache_preset=standard, resident_bytes=127303680
+Direct Boosted: ready=true, elapsed=19.81s, text="OK", free_ram_before_mb=9112, free_ram_after_mb=9807, tensor_cache_preset=boosted, resident_bytes=127268864
+GGUF Compare: ready=true, elapsed=26.05s, text="OK", llama_server_pid=3704, server_working_set_mb=9339.37
+
+fastest=Direct Boosted
+best_quality=Direct Boosted
+lowest_ram=Direct Boosted
+recommended=GGUF / llama.cpp
+
+After comparison unload: running=false, ready=false, pid=null, free_ram_after_gb=9.77
+```
+
+Live GGUF agent benchmark:
+
+```text
+model=qwen2.5-14b-instruct
+
+GGUF 1: 17.87s -> OK
+GGUF 4: 1.86s -> Local AI enhances efficiency
+GGUF 8: 3.30s -> Pocket LLM provides concise answers and assistance
+GGUF 32: 9.16s -> Pocket LLM is a compact, user-friendly AI model designed to provide quick and helpful responses on various topics.
+GGUF Logic: 1.17s -> YES
+GGUF Agent: 15.06s -> 1. Verify the model's input and output formats to ensure compatibility with your testing environment.
+2. Run a set of predefined test cases to evaluate the model's performance and accuracy.
+GGUF Agent Plan: 15.80s -> 1. Review the file for any existing issues or deprecated code.
+2. Ensure the file meets current coding standards and guidelines.
+3. Confirm the changes will not affect the system's stability or security.
+GGUF Agent Follow-up: 7.81s -> 1. Review code for any potential bugs.
+2. Document the changes made in the project.
+
+After GGUF benchmark unload: running=false, ready=false, pid=null, free_ram_after_gb=9.63
+```
+
+Status-payload proof after the later GGUF-only run:
+
+```text
+ready=True
+GGUF / llama.cpp ready=True seconds_per_token=26.05
+Direct Standard ready=True seconds_per_token=21.03
+Direct Boosted ready=True seconds_per_token=19.81
+tags: Direct Boosted, Direct Boosted, Direct Boosted, GGUF / llama.cpp
+scope_latest_rows=3
+```
+
+Verification:
+
+```text
+python -m pytest tests/test_benchmark_runs.py tests/test_gguf_backend.py tests/test_web_main.py -v
+72 passed in 3.16s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+python -m compileall -q src tests
+exit=0
+
+python -m pytest tests/ -v
+208 passed in 14.77s
+```

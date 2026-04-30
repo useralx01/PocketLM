@@ -24,6 +24,7 @@ from pcketlm.app.desktop.status_screen import build_status_screen_model, list_st
 from pcketlm.core.benchmark import (
     build_backend_comparison_record,
     build_measured_benchmark_history,
+    run_backend_comparison_benchmark,
     run_gguf_measured_benchmark,
     run_measured_benchmark,
 )
@@ -900,6 +901,24 @@ def _latest_json(path: Path) -> dict | None:
         return None
 
 
+def _latest_measured_benchmark_by_scope(model_id: str, scope: str) -> dict | None:
+    root = benchmarks_root(model_id)
+    try:
+        paths = sorted(root.glob("*.measured-benchmark.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for path in paths:
+        if path.name.startswith("latest."):
+            continue
+        payload = _latest_json(path)
+        if not payload:
+            continue
+        runtime_settings = dict(payload.get("runtime_settings") or {})
+        if runtime_settings.get("benchmark_scope") == scope:
+            return payload
+    return None
+
+
 def _cleanup_chat_jobs(now: float | None = None) -> None:
     current = time.time() if now is None else now
     with _CHAT_JOBS_LOCK:
@@ -1393,6 +1412,7 @@ def _status_payload() -> dict:
     model_dir = selected.model_dir if selected else original_model_root(model_id)
     status = build_status_screen_model(model_id=model_id, model_dir=model_dir)
     latest_benchmark = _latest_json(benchmarks_root(model_id) / "latest.measured-benchmark.json")
+    latest_backend_comparison = _latest_measured_benchmark_by_scope(model_id, "backend-comparison") or latest_benchmark
     latest_artifact = latest_optimized_artifact_manifest(model_id)
     direct_runtime = _direct_runtime_state(status, latest_benchmark)
     backend_report = build_runtime_backend_report(model_id)
@@ -1421,7 +1441,7 @@ def _status_payload() -> dict:
         "engine_decision": select_runtime_engine(model_id).to_dict(),
         "backend_report": backend_report_payload,
         "backend_comparison": build_backend_comparison_record(
-            latest_benchmark,
+            latest_backend_comparison,
             recommended_backend_id=recommended_backend_id,
         ),
         "gguf_backend": build_gguf_backend_status(model_id).to_dict(),
@@ -1530,6 +1550,9 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/api/benchmark/gguf":
                 self._handle_gguf_benchmark(payload)
                 return
+            if self.path == "/api/benchmark/comparison":
+                self._handle_backend_comparison_benchmark(payload)
+                return
             if self.path == "/api/settings/runtime":
                 self._handle_runtime_settings(payload)
                 return
@@ -1576,6 +1599,12 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
         model_id = str(payload.get("model_id") or "qwen2.5-14b-instruct")
         model_dir = original_model_root(model_id)
         run = run_gguf_measured_benchmark(model_id, model_dir)
+        _json_response(self, 200, run.to_dict())
+
+    def _handle_backend_comparison_benchmark(self, payload: dict) -> None:
+        model_id = str(payload.get("model_id") or "qwen2.5-14b-instruct")
+        model_dir = original_model_root(model_id)
+        run = run_backend_comparison_benchmark(model_id, model_dir)
         _json_response(self, 200, run.to_dict())
 
     def _handle_runtime_settings(self, payload: dict) -> None:

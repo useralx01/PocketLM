@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -12,13 +13,17 @@ from pcketlm.core.benchmark.readiness import BenchmarkReadiness, build_benchmark
 from pcketlm.core.runtime import (
     DEFAULT_LM_HEAD_CHUNK_ROWS,
     build_gguf_backend_status,
+    build_gguf_server_status,
     run_gguf_prompt,
     run_prompt_decode_loop,
     runtime_math_dtype_name,
     runtime_torch_thread_count,
 )
+from pcketlm.core.runtime.load_attempt import _memory_snapshot
 from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, tensor_residency_stats
 from pcketlm.core.storage.paths import benchmarks_root
+
+MIN_BACKEND_COMPARISON_FREE_RAM_MB = 4 * 1024
 
 
 @dataclass(slots=True)
@@ -74,6 +79,7 @@ class MeasuredBenchmarkCase:
     tensor_residency: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
     timing_summary: dict = field(default_factory=dict)
+    memory: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +97,7 @@ class MeasuredBenchmarkCase:
             "tensor_residency": dict(self.tensor_residency),
             "timings": dict(self.timings),
             "timing_summary": dict(self.timing_summary),
+            "memory": dict(self.memory),
         }
 
 
@@ -225,6 +232,11 @@ def _case_memory_mb(case: dict) -> tuple[float, str] | tuple[None, None]:
         value = _round_seconds(case.get(key))
         if value is not None:
             return value, "working set"
+    memory = dict(case.get("memory") or {})
+    for key in ["process_working_set_mb", "server_working_set_mb"]:
+        value = _round_seconds(memory.get(key))
+        if value is not None and value > 0:
+            return value, "working set"
     residency = dict(case.get("tensor_residency") or {})
     resident_bytes = residency.get("resident_bytes")
     try:
@@ -356,6 +368,89 @@ def _gguf_stop_strings() -> list[str]:
     return ["<|im_end|>", "<|im_start|>"]
 
 
+def _free_ram_mb() -> int | None:
+    try:
+        return int(_memory_snapshot().free_bytes // (1024**2))
+    except Exception:
+        return None
+
+
+def _blocked_benchmark_case(label: str, *, backend: str, prompt_kind: str, blocker: str) -> MeasuredBenchmarkCase:
+    return MeasuredBenchmarkCase(
+        label=label,
+        layer_count=None,
+        elapsed_seconds=0.0,
+        ready=False,
+        generated_text="",
+        backend=backend,
+        prompt_kind=prompt_kind,
+        max_new_tokens=0,
+        stop_reason="blocked",
+        blockers=[blocker],
+    )
+
+
+def _run_direct_backend_comparison_case(
+    model_id: str,
+    *,
+    label: str,
+    tensor_cache_preset: str,
+    prompt: str,
+    max_new_tokens: int,
+) -> MeasuredBenchmarkCase:
+    free_before_mb = _free_ram_mb()
+    if free_before_mb is not None and free_before_mb < MIN_BACKEND_COMPARISON_FREE_RAM_MB:
+        return _blocked_benchmark_case(
+            label,
+            backend="direct-cpu",
+            prompt_kind="backend-comparison",
+            blocker=f"Free RAM is {free_before_mb} MB, below the {MIN_BACKEND_COMPARISON_FREE_RAM_MB} MB direct benchmark guard.",
+        )
+    previous_preset = os.environ.get("PCKETLM_TENSOR_CACHE_PRESET")
+    os.environ["PCKETLM_TENSOR_CACHE_PRESET"] = tensor_cache_preset
+    clear_tensor_residency_cache()
+    started = time.perf_counter()
+    try:
+        result = run_prompt_decode_loop(
+            model_id,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=1,
+            layer_count=None,
+            repetition_penalty=1.1,
+        )
+        elapsed = round(time.perf_counter() - started, 2)
+        timings = dict(getattr(result, "timings", {}) or {})
+        timings.setdefault("total", elapsed)
+        return MeasuredBenchmarkCase(
+            label=label,
+            layer_count=None,
+            elapsed_seconds=elapsed,
+            ready=result.ready,
+            generated_text=result.generated_text,
+            backend="direct-cpu",
+            prompt_kind="backend-comparison",
+            max_new_tokens=max_new_tokens,
+            generated_token_ids=list(result.generated_token_ids),
+            stop_reason=result.stop_reason,
+            blockers=list(result.blockers),
+            tensor_residency=tensor_residency_stats().to_dict(),
+            timings=timings,
+            timing_summary=_timing_summary(timings),
+            memory={
+                "free_ram_before_mb": free_before_mb,
+                "free_ram_after_mb": _free_ram_mb(),
+                "tensor_cache_preset": tensor_cache_preset,
+            },
+        )
+    finally:
+        if previous_preset is None:
+            os.environ.pop("PCKETLM_TENSOR_CACHE_PRESET", None)
+        else:
+            os.environ["PCKETLM_TENSOR_CACHE_PRESET"] = previous_preset
+        clear_tensor_residency_cache()
+
+
 def _run_gguf_benchmark_case(model_id: str, *, label: str, prompt_kind: str, prompt: str, max_new_tokens: int) -> MeasuredBenchmarkCase:
     started = time.perf_counter()
     result = run_gguf_prompt(
@@ -446,7 +541,118 @@ def _run_gguf_benchmark_cases(model_id: str) -> list[MeasuredBenchmarkCase]:
             prompt="List the next two safe steps for checking a local model. Use exactly two short numbered steps.",
             max_new_tokens=48,
         ),
+        _run_gguf_benchmark_case(
+            model_id,
+            label="GGUF Agent Plan",
+            prompt_kind="agent-plan",
+            prompt="A local AI agent must inspect files before changing code. Give exactly three short steps.",
+            max_new_tokens=64,
+        ),
+        _run_gguf_benchmark_case(
+            model_id,
+            label="GGUF Agent Follow-up",
+            prompt_kind="agent-followup",
+            prompt="Continue the check after tests pass. Give exactly two short next actions.",
+            max_new_tokens=48,
+        ),
     ]
+
+
+def _run_gguf_backend_comparison_case(model_id: str, *, prompt: str, max_new_tokens: int) -> MeasuredBenchmarkCase:
+    status = build_gguf_backend_status(model_id)
+    if not status.ready:
+        return _blocked_benchmark_case(
+            "GGUF Compare",
+            backend="llama-cpp-gguf",
+            prompt_kind="backend-comparison",
+            blocker="; ".join(status.blockers) or "GGUF backend is not ready.",
+        )
+    case = _run_gguf_benchmark_case(
+        model_id,
+        label="GGUF Compare",
+        prompt_kind="backend-comparison",
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+    )
+    server = build_gguf_server_status(model_id)
+    case.memory = {
+        "server_working_set_mb": None
+        if server.working_set_bytes is None
+        else round(server.working_set_bytes / (1024**2), 2),
+        "server_ready": server.ready,
+        "server_pid": server.pid,
+    }
+    return case
+
+
+def run_backend_comparison_benchmark(model_id: str, model_dir: Path) -> MeasuredBenchmarkRun:
+    """Run the shortest honest GGUF vs Direct Standard vs Direct Boosted comparison."""
+    readiness: BenchmarkReadiness = build_benchmark_readiness(model_id, model_dir)
+    created_at = datetime.now(timezone.utc).isoformat()
+    run_id = _run_id(created_at)
+    path = _measured_benchmark_path(model_id, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prompt = "Reply with OK only."
+    cases: list[MeasuredBenchmarkCase] = []
+    blockers = [] if readiness.ready else list(readiness.blockers)
+    warnings = list(readiness.warnings)
+    if readiness.ready and readiness.blockers:
+        warnings.extend(f"Readiness note: {blocker}" for blocker in readiness.blockers)
+    if readiness.ready:
+        cases.extend(
+            [
+                _run_direct_backend_comparison_case(
+                    model_id,
+                    label="Direct Standard",
+                    tensor_cache_preset="standard",
+                    prompt=prompt,
+                    max_new_tokens=1,
+                ),
+                _run_direct_backend_comparison_case(
+                    model_id,
+                    label="Direct Boosted",
+                    tensor_cache_preset="boosted",
+                    prompt=prompt,
+                    max_new_tokens=1,
+                ),
+                _run_gguf_backend_comparison_case(model_id, prompt=prompt, max_new_tokens=1),
+            ]
+        )
+        for case in cases:
+            blockers.extend(case.blockers)
+    comparison = build_backend_comparison_record(
+        {"cases": [case.to_dict() for case in cases]},
+        recommended_backend_id="llama-cpp-gguf" if any(case.label.startswith("GGUF") and case.ready for case in cases) else "direct-cpu",
+    )
+    ready = readiness.ready and bool(cases) and any(case.ready for case in cases)
+    fastest = next((tag for tag in comparison["tags"] if tag["tag"] == "fastest"), None)
+    summary = (
+        f"Backend comparison ready. Fastest measured path: {fastest['label']}."
+        if fastest
+        else "Backend comparison needs at least one successful measured row."
+    )
+    run = MeasuredBenchmarkRun(
+        model_id=model_id,
+        run_id=run_id,
+        benchmark_path=path,
+        created_at=created_at,
+        prompt=prompt,
+        max_new_tokens=1,
+        min_new_tokens=1,
+        ready=ready,
+        status="Backend comparison ready" if ready else "Backend comparison blocked",
+        summary=summary,
+        cases=cases,
+        blockers=list(dict.fromkeys(blockers)),
+        warnings=list(dict.fromkeys(warnings)),
+        runtime_settings={**_runtime_settings(), "benchmark_scope": "backend-comparison", "backend_comparison": comparison},
+    )
+    path.write_text(json.dumps(run.to_dict(), indent=2), encoding="utf-8")
+    (path.parent / "latest.measured-benchmark.json").write_text(
+        json.dumps(run.to_dict(), indent=2),
+        encoding="utf-8",
+    )
+    return run
 
 
 def build_measured_benchmark_history(model_id: str, *, limit: int = 12) -> dict:

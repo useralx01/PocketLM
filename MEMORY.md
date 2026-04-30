@@ -38,8 +38,10 @@ Codex should operate autonomously by default on Pocket LLM:
 - GGUF is a power-user backend because the loaded server uses roughly 8.6 GB to 10 GB RAM on the current machine.
 - Warm Agent mode exists as an opt-in direct-runtime path, but current proof shows it is mostly a correctness/session-reuse feature, not yet a major speed breakthrough.
 - Load Model now exposes GGUF file list, selected artifact, expected RAM, cold-load estimate, state, and one Load/Unload action.
-- Benchmarks now expose an honest backend comparison table for GGUF, Direct Standard, and Direct Boosted; missing rows stay marked as needing a benchmark.
-- Next valuable work should improve GGUF management, stronger GGUF agent checks, backend comparison, and safe UI defaults rather than more blind safetensors cache expansion.
+- Benchmarks now expose an honest backend comparison table for GGUF, Direct Standard, and Direct Boosted, with a dedicated `Run comparison` action that produces real rows for all three paths when RAM allows.
+- Latest live comparison measured Direct Standard at `21.03s`, Direct Boosted at `19.81s`, and GGUF Compare at `26.05s` on the same one-token prompt; GGUF remains the recommended practical backend because loaded-server use is faster for real chat/agent work.
+- GGUF benchmarks now include stronger agent-plan and follow-up checks, and GGUF status includes disk summaries for complete and split artifacts.
+- Phase 3 speed/reliability productization is complete for the current branch. Next valuable work should move to Phase 4 agent product foundation and workflow reliability.
 - High effort is best for architecture, native crash debugging, large runtime changes, and phase planning. Medium is enough for docs, UI polish, focused tests, and small productization slices.
 
 ## Verification Habit

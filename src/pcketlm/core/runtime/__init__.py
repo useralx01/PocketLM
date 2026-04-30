@@ -27,6 +27,7 @@ from pcketlm.core.runtime.gguf_backend import (
     run_gguf_prompt,
     start_gguf_server,
     stop_gguf_server,
+    summarize_gguf_artifacts,
 )
 from pcketlm.core.runtime.streaming_materialize import StreamingMaterializationResult, materialize_window_schedule
 from pcketlm.core.runtime.tensor_catalog import TensorCatalog, TensorCatalogEntry, build_tensor_catalog
@@ -183,6 +184,7 @@ __all__ = [
     "run_gguf_prompt",
     "start_gguf_server",
     "stop_gguf_server",
+    "summarize_gguf_artifacts",
     "start_warm_runner",
     "stop_warm_runner",
     "warm_runner_memory_snapshot",

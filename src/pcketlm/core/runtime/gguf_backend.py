@@ -67,6 +67,7 @@ class GGUFBackendStatus:
     llama_server_url: str | None = None
     llama_server: dict = field(default_factory=dict)
     model_files: list[GGUFModelFile] = field(default_factory=list)
+    artifact_summary: dict = field(default_factory=dict)
     load_estimate: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     summary: str = ""
@@ -85,6 +86,7 @@ class GGUFBackendStatus:
             "llama_server_url": self.llama_server_url,
             "llama_server": dict(self.llama_server),
             "model_files": [model_file.to_dict() for model_file in self.model_files],
+            "artifact_summary": dict(self.artifact_summary),
             "load_estimate": dict(self.load_estimate),
             "blockers": list(self.blockers),
             "summary": self.summary,
@@ -359,6 +361,35 @@ def find_gguf_model_files(model_id: str) -> list[GGUFModelFile]:
     return found
 
 
+def summarize_gguf_artifacts(model_id: str) -> dict:
+    """Summarize GGUF disk use for product status surfaces."""
+    files = find_gguf_model_files(model_id)
+    complete_files = [model_file for model_file in files if "-of-" not in model_file.path.name]
+    split_files = [model_file for model_file in files if "-of-" in model_file.path.name]
+    total_bytes = sum(model_file.size_bytes for model_file in files)
+    complete_bytes = sum(model_file.size_bytes for model_file in complete_files)
+    split_bytes = sum(model_file.size_bytes for model_file in split_files)
+    largest_complete = max(complete_files, key=lambda model_file: model_file.size_bytes, default=None)
+    return {
+        "model_id": model_id,
+        "file_count": len(files),
+        "complete_file_count": len(complete_files),
+        "split_shard_count": len(split_files),
+        "total_size_bytes": total_bytes,
+        "total_size_gb": round(total_bytes / (1024**3), 2),
+        "complete_size_bytes": complete_bytes,
+        "complete_size_gb": round(complete_bytes / (1024**3), 2),
+        "split_size_bytes": split_bytes,
+        "split_size_gb": round(split_bytes / (1024**3), 2),
+        "largest_complete_path": None if largest_complete is None else str(largest_complete.path),
+        "summary": (
+            f"{len(complete_files)} complete GGUF file(s), {len(split_files)} split shard(s), {round(total_bytes / (1024**3), 2)} GB total."
+            if files
+            else "No GGUF files found."
+        ),
+    }
+
+
 def build_gguf_backend_status(model_id: str) -> GGUFBackendStatus:
     """Return the local GGUF backend readiness status."""
     main_package_available = _llama_cpp_available()
@@ -373,6 +404,7 @@ def build_gguf_backend_status(model_id: str) -> GGUFBackendStatus:
         sidecar_package_available = _sidecar_llama_cpp_available(sidecar_python)
     package_available = main_package_available or sidecar_package_available or llama_cli_available or server_binary_available
     model_files = find_gguf_model_files(model_id)
+    artifact_summary = summarize_gguf_artifacts(model_id)
     blockers: list[str] = []
     if not package_available:
         blockers.append("No llama.cpp runtime is available yet.")
@@ -399,6 +431,7 @@ def build_gguf_backend_status(model_id: str) -> GGUFBackendStatus:
         llama_server_url=llama_server_url() if server_binary_available else None,
         llama_server=server_status.to_dict(),
         model_files=model_files,
+        artifact_summary=artifact_summary,
         load_estimate=load_estimate,
         blockers=blockers,
         summary=summary,

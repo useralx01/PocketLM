@@ -34,6 +34,8 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - Fast GGUF benchmark flow exists and saves short-answer, logic, and agent-style checks.
 - Backend recommendation now prefers the ready GGUF path while keeping Direct CPU as the dense custom-runtime foundation and fallback.
 - Benchmarks now include an honest backend comparison table for GGUF, Direct Standard, and Direct Boosted, tagging fastest, best quality, lowest RAM, and recommended from measured rows.
+- Benchmarks now also include a dedicated `Run comparison` action that measures Direct Standard, Direct Boosted, and GGUF on the same short prompt.
+- GGUF status includes disk summaries for complete GGUF files and split shards.
 
 ## Latest Known Proof Points
 
@@ -41,24 +43,24 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - Loaded GGUF server uses roughly 8.6 GB to 10 GB RAM.
 - Latest Phase 3C GGUF proof: cold GGUF call took 52.26s because it included model load; warm server call with 4-token cap took 2.36s at about 2.30 tokens/sec with server working set around 8.64 GB.
 - Latest Phase 3D GGUF Load Model productization: expected RAM is file size times 1.05, cold-load estimate uses 6.2s/GB from local proof, and focused GGUF/web tests passed with 60 tests.
-- Latest Phase 3E backend comparison: `/api/status` includes `backend_comparison`, Benchmarks renders it, missing Direct Boosted data stays `needs-benchmark`, and the full suite passed with 204 tests.
+- Latest Phase 3F backend comparison: Direct Standard measured `21.03s`, Direct Boosted measured `19.81s`, and GGUF Compare measured `26.05s`; the comparison table still shows those rows after later GGUF-only benchmarks.
+- Latest Phase 3F GGUF agent checks returned complete numbered plan/follow-up actions, and the full suite passed with 208 tests.
 - GGUF server was unloaded after the proof and state reported `running=false`.
 - Latest Warm Agent proof reused 64 prompt tokens, batch-appended 14 tokens, returned `Ok<|im_end|>` in 47.06s with roughly 1069 MB process working set.
 - Latest short GGUF checks returned `OK`, `YES`, and `SUN` in roughly sub-second to low-second app-reported times after the server was loaded.
 - Longer GGUF agent-style check can return two complete numbered steps in about 20 seconds for a 48-token cap.
 - Latest saved GGUF benchmark includes 1, 4, 8, and 32 token rows plus logic and agent checks.
-- Latest full unit suite after Phase 3C: 197 passed in 21.20s; compile verification was clean.
-- Current productization estimate: custom direct-runtime foundation is mature, but overall Phase 3 speed/reliability productization is roughly 78% because GGUF recommendation, load UX, and comparison flows still need more polish.
+- Latest full unit suite after Phase 3F: 208 passed in 14.77s; compile verification was clean.
+- Current productization estimate: Phase 3 speed/reliability productization is complete for this branch. Direct dense runtime remains slow but honest; GGUF is the practical speed path.
 
 ## Current Best Next Work
 
-Favor work that makes the real GGUF path safer and more product-grade while preserving the direct dense runtime as Pocket's unique foundation:
+Favor Phase 4 agent product foundation:
 
-1. Decide how GGUF mode should sit beside Direct CPU Standard/Boosted in the customer UI.
-2. Add stronger agent-style GGUF checks for tool-planning wording, task decomposition, and follow-up consistency.
-3. Extend the new GGUF file list into selectable artifact management when multiple complete artifacts exist.
-4. Add stronger disk-usage cleanup/status for merged GGUF artifacts versus downloaded split shards.
-5. Add a measured Direct Boosted comparison row and stronger GGUF agent checks, gated by available RAM and safe server lifecycle behavior.
+1. Define the first real agent workflow path: goal, plan, inspect, act, verify, summarize.
+2. Add job state, cancel/stop, logs, and bounded tool permissions for local agent work.
+3. Use GGUF as the practical default backend for short agent reasoning when loaded, with Direct CPU kept as the dense/runtime research fallback.
+4. Keep model/artifact management improving in parallel, but do not keep expanding direct safetensors speed tweaks without a measured architecture change.
 
 ## Orchestration Checklist After Another Session
 

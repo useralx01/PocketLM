@@ -510,3 +510,12 @@ Latest backend comparison update:
 - missing paths, especially Direct Boosted when it was not measured in the latest run, are marked `needs-benchmark` instead of being filled with fake numbers
 - `/api/status` now includes `backend_comparison`, and the Benchmarks screen renders it above raw benchmark cards
 - full suite passed with `204` tests; current Phase 3 estimate: about `85%` complete. The next useful work is a stronger real GGUF agent benchmark and a clean way to produce a measured Boosted comparison row.
+
+Latest Phase 3 completion update:
+- Benchmarks now have a dedicated `Run comparison` action that measures Direct Standard, Direct Boosted, and GGUF / llama.cpp on the same one-token prompt.
+- Live comparison measured Direct Standard `21.03s`, Direct Boosted `19.81s`, and GGUF Compare `26.05s`; tags selected Direct Boosted as fastest/best-quality/lowest-RAM from measured rows and GGUF / llama.cpp as recommended on this PC.
+- The comparison table now stays tied to the newest backend-comparison scoped run, so later GGUF-only benchmarks do not erase the Direct rows.
+- GGUF benchmarks now include stronger agent-plan and follow-up prompts; the latest run returned complete numbered agent actions.
+- Load Model / GGUF status now includes a disk summary for complete GGUF artifacts and split shards.
+- Full suite passed with `208` tests, frontend syntax check is clean, and compile verification is clean.
+- Phase 3 speed/reliability productization is complete for the current branch. The next big phase should move to agent product foundation and workflow reliability, not more blind direct-runtime speed tweaking.
