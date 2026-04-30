@@ -1559,6 +1559,35 @@ py -3.14 -m compileall -q src tests
 exit=0
 ```
 
+## Phase 3C / Recommended backend visible in Load Model
+
+Change:
+
+```text
+Load Model / Active Runtime now shows the recommended backend, active engine, and selected backend.
+When GGUF is ready, the card shows llama-cpp-gguf as the recommended backend while Direct CPU remains visible as the active dense fallback.
+```
+
+Focused verification:
+
+```text
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+py -3.14 -m pytest tests/test_web_main.py -v
+42 passed in 8.40s
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+197 passed in 21.20s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
+
 ## Phase 3C / GGUF speed proof
 
 Discovery:

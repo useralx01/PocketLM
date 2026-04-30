@@ -171,11 +171,22 @@ function renderCompare(compare) {
 function renderLoadRuntime(payload) {
   const model = payload.active_model || {};
   const direct = payload.direct_runtime || {};
+  const engine = payload.engine_decision || {};
+  const backendReport = payload.backend_report || {};
+  const recommendedBackend = engine.recommended_backend_id || backendReport.recommended_backend_id || "direct-cpu";
   const guardrails = payload.model_guardrails || payload.speed_status?.model_guardrails || {};
   $("#load-runtime-card").innerHTML = `
     <div class="item">
       <div class="item-title"><span>${escapeText(model.label || model.model_id)}</span><span class="pill">${escapeText(model.effective_runtime_status || model.runtime_status || "Unknown")}</span></div>
       <p>${escapeText(direct.summary || model.effective_summary || model.summary || "")}</p>
+    </div>
+    <div class="item compact-item">
+      <div class="item-title"><span>Recommended backend</span><span class="pill">${escapeText(recommendedBackend)}</span></div>
+      <p>${escapeText(backendReport.recommended_summary || engine.summary || "Direct CPU remains available as the dense fallback.")}</p>
+      <div class="mini-metrics">
+        <span>${escapeText(`active ${engine.selected_engine || "direct-cpu"}`)}</span>
+        <span>${escapeText(engine.selected_backend || "torch-cpu")}</span>
+      </div>
     </div>
     <div class="item compact-item">
       <div class="item-title"><span>Direct runtime guard</span><span class="pill">${escapeText(guardrails.status || "standard")}</span></div>

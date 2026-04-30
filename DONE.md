@@ -436,3 +436,4 @@
 - Added `/api/warm-runner` plus Settings Start/Stop controls so the warm Agent runner can be loaded or freed without using the CLI.
 - Proved the practical GGUF speed path: cold load took `52.26s`, then the loaded llama.cpp server answered a 4-token prompt in `2.36s` at about `2.30 tokens/sec`; server RAM was about `8.64 GB` and was unloaded afterward.
 - Updated backend recommendation logic so ready GGUF is recommended for faster chat while Direct CPU remains the dense fallback/research path.
+- Added the recommended backend to Load Model / Active Runtime so the faster GGUF path is visible outside the deeper Settings backend report.

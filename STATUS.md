@@ -492,3 +492,7 @@ Latest GGUF recommendation update:
 - backend report now marks ready GGUF as implemented and recommended
 - live selector smoke returns `recommended_backend_id=llama-cpp-gguf` while keeping Direct CPU as the dense fallback
 - current Phase 3 estimate: about `76%` complete. The app now points users toward the proven faster path when it exists.
+
+Latest Load Model recommendation update:
+- Load Model / Active Runtime now shows the recommended backend beside the active dense fallback
+- current Phase 3 estimate: about `78%` complete. The proven speed path is now visible in the normal product surface, not only in diagnostics.
