@@ -9,6 +9,7 @@ from pcketlm.core.model_families import (
 def test_normalize_family_key_uses_known_aliases() -> None:
     assert normalize_family_key("qwen2") == "qwen"
     assert normalize_family_key("qwen3_moe") == "qwen-moe"
+    assert normalize_family_key("mistral-moe") == "mixtral"
     assert normalize_family_key("Kronk") == "kronos"
     assert normalize_family_key("gemma3") == "gemma"
 
@@ -18,6 +19,8 @@ def test_family_labels_and_runtime_status_are_product_facing() -> None:
     assert family_runtime_status("qwen") == "active"
     assert family_label("qwen3-moe") == "Qwen MoE"
     assert family_runtime_status("qwen3-moe") == "active"
+    assert family_label("mixtral-moe") == "Mixtral"
+    assert family_runtime_status("mistralai") == "active"
     assert family_runtime_status("kimi") == "planned"
     assert family_label("new-family") == "New Family"
     assert family_runtime_status("new-family") == "unverified"
@@ -26,5 +29,5 @@ def test_family_labels_and_runtime_status_are_product_facing() -> None:
 def test_family_priority_summary_keeps_owner_priority_order() -> None:
     summary = family_priority_summary()
 
-    assert [item["key"] for item in summary[:5]] == ["qwen", "qwen-moe", "kimi", "kronos", "gemma"]
+    assert [item["key"] for item in summary[:6]] == ["qwen", "qwen-moe", "mixtral", "kimi", "kronos", "gemma"]
     assert summary[0]["runtime_status"] == "active"

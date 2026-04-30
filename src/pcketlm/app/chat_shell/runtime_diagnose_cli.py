@@ -25,7 +25,14 @@ from pcketlm.core.runtime import (
     run_prompt_decode_loop,
     run_token_entry_layer_bridge,
 )
-from pcketlm.core.runtime.layer_bridge import _can_select_from_topk, _run_moe_mlp, select_next_token, select_next_token_from_topk
+from pcketlm.core.runtime.layer_bridge import (
+    _can_select_from_topk,
+    _moe_expert_tensor_name_map,
+    _moe_router_tensor_name,
+    _run_moe_mlp,
+    select_next_token,
+    select_next_token_from_topk,
+)
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
@@ -243,10 +250,11 @@ def _first_hidden_for_moe(model_id: str, slice_name: str, started_at: float) -> 
 def _moe_router_only(model_id: str, slice_name: str, started_at: float) -> dict:
     hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
     config = load_layer_bridge_config(model_id)
-    loaded = load_tensor_by_name(model_id, "model.layers.0.mlp.gate.weight")
+    router_name = _moe_router_tensor_name(model_id, 0)
+    loaded = load_tensor_by_name(model_id, router_name)
     blockers = list(config.blockers) + list(loaded.blockers)
     if loaded.tensor is None:
-        blockers.append("Router tensor model.layers.0.mlp.gate.weight did not load.")
+        blockers.append(f"Router tensor {router_name} did not load.")
         return {"ready": False, "blockers": blockers}
     logits = torch.nn.functional.linear(hidden_state.float(), loaded.tensor.float())
     probs = torch.softmax(logits, dim=-1)
@@ -264,19 +272,16 @@ def _moe_router_only(model_id: str, slice_name: str, started_at: float) -> dict:
 def _moe_one_expert(model_id: str, slice_name: str, started_at: float, expert_index: int = 0) -> dict:
     hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
     policy = TensorResidencyPolicy.from_environment(model_id)
-    tensor_names = [
-        f"model.layers.0.mlp.experts.{expert_index}.gate_proj.weight",
-        f"model.layers.0.mlp.experts.{expert_index}.up_proj.weight",
-        f"model.layers.0.mlp.experts.{expert_index}.down_proj.weight",
-    ]
+    expert_name_map = _moe_expert_tensor_name_map(model_id, 0, expert_index)
+    tensor_names = list(expert_name_map.values())
     record_expert_activation(0, expert_index)
     loaded = load_resident_tensors(model_id, tensor_names, dtype=hidden_state.dtype, policy=policy)
     blockers = [blocker for item in loaded.values() for blocker in item.blockers]
     if blockers or any(item.tensor is None for item in loaded.values()):
         return {"ready": False, "blockers": blockers or [f"Expert {expert_index} did not load."]}
-    gate = loaded[tensor_names[0]].tensor
-    up = loaded[tensor_names[1]].tensor
-    down = loaded[tensor_names[2]].tensor
+    gate = loaded[expert_name_map["gate_proj"]].tensor
+    up = loaded[expert_name_map["up_proj"]].tensor
+    down = loaded[expert_name_map["down_proj"]].tensor
     output = torch.nn.functional.linear(
         torch.nn.functional.silu(torch.nn.functional.linear(hidden_state, gate))
         * torch.nn.functional.linear(hidden_state, up),
@@ -295,25 +300,23 @@ def _moe_one_expert(model_id: str, slice_name: str, started_at: float, expert_in
 def _moe_top_k_experts(model_id: str, slice_name: str, started_at: float) -> dict:
     hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
     config = load_layer_bridge_config(model_id)
-    router = load_tensor_by_name(model_id, "model.layers.0.mlp.gate.weight")
+    router_name = _moe_router_tensor_name(model_id, 0)
+    router = load_tensor_by_name(model_id, router_name)
     blockers = list(config.blockers) + list(router.blockers)
     if router.tensor is None:
-        blockers.append("Router tensor model.layers.0.mlp.gate.weight did not load.")
+        blockers.append(f"Router tensor {router_name} did not load.")
         return {"ready": False, "blockers": blockers}
     with torch.no_grad():
         probs = torch.softmax(torch.nn.functional.linear(hidden_state.float(), router.tensor.float()), dim=-1)
         selected = torch.topk(probs, max(1, min(config.num_experts_per_tok, probs.shape[-1])), dim=-1).indices
         selected_experts = sorted({int(value) for value in selected.detach().cpu().flatten().tolist()})
     tensor_names: list[str] = []
+    expert_name_maps: dict[int, dict[str, str]] = {}
     for expert_index in selected_experts:
         record_expert_activation(0, expert_index)
-        tensor_names.extend(
-            [
-                f"model.layers.0.mlp.experts.{expert_index}.gate_proj.weight",
-                f"model.layers.0.mlp.experts.{expert_index}.up_proj.weight",
-                f"model.layers.0.mlp.experts.{expert_index}.down_proj.weight",
-            ]
-        )
+        expert_name_map = _moe_expert_tensor_name_map(model_id, 0, expert_index)
+        expert_name_maps[expert_index] = expert_name_map
+        tensor_names.extend(expert_name_map.values())
     loaded = load_resident_tensors(
         model_id,
         tensor_names,
@@ -323,10 +326,10 @@ def _moe_top_k_experts(model_id: str, slice_name: str, started_at: float) -> dic
     blockers.extend(blocker for item in loaded.values() for blocker in item.blockers)
     expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
     for expert_index in selected_experts:
-        prefix = f"model.layers.0.mlp.experts.{expert_index}"
-        gate = loaded[f"{prefix}.gate_proj.weight"].tensor
-        up = loaded[f"{prefix}.up_proj.weight"].tensor
-        down = loaded[f"{prefix}.down_proj.weight"].tensor
+        expert_name_map = expert_name_maps[expert_index]
+        gate = loaded[expert_name_map["gate_proj"]].tensor
+        up = loaded[expert_name_map["up_proj"]].tensor
+        down = loaded[expert_name_map["down_proj"]].tensor
         if gate is None or up is None or down is None:
             blockers.append(f"Expert {expert_index} did not load all tensors.")
             continue

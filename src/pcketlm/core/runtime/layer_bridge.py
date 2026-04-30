@@ -761,6 +761,11 @@ def _load_layer_bridge_config_cached(
     else:
         eos_token_ids = [int(raw_eos)]
 
+    num_experts = int(payload.get("num_experts", payload.get("num_local_experts", 0)) or 0)
+    moe_intermediate_size = int(payload.get("moe_intermediate_size", 0) or 0)
+    if moe_intermediate_size <= 0 and num_experts > 0:
+        moe_intermediate_size = int(payload.get("intermediate_size", 0) or 0)
+
     return LayerBridgeModelConfig(
         model_id=model_id,
         config_path=config_path,
@@ -770,8 +775,8 @@ def _load_layer_bridge_config_cached(
         num_key_value_heads=num_key_value_heads,
         head_dim=effective_head_dim,
         intermediate_size=int(payload.get("intermediate_size", 0)),
-        moe_intermediate_size=int(payload.get("moe_intermediate_size", 0)),
-        num_experts=int(payload.get("num_experts", 0) or 0),
+        moe_intermediate_size=moe_intermediate_size,
+        num_experts=num_experts,
         num_experts_per_tok=int(payload.get("num_experts_per_tok", 0) or 0),
         norm_topk_prob=bool(payload.get("norm_topk_prob", False)),
         model_type=str(payload.get("model_type", "unknown")),
@@ -955,6 +960,40 @@ def _is_moe_config(config: LayerBridgeModelConfig) -> bool:
 
 def _tensor_entry_exists(model_id: str, tensor_name: str) -> bool:
     return find_tensor_catalog_entry(model_id, tensor_name) is not None
+
+
+def _moe_router_tensor_name(model_id: str, layer_index: int) -> str:
+    """Return the router tensor name for the model's MoE layout."""
+    candidates = (
+        f"model.layers.{layer_index}.mlp.gate.weight",
+        f"model.layers.{layer_index}.block_sparse_moe.gate.weight",
+    )
+    for candidate in candidates:
+        if _tensor_entry_exists(model_id, candidate):
+            return candidate
+    return candidates[0]
+
+
+def _moe_expert_tensor_name_map(model_id: str, layer_index: int, expert_index: int) -> dict[str, str]:
+    """Map canonical expert roles to tensor names for the model's MoE layout."""
+    qwen_prefix = f"model.layers.{layer_index}.mlp.experts.{expert_index}"
+    mixtral_prefix = f"model.layers.{layer_index}.block_sparse_moe.experts.{expert_index}"
+    candidates = (
+        {
+            "gate_proj": f"{qwen_prefix}.gate_proj.weight",
+            "up_proj": f"{qwen_prefix}.up_proj.weight",
+            "down_proj": f"{qwen_prefix}.down_proj.weight",
+        },
+        {
+            "gate_proj": f"{mixtral_prefix}.w1.weight",
+            "up_proj": f"{mixtral_prefix}.w3.weight",
+            "down_proj": f"{mixtral_prefix}.w2.weight",
+        },
+    )
+    for candidate in candidates:
+        if all(_tensor_entry_exists(model_id, tensor_name) for tensor_name in candidate.values()):
+            return candidate
+    return candidates[0]
 
 
 def _layer_prefetch_enabled() -> bool:
@@ -1638,7 +1677,7 @@ def run_minimal_layer_forward_bridge(
     del post_attention_norm_weight
 
     if _is_moe_config(config):
-        router_name = f"model.layers.{layer_index}.mlp.gate.weight"
+        router_name = _moe_router_tensor_name(model_id, layer_index)
         router_weight = load_required(router_name)
         if blockers or router_weight is None:
             return LayerBridgeResult(
@@ -1660,22 +1699,19 @@ def run_minimal_layer_forward_bridge(
             selected_experts = torch.topk(router_probs, max(1, min(config.num_experts_per_tok, config.num_experts)), dim=-1).indices
             selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
         expert_tensor_names: list[str] = []
+        expert_name_maps: dict[int, dict[str, str]] = {}
         for expert_index in selected_expert_ids:
             record_expert_activation(layer_index, expert_index)
-            expert_tensor_names.extend(
-                [
-                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.gate_proj.weight",
-                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.up_proj.weight",
-                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.down_proj.weight",
-                ]
-            )
+            expert_name_map = _moe_expert_tensor_name_map(model_id, layer_index, expert_index)
+            expert_name_maps[expert_index] = expert_name_map
+            expert_tensor_names.extend(expert_name_map.values())
         loaded_experts = load_required_many(expert_tensor_names)
         expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
         for expert_index in selected_expert_ids:
-            prefix = f"model.layers.{layer_index}.mlp.experts.{expert_index}"
-            gate_weight = loaded_experts.get(f"{prefix}.gate_proj.weight")
-            up_weight = loaded_experts.get(f"{prefix}.up_proj.weight")
-            down_weight = loaded_experts.get(f"{prefix}.down_proj.weight")
+            expert_name_map = expert_name_maps[expert_index]
+            gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
+            up_weight = loaded_experts.get(expert_name_map["up_proj"])
+            down_weight = loaded_experts.get(expert_name_map["down_proj"])
             if gate_weight is None or up_weight is None or down_weight is None:
                 blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
                 continue

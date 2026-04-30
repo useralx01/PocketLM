@@ -13,6 +13,8 @@ from pcketlm.core.runtime.layer_bridge import (
     CANCEL_BLOCKER,
     LayerBridgeResult,
     _recommended_prompt_layer_count,
+    _moe_expert_tensor_name_map,
+    _moe_router_tensor_name,
     _run_moe_mlp,
     _trim_generated_text_at_stop_string,
     _auto_torch_thread_count,
@@ -59,6 +61,28 @@ def test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack() -> None
 def test_recommended_prompt_layer_count_caps_moe_long_generations() -> None:
     assert _recommended_prompt_layer_count(_MoePromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 12
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 24
+
+
+def test_moe_tensor_name_helpers_select_mixtral_layout(monkeypatch) -> None:
+    available = {
+        "model.layers.0.block_sparse_moe.gate.weight",
+        "model.layers.0.block_sparse_moe.experts.3.w1.weight",
+        "model.layers.0.block_sparse_moe.experts.3.w2.weight",
+        "model.layers.0.block_sparse_moe.experts.3.w3.weight",
+    }
+
+    monkeypatch.setattr(
+        layer_bridge_module,
+        "find_tensor_catalog_entry",
+        lambda _model_id, tensor_name: object() if tensor_name in available else None,
+    )
+
+    assert _moe_router_tensor_name("mixtral-test", 0) == "model.layers.0.block_sparse_moe.gate.weight"
+    assert _moe_expert_tensor_name_map("mixtral-test", 0, 3) == {
+        "gate_proj": "model.layers.0.block_sparse_moe.experts.3.w1.weight",
+        "up_proj": "model.layers.0.block_sparse_moe.experts.3.w3.weight",
+        "down_proj": "model.layers.0.block_sparse_moe.experts.3.w2.weight",
+    }
 
 
 def test_runtime_torch_thread_count_uses_safe_auto_and_env_override(monkeypatch) -> None:

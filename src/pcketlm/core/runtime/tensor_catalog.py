@@ -155,6 +155,10 @@ def _optional_int(value: object) -> int | None:
 
 def _model_config_values(model_dir: Path) -> dict[str, int | None]:
     payload = _read_json(model_dir / "config.json")
+    num_experts = _optional_int(payload.get("num_experts", payload.get("num_local_experts")))
+    moe_intermediate_size = _optional_int(payload.get("moe_intermediate_size"))
+    if moe_intermediate_size is None and num_experts:
+        moe_intermediate_size = _optional_int(payload.get("intermediate_size"))
     return {
         "hidden_size": _optional_int(payload.get("hidden_size")),
         "num_hidden_layers": _optional_int(payload.get("num_hidden_layers")),
@@ -162,9 +166,9 @@ def _model_config_values(model_dir: Path) -> dict[str, int | None]:
         "num_key_value_heads": _optional_int(payload.get("num_key_value_heads")),
         "vocab_size": _optional_int(payload.get("vocab_size")),
         "intermediate_size": _optional_int(payload.get("intermediate_size")),
-        "num_experts": _optional_int(payload.get("num_experts")),
+        "num_experts": num_experts,
         "num_experts_per_tok": _optional_int(payload.get("num_experts_per_tok")),
-        "moe_intermediate_size": _optional_int(payload.get("moe_intermediate_size")),
+        "moe_intermediate_size": moe_intermediate_size,
         "model_type": payload.get("model_type"),
     }
 
@@ -186,12 +190,13 @@ def _layer_index_for_tensor(tensor_name: str) -> int | None:
 
 
 def _expert_index_for_tensor(tensor_name: str) -> int | None:
-    marker = ".mlp.experts."
-    if marker not in tensor_name:
-        return None
-    remainder = tensor_name.split(marker, 1)[1]
-    expert_part = remainder.split(".", 1)[0]
-    return int(expert_part) if expert_part.isdigit() else None
+    for marker in (".mlp.experts.", ".block_sparse_moe.experts."):
+        if marker not in tensor_name:
+            continue
+        remainder = tensor_name.split(marker, 1)[1]
+        expert_part = remainder.split(".", 1)[0]
+        return int(expert_part) if expert_part.isdigit() else None
+    return None
 
 
 def _component_group_for_tensor(tensor_name: str) -> str:
@@ -201,9 +206,9 @@ def _component_group_for_tensor(tensor_name: str) -> str:
         return "lm_head"
     if tensor_name.startswith("model.norm."):
         return "final_norm"
-    if ".mlp.experts." in tensor_name:
+    if ".mlp.experts." in tensor_name or ".block_sparse_moe.experts." in tensor_name:
         return "expert_mlp"
-    if ".mlp.gate." in tensor_name:
+    if ".mlp.gate." in tensor_name or ".block_sparse_moe.gate." in tensor_name:
         return "router"
     if ".self_attn." in tensor_name:
         return "attention"

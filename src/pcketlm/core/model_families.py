@@ -35,9 +35,17 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
         notes="Paged MoE runtime target for huge sparse models.",
     ),
     ModelFamily(
+        key="mixtral",
+        label="Mixtral",
+        priority=3,
+        runtime_status="active",
+        aliases=("mistral-moe", "mixtral-moe", "mistralai"),
+        notes="Cross-family MoE validation target for paged expert runtime.",
+    ),
+    ModelFamily(
         key="kimi",
         label="Kimi",
-        priority=3,
+        priority=4,
         runtime_status="planned",
         aliases=("moonshot",),
         notes="Next priority after Qwen when a local open-weight path is selected.",
@@ -45,7 +53,7 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
     ModelFamily(
         key="kronos",
         label="Kronos/Kronk",
-        priority=4,
+        priority=5,
         runtime_status="planned",
         aliases=("kronk",),
         notes="Planned if a concrete supported local model target exists.",
@@ -53,7 +61,7 @@ MODEL_FAMILIES: tuple[ModelFamily, ...] = (
     ModelFamily(
         key="gemma",
         label="Gemma",
-        priority=5,
+        priority=6,
         runtime_status="planned",
         aliases=("gemma2", "gemma3"),
         notes="Planned after the earlier priority families.",

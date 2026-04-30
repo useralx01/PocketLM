@@ -561,3 +561,14 @@ Why:
 - `runtime_diagnose_cli.py` now accepts `--prompt` for the full slice so the measurement prompt matches the phase protocol instead of the previous hardcoded `hello world`.
 - The 50-token probe showed the cache works once the MoE path uses the shallower long-generation schedule: token 50 reached `48.63%` cumulative hit rate and tokens 36-50 reached `60.62%`. The 20-token path was using a deeper 24-layer schedule, which measured a different runtime regime.
 - After schedule tuning, Qwen3 20-token warm run 3 reached `3.1210s/token` and `63.19%` last-15-token hit rate, meeting the Qwen3 gate (`<=8s/token`, `>=60%` last-15 hit rate).
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral naming support
+
+Decision:
+- Detect MoE expert counts from either `num_experts` or `num_local_experts`.
+- Treat `intermediate_size` as the MoE expert intermediate size when a model has local experts but no `moe_intermediate_size` field.
+- Resolve router and expert tensor names from catalog presence, supporting both Qwen MoE (`mlp.gate`, `mlp.experts.*.{gate_proj,up_proj,down_proj}`) and Mixtral-style MoE (`block_sparse_moe.gate`, `block_sparse_moe.experts.*.{w1,w2,w3}`).
+
+Why:
+- Mixtral uses a different MoE tensor naming layout than Qwen3, but the math roles are the same: `w1` is gate projection, `w3` is up projection, and `w2` is down projection.
+- Resolving from the actual safetensors catalog keeps the forward path architecture-driven instead of adding a model-id branch.

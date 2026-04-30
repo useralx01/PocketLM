@@ -3154,3 +3154,13 @@ C_drive_free_gb=541.14
 required_free_gb=110
 stop_1=false
 ```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral generalization tests
+
+```text
+python -m pytest tests/test_model_import_inspect.py::test_inspect_qwen_source_reads_mixtral_moe_alias_fields tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_classifies_mixtral_router_and_experts tests/test_runtime_layer_bridge.py::test_moe_tensor_name_helpers_select_mixtral_layout tests/test_model_families.py -q
+6 passed in 2.41s
+
+python -m pytest tests/test_runtime_diagnose_cli.py tests/test_runtime_layer_bridge.py tests/test_runtime_tensor_catalog.py tests/test_model_import_inspect.py tests/test_model_families.py -q
+50 passed in 2.36s
+```

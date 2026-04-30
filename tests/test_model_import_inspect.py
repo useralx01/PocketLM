@@ -49,3 +49,42 @@ def test_inspect_qwen_source_reads_config_and_index(tmp_path: Path) -> None:
     assert inspection.expected_shards == 2
     assert inspection.present_shards == 1
     assert inspection.format_name == "safetensors-sharded"
+
+
+def test_inspect_qwen_source_reads_mixtral_moe_alias_fields(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["MixtralForCausalLM"],
+                "model_type": "mixtral",
+                "hidden_size": 4096,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "intermediate_size": 14336,
+                "num_local_experts": 8,
+                "num_experts_per_tok": 2,
+                "max_position_embeddings": 32768,
+                "vocab_size": 32000,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1234},
+                "weight_map": {"model.layers.0.block_sparse_moe.gate.weight": "model-00001-of-00001.safetensors"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "model-00001-of-00001.safetensors").write_text("x", encoding="utf-8")
+
+    inspection = inspect_qwen_source(tmp_path)
+
+    assert inspection.config.model_type == "mixtral"
+    assert inspection.config.num_experts == 8
+    assert inspection.config.num_experts_per_tok == 2
+    assert inspection.config.moe_intermediate_size == 14336

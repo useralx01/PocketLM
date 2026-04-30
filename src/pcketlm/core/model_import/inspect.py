@@ -69,6 +69,10 @@ def inspect_qwen_source(model_dir: Path) -> SourceInspection:
     """Inspect a Qwen-family source directory."""
     config_payload = _read_json(model_dir / "config.json") or {}
     architectures = config_payload.get("architectures") or []
+    num_experts = config_payload.get("num_experts", config_payload.get("num_local_experts"))
+    moe_intermediate_size = config_payload.get("moe_intermediate_size")
+    if moe_intermediate_size is None and num_experts:
+        moe_intermediate_size = config_payload.get("intermediate_size")
     config = ConfigSummary(
         architecture=architectures[0] if architectures else None,
         model_type=config_payload.get("model_type"),
@@ -77,8 +81,8 @@ def inspect_qwen_source(model_dir: Path) -> SourceInspection:
         num_attention_heads=config_payload.get("num_attention_heads"),
         num_key_value_heads=config_payload.get("num_key_value_heads"),
         intermediate_size=config_payload.get("intermediate_size"),
-        moe_intermediate_size=config_payload.get("moe_intermediate_size"),
-        num_experts=config_payload.get("num_experts"),
+        moe_intermediate_size=moe_intermediate_size,
+        num_experts=num_experts,
         num_experts_per_tok=config_payload.get("num_experts_per_tok"),
         max_position_embeddings=config_payload.get("max_position_embeddings"),
         vocab_size=config_payload.get("vocab_size"),
