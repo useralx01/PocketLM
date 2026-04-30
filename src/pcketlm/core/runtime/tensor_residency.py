@@ -24,6 +24,8 @@ DEFAULT_FRONT_LAYER_COUNT = 12
 DEFAULT_MAX_TENSOR_CACHE_MB = 32
 DEFAULT_STICKY_RESIDENCY_STEPS = 1
 DEFAULT_EXPERT_CACHE_MB = 256
+DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER = 4
+DEFAULT_EXPERT_DECAY_RATE = 0.98
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -48,6 +50,13 @@ def _env_enabled(name: str, fallback: str = "1") -> bool:
 
 def _env_is_set(name: str) -> bool:
     return os.environ.get(name, "").strip() != ""
+
+
+def _env_float(name: str, fallback: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or fallback)
+    except ValueError:
+        return fallback
 
 
 def _free_memory_bytes() -> int | None:
@@ -83,6 +92,8 @@ class TensorResidencyPolicy:
     free_memory_bytes: int | None = None
     sticky_residency_steps: int = DEFAULT_STICKY_RESIDENCY_STEPS
     expert_max_resident_bytes: int = DEFAULT_EXPERT_CACHE_MB * 1024 * 1024
+    max_resident_experts_per_layer: int = DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER
+    expert_decay_rate: float = DEFAULT_EXPERT_DECAY_RATE
 
     @classmethod
     def from_environment(cls, model_id: str | None = None) -> "TensorResidencyPolicy":
@@ -122,6 +133,26 @@ class TensorResidencyPolicy:
             if deep_model and model_budget_mb > max_resident_mb:
                 max_resident_mb = model_budget_mb
                 model_aware_budget_active = True
+        expert_cache_mb = max(0, _env_int("PCKETLM_EXPERT_TENSOR_CACHE_MB", DEFAULT_EXPERT_CACHE_MB))
+        if (
+            model_id
+            and free_memory_bytes is not None
+            and not _env_is_set("PCKETLM_EXPERT_TENSOR_CACHE_MB")
+        ):
+            try:
+                from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+                catalog = load_tensor_catalog(model_id)
+                is_moe_model = bool(catalog.num_experts and catalog.num_experts_per_tok)
+            except Exception:
+                is_moe_model = False
+            if is_moe_model:
+                free_mb = int(free_memory_bytes // (1024**2))
+                adaptive_expert_mb = max(DEFAULT_EXPERT_CACHE_MB, min(max(0, free_mb - 2048), 2048))
+                expert_cache_mb = max(expert_cache_mb, adaptive_expert_mb)
+
+        expert_decay_rate = max(0.0, min(1.0, _env_float("PCKETLM_EXPERT_CACHE_DECAY", DEFAULT_EXPERT_DECAY_RATE)))
+
         return cls(
             enabled=os.environ.get("PCKETLM_TENSOR_CACHE", "1").strip().lower() not in {"0", "false", "no"},
             max_resident_bytes=max_resident_mb * 1024 * 1024,
@@ -134,7 +165,12 @@ class TensorResidencyPolicy:
             model_aware_budget_active=model_aware_budget_active,
             free_memory_bytes=free_memory_bytes,
             sticky_residency_steps=max(0, _env_int("PCKETLM_TENSOR_CACHE_STICKY_STEPS", DEFAULT_STICKY_RESIDENCY_STEPS)),
-            expert_max_resident_bytes=max(0, _env_int("PCKETLM_EXPERT_TENSOR_CACHE_MB", DEFAULT_EXPERT_CACHE_MB)) * 1024 * 1024,
+            expert_max_resident_bytes=expert_cache_mb * 1024 * 1024,
+            max_resident_experts_per_layer=max(
+                0,
+                _env_int("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER", DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER),
+            ),
+            expert_decay_rate=expert_decay_rate,
         )
 
     def to_dict(self) -> dict:
@@ -154,6 +190,8 @@ class TensorResidencyPolicy:
             "sticky_residency_steps": self.sticky_residency_steps,
             "expert_max_resident_bytes": self.expert_max_resident_bytes,
             "expert_max_resident_mb": round(self.expert_max_resident_bytes / (1024**2), 2),
+            "max_resident_experts_per_layer": self.max_resident_experts_per_layer,
+            "expert_decay_rate": self.expert_decay_rate,
         }
 
 
@@ -210,6 +248,7 @@ _resident_bytes = 0
 _resident_expert_bytes = 0
 _residency_step = 0
 _expert_activation_counts: dict[tuple[int, int], int] = {}
+_expert_activation_scores: dict[tuple[int, int], float] = {}
 _current_step_experts: set[tuple[int, int]] = set()
 
 
@@ -234,6 +273,18 @@ def record_expert_activation(layer_index: int, expert_index: int) -> None:
     with _cache_lock:
         _current_step_experts.add(key)
         _expert_activation_counts[key] = _expert_activation_counts.get(key, 0) + 1
+        decay_rate = max(0.0, min(1.0, _env_float("PCKETLM_EXPERT_CACHE_DECAY", DEFAULT_EXPERT_DECAY_RATE)))
+        if decay_rate < 1.0:
+            stale_keys: list[tuple[int, int]] = []
+            for score_key, score in _expert_activation_scores.items():
+                decayed = score * decay_rate
+                if decayed < 1e-6:
+                    stale_keys.append(score_key)
+                else:
+                    _expert_activation_scores[score_key] = decayed
+            for stale_key in stale_keys:
+                _expert_activation_scores.pop(stale_key, None)
+        _expert_activation_scores[key] = _expert_activation_scores.get(key, 0.0) + 1.0
 
 
 def expert_residency_snapshot(top_k: int = 10) -> dict:
@@ -245,7 +296,7 @@ def expert_residency_snapshot(top_k: int = 10) -> dict:
         denominator = hits + misses
         sorted_by_touch = sorted(
             _expert_activation_counts.items(),
-            key=lambda item: (-item[1], item[0][0], item[0][1]),
+            key=lambda item: (-_expert_activation_scores.get(item[0], 0.0), -item[1], item[0][0], item[0][1]),
         )
         sorted_least_touched = sorted(
             _expert_activation_counts.items(),
@@ -257,6 +308,7 @@ def expert_residency_snapshot(top_k: int = 10) -> dict:
                     "layer": int(layer),
                     "expert": int(expert),
                     "touches": int(count),
+                    "score": round(float(_expert_activation_scores.get((layer, expert), 0.0)), 4),
                 }
                 for (layer, expert), count in items[: max(0, int(top_k))]
             ]
@@ -303,6 +355,16 @@ def _expert_key(entry: TensorCatalogEntry) -> tuple[int, int] | None:
     if entry.layer_index is None or entry.expert_index is None:
         return None
     return (int(entry.layer_index), int(entry.expert_index))
+
+
+def _is_always_resident_entry(entry: TensorCatalogEntry) -> bool:
+    if entry.expert_index is not None:
+        return False
+    component_group = (entry.component_group or "").lower()
+    if component_group in {"attention", "router", "shared_expert", "final_norm", "lm_head", "embeddings"}:
+        return True
+    tensor_name = entry.tensor_name
+    return tensor_name in {"model.norm.weight", "lm_head.weight", "model.embed_tokens.weight"}
 
 
 def _loaded_slice_from_resident(model_id: str, resident: _ResidentTensor) -> LoadedTensorSlice:
@@ -428,6 +490,7 @@ def _store_resident_tensor(
         _resident_bytes += nbytes
         if expert_key is not None:
             _resident_expert_bytes += nbytes
+            _enforce_expert_layer_cap(policy, expert_key[0])
         _stats.stores += 1
         _stats.resident_bytes = _resident_bytes
         _stats.resident_count = len(_resident_tensors)
@@ -444,22 +507,67 @@ def _select_eviction_key(policy: TensorResidencyPolicy) -> _CacheKey | None:
         return expert_key
     sticky_floor = _residency_step - int(policy.sticky_residency_steps)
     for key, resident in _resident_tensors.items():
+        if _is_always_resident_entry(resident.entry):
+            continue
         if resident.loaded_step < sticky_floor:
             return key
-    return next(iter(_resident_tensors))
+    for key, resident in _resident_tensors.items():
+        if not _is_always_resident_entry(resident.entry):
+            return key
+    return None
 
 
 def _select_expert_eviction_key() -> _CacheKey | None:
-    candidates: list[tuple[int, int, _CacheKey]] = []
+    candidates: list[tuple[float, int, _CacheKey]] = []
     for key, resident in _resident_tensors.items():
         if resident.expert_key is None or resident.expert_key in _current_step_experts:
             continue
-        activation_count = _expert_activation_counts.get(resident.expert_key, 0)
-        candidates.append((activation_count, resident.loaded_step, key))
+        activation_score = _expert_activation_scores.get(resident.expert_key, 0.0)
+        candidates.append((activation_score, resident.loaded_step, key))
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1]))
     return candidates[0][2]
+
+
+def _select_expert_eviction_key_for_layer(layer_index: int) -> _CacheKey | None:
+    candidates: list[tuple[float, int, _CacheKey]] = []
+    for key, resident in _resident_tensors.items():
+        if resident.expert_key is None or resident.expert_key[0] != layer_index:
+            continue
+        if resident.expert_key in _current_step_experts:
+            continue
+        activation_score = _expert_activation_scores.get(resident.expert_key, 0.0)
+        candidates.append((activation_score, resident.loaded_step, key))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def _enforce_expert_layer_cap(policy: TensorResidencyPolicy, layer_index: int) -> None:
+    global _resident_bytes, _resident_expert_bytes
+    if policy.max_resident_experts_per_layer <= 0:
+        return
+
+    def resident_expert_count_for_layer() -> int:
+        return len(
+            {
+                resident.expert_key[1]
+                for resident in _resident_tensors.values()
+                if resident.expert_key is not None and resident.expert_key[0] == layer_index
+            }
+        )
+
+    while resident_expert_count_for_layer() > policy.max_resident_experts_per_layer:
+        evict_key = _select_expert_eviction_key_for_layer(layer_index)
+        if evict_key is None:
+            break
+        old = _resident_tensors.pop(evict_key)
+        _resident_bytes -= old.nbytes
+        _resident_expert_bytes -= old.nbytes
+        _stats.evictions += 1
+        _stats.expert_evictions += 1
 
 
 def load_resident_tensor(
@@ -583,6 +691,7 @@ def clear_tensor_residency_cache() -> None:
         _resident_expert_bytes = 0
         _residency_step = 0
         _expert_activation_counts.clear()
+        _expert_activation_scores.clear()
         _current_step_experts.clear()
         _stats = TensorResidencyStats()
         _memory_snapshot_cache = (0.0, None)

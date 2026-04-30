@@ -520,3 +520,16 @@ Why:
 - Real Qwen3-30B-A3B produced `<think>` for `max_new_tokens=1` and `<think>\nOkay,` for `max_new_tokens=4`.
 - Best warm measured run was `68.129s/token` / `0.01468 tokens/sec`, with tensor loading still about `51.0514s`.
 - Qwen 14B regression stayed intact, generating `Hello! How can`, and the full test suite passed with `223` tests.
+
+## Phase MoE Speed / Stage 3 / expert residency policy
+
+Decision:
+- Track both raw expert activation counts and decayed expert activation scores.
+- Prefer evicting the lowest-score expert tensors, while protecting experts touched in the current decode step.
+- Add `PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER`, `PCKETLM_EXPERT_TENSOR_CACHE_MB`, and `PCKETLM_EXPERT_CACHE_DECAY`.
+- For MoE models, choose the default expert tensor budget from startup free RAM when no explicit env override is set, capped at `2048 MB` with a `2048 MB` free-RAM reserve.
+
+Why:
+- The Qwen3 telemetry baseline selected thousands of expert groups for the 31-token prompt, so a plain LRU cache is not enough.
+- Decayed scores let the runtime prefer repeatedly routed experts without permanently pinning old traffic.
+- This laptop cannot hold all selected experts for a full prompt, so the policy needs an explicit per-layer cap and total expert-byte budget.
