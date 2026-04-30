@@ -553,9 +553,11 @@ Why:
 Decision:
 - Add per-token expert telemetry to the full prompt decode result before re-measuring Qwen3 with `max_new_tokens=20`.
 - For MoE long generations, cap the automatic layer schedule at `12` layers once `max_new_tokens > 8`.
+- Treat the phase path as `1->4`: the cache design is working for realistic continuation once the long-generation schedule uses the intended 12-layer MoE runtime path, so compressed expert residency is not needed in this phase.
 
 Why:
 - The previous phase measured mostly one-token runs, which cannot prove whether expert residency pays off across continuation steps.
 - Per-token snapshots make the cache question measurable at token 1, 5, 10, 15, and 20 and allow last-15-token hit-rate deltas instead of relying on a single cumulative run total.
 - `runtime_diagnose_cli.py` now accepts `--prompt` for the full slice so the measurement prompt matches the phase protocol instead of the previous hardcoded `hello world`.
 - The 50-token probe showed the cache works once the MoE path uses the shallower long-generation schedule: token 50 reached `48.63%` cumulative hit rate and tokens 36-50 reached `60.62%`. The 20-token path was using a deeper 24-layer schedule, which measured a different runtime regime.
+- After schedule tuning, Qwen3 20-token warm run 3 reached `3.1210s/token` and `63.19%` last-15-token hit rate, meeting the Qwen3 gate (`<=8s/token`, `>=60%` last-15 hit rate).

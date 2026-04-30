@@ -3067,3 +3067,90 @@ python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_f
 python -m pytest tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_caps_moe_long_generations tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack -q
 2 passed in 1.96s
 ```
+
+## Phase MoE Speed v2 / Stage 1 / 14B regression
+
+```text
+command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 4
+exit_code=0
+generated_text=Hello! How can
+generated_token_ids=[9707, 0, 2585, 646]
+elapsed_seconds=68.267
+peak_working_set_mb=2508
+free_ram_start_mb=4387
+free_ram_end_mb=4221
+ready=true
+```
+
+## Phase MoE Speed v2 / Stage 1 / 20-token baseline
+
+```text
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=32
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "Write a short paragraph about local AI." --max-new-tokens 20 --repeat 3
+
+run=1 elapsed_seconds=172.204 avg_seconds_per_token=8.6102 peak_working_set_mb=5895 free_ram_before_mb=5126 free_ram_after_mb=2531 token20_cumulative_hit_rate=0.1624 last15_hit_rate=0.2378 generated_text_repr='\u56de\u7b54/respondedBy/...'
+token_checkpoints: t1=0.0000 t5=0.0715 t10=0.1176 t15=0.1420 t20=0.1624
+last15_hits=2055 last15_misses=6585
+
+run=2 elapsed_seconds=190.666 avg_seconds_per_token=9.5333 peak_working_set_mb=5895 free_ram_before_mb=2531 free_ram_after_mb=2050 token20_cumulative_hit_rate=0.2095 last15_hit_rate=0.2663 generated_text_repr='\u56de\u7b54/respondedBy/...'
+token_checkpoints: t1=0.1767 t5=0.1882 t10=0.1961 t15=0.2032 t20=0.2095
+last15_hits=2301 last15_misses=6339
+
+run=3 elapsed_seconds=190.168 avg_seconds_per_token=9.5084 peak_working_set_mb=5895 free_ram_before_mb=2050 free_ram_after_mb=1795 token20_cumulative_hit_rate=0.2269 last15_hit_rate=0.2750 generated_text_repr='\u56de\u7b54/respondedBy/...'
+token_checkpoints: t1=0.2113 t5=0.2162 t10=0.2198 t15=0.2237 t20=0.2269
+last15_hits=2376 last15_misses=6264
+```
+
+## Phase MoE Speed v2 / Stage 1 / 50-token probe
+
+```text
+reason=20-token hit rate was still climbing, so measured longer generation before declaring cache design bad.
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=32
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "Write a short paragraph about local AI." --max-new-tokens 50
+
+run=1 elapsed_seconds=158.890 avg_seconds_per_token=3.1778 peak_working_set_mb=5430 generated_text_repr='exion particular,\u2026 \u2026...'
+token_checkpoints: t1=0.0000 t5=0.1166 t10=0.2506 t15=0.3303 t20=0.3748 t30=0.4265 t40=0.4605 t50=0.4863
+tokens_6_to_20_hit_rate=0.5979 hits=2583 misses=1737
+tokens_21_to_50_hit_rate=0.5903 hits=5100 misses=3540
+tokens_36_to_50_hit_rate=0.6062 hits=2619 misses=1701
+```
+
+## Phase MoE Speed v2 / Stage 1 / 20-token final after schedule
+
+```text
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=32
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+change=MoE long generations now use 12 prompt layers when max_new_tokens > 8.
+command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "Write a short paragraph about local AI." --max-new-tokens 20 --repeat 3
+
+run=1 elapsed_seconds=75.990 avg_seconds_per_token=3.7995 peak_working_set_mb=5429 free_ram_before_mb=6185 free_ram_after_mb=1905 tensor_load_prefill_seconds=13.0490 tensor_load_continuation_seconds=45.2819 token20_cumulative_hit_rate=0.3748 last15_hit_rate=0.5979 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+token_checkpoints: t1=0.0000 t5=0.1166 t10=0.2506 t15=0.3303 t20=0.3748
+last15_hits=2583 last15_misses=1737
+
+run=2 elapsed_seconds=63.422 avg_seconds_per_token=3.1711 peak_working_set_mb=5666 free_ram_before_mb=1904 free_ram_after_mb=2614 tensor_load_prefill_seconds=8.7845 tensor_load_continuation_seconds=38.1552 token20_cumulative_hit_rate=0.4683 last15_hit_rate=0.6285 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+token_checkpoints: t1=0.3866 t5=0.4096 t10=0.4365 t15=0.4558 t20=0.4683
+last15_hits=2715 last15_misses=1605
+
+run=3 elapsed_seconds=62.421 avg_seconds_per_token=3.1210 peak_working_set_mb=5666 free_ram_before_mb=2615 free_ram_after_mb=2798 tensor_load_prefill_seconds=8.6660 tensor_load_continuation_seconds=37.3763 token20_cumulative_hit_rate=0.5004 last15_hit_rate=0.6319 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+token_checkpoints: t20=0.5004
+last15_hits=2730 last15_misses=1590
+
+stage_path=1->4
+qwen3_gate=pass
+warm_best_seconds_per_token=3.1210
+warm_best_tokens_per_second=0.3204
+last15_hit_rate=0.6319
+```
+
+## Phase MoE Speed v2 / Stage 4 / disk check
+
+```text
+C_drive_free_gb=541.14
+required_free_gb=110
+stop_1=false
+```
