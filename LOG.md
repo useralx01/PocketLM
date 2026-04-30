@@ -2780,3 +2780,12 @@ pytest tests/test_tensor_residency.py::test_expert_residency_evicts_cold_expert_
 ```
 
 Policy: expert activations are counted by `(layer_index, expert_index)`. Under pressure, cold expert tensors evict before current-step or frequently activated expert tensors. Expert cache budget is controlled separately by `PCKETLM_EXPERT_TENSOR_CACHE_MB`.
+
+## Phase MoE / Step 5 / MoE forward math
+
+```text
+pytest tests/test_runtime_layer_bridge.py::test_run_moe_mlp_routes_top_k_experts_with_real_math tests/test_runtime_layer_bridge.py::test_run_minimal_layer_forward_bridge_executes_real_layer_slice -v
+2 passed in 1.98s
+```
+
+Added router softmax/top-k expert math with `norm_topk_prob` support. Dense Qwen2 path remains covered by the existing real-layer test.

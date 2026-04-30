@@ -19,7 +19,12 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from pcketlm.core.runtime.tensor_loader import scoped_tensor_handle_cache
-from pcketlm.core.runtime.tensor_residency import TensorResidencyPolicy, load_resident_tensor, load_resident_tensors
+from pcketlm.core.runtime.tensor_residency import (
+    TensorResidencyPolicy,
+    load_resident_tensor,
+    load_resident_tensors,
+    record_expert_activation,
+)
 from pcketlm.core.runtime.tensor_catalog import TensorCatalogEntry, find_tensor_catalog_entry, load_tensor_catalog
 from pcketlm.core.runtime.tokenizer_runtime import (
     decode_token_ids_to_text,
@@ -89,6 +94,11 @@ class LayerBridgeModelConfig:
     num_attention_heads: int
     num_key_value_heads: int
     intermediate_size: int
+    moe_intermediate_size: int
+    num_experts: int
+    num_experts_per_tok: int
+    norm_topk_prob: bool
+    model_type: str
     vocab_size: int
     rms_norm_eps: float
     hidden_act: str
@@ -110,6 +120,11 @@ class LayerBridgeModelConfig:
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
             "intermediate_size": self.intermediate_size,
+            "moe_intermediate_size": self.moe_intermediate_size,
+            "num_experts": self.num_experts,
+            "num_experts_per_tok": self.num_experts_per_tok,
+            "norm_topk_prob": self.norm_topk_prob,
+            "model_type": self.model_type,
             "vocab_size": self.vocab_size,
             "rms_norm_eps": self.rms_norm_eps,
             "hidden_act": self.hidden_act,
@@ -671,6 +686,11 @@ def _load_layer_bridge_config_cached(
             num_attention_heads=0,
             num_key_value_heads=0,
             intermediate_size=0,
+            moe_intermediate_size=0,
+            num_experts=0,
+            num_experts_per_tok=0,
+            norm_topk_prob=False,
+            model_type="unknown",
             vocab_size=0,
             rms_norm_eps=0.0,
             hidden_act="unknown",
@@ -739,6 +759,11 @@ def _load_layer_bridge_config_cached(
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         intermediate_size=int(payload.get("intermediate_size", 0)),
+        moe_intermediate_size=int(payload.get("moe_intermediate_size", 0)),
+        num_experts=int(payload.get("num_experts", 0) or 0),
+        num_experts_per_tok=int(payload.get("num_experts_per_tok", 0) or 0),
+        norm_topk_prob=bool(payload.get("norm_topk_prob", False)),
+        model_type=str(payload.get("model_type", "unknown")),
         vocab_size=int(payload.get("vocab_size", 0)),
         rms_norm_eps=float(payload.get("rms_norm_eps", 0.0)),
         hidden_act=hidden_act,
@@ -766,6 +791,40 @@ def _rms_norm(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float) -> 
     variance = hidden_float.pow(2).mean(dim=-1, keepdim=True)
     normalized = hidden_float * torch.rsqrt(variance + eps)
     return (normalized * weight.float().view(1, 1, -1)).to(dtype=output_dtype)
+
+
+def _run_moe_mlp(
+    *,
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+    expert_tensors: dict[int, dict[str, torch.Tensor]],
+    top_k: int,
+    norm_topk_prob: bool,
+) -> tuple[torch.Tensor, list[int], torch.Tensor]:
+    """Run router + top-k expert FFN for one MoE layer."""
+    output_dtype = hidden_states.dtype
+    router_logits = F.linear(hidden_states.float(), router_weight.float())
+    router_probs = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+    effective_top_k = max(1, min(int(top_k), router_probs.shape[-1]))
+    routing_weights, selected_experts = torch.topk(router_probs, effective_top_k, dim=-1)
+    if norm_topk_prob:
+        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+    combined = torch.zeros_like(hidden_states.float())
+    touched: set[int] = set()
+    for expert_index, tensors in expert_tensors.items():
+        mask = selected_experts == int(expert_index)
+        if not bool(mask.any()):
+            continue
+        touched.add(int(expert_index))
+        gate_weight = tensors["gate_proj"].float()
+        up_weight = tensors["up_proj"].float()
+        down_weight = tensors["down_proj"].float()
+        expert_hidden = F.silu(F.linear(hidden_states.float(), gate_weight)) * F.linear(hidden_states.float(), up_weight)
+        expert_output = F.linear(expert_hidden, down_weight)
+        expert_weight = torch.where(mask, routing_weights, torch.zeros_like(routing_weights)).sum(dim=-1, keepdim=True)
+        combined = combined + expert_output * expert_weight
+    return combined.to(dtype=output_dtype), sorted(touched), selected_experts
 
 
 def _repeat_kv(hidden_states: torch.Tensor, repeat_count: int) -> torch.Tensor:
@@ -877,6 +936,14 @@ def runtime_math_dtype_name() -> str:
 
 def _runtime_math_dtype() -> torch.dtype:
     return torch.bfloat16 if runtime_math_dtype_name() == "bfloat16" else torch.float32
+
+
+def _is_moe_config(config: LayerBridgeModelConfig) -> bool:
+    return config.num_experts > 0 and config.num_experts_per_tok > 0
+
+
+def _tensor_entry_exists(model_id: str, tensor_name: str) -> bool:
+    return find_tensor_catalog_entry(model_id, tensor_name) is not None
 
 
 def _layer_prefetch_enabled() -> bool:
@@ -1347,16 +1414,21 @@ def run_minimal_layer_forward_bridge(
 
     qkv_tensor_names = [
         f"model.layers.{layer_index}.self_attn.q_proj.weight",
-        f"model.layers.{layer_index}.self_attn.q_proj.bias",
         f"model.layers.{layer_index}.self_attn.k_proj.weight",
-        f"model.layers.{layer_index}.self_attn.k_proj.bias",
         f"model.layers.{layer_index}.self_attn.v_proj.weight",
-        f"model.layers.{layer_index}.self_attn.v_proj.bias",
     ]
+    q_bias_name = f"model.layers.{layer_index}.self_attn.q_proj.bias"
+    k_bias_name = f"model.layers.{layer_index}.self_attn.k_proj.bias"
+    v_bias_name = f"model.layers.{layer_index}.self_attn.v_proj.bias"
+    q_norm_name = f"model.layers.{layer_index}.self_attn.q_norm.weight"
+    k_norm_name = f"model.layers.{layer_index}.self_attn.k_norm.weight"
+    for optional_name in [q_bias_name, k_bias_name, v_bias_name, q_norm_name, k_norm_name]:
+        if _tensor_entry_exists(model_id, optional_name):
+            qkv_tensor_names.append(optional_name)
     qkv_tensors = load_required_many(qkv_tensor_names)
     q_weight = qkv_tensors[qkv_tensor_names[0]]
-    q_bias = qkv_tensors[qkv_tensor_names[1]]
-    if blockers or q_weight is None or q_bias is None:
+    q_bias = qkv_tensors.get(q_bias_name)
+    if blockers or q_weight is None:
         return LayerBridgeResult(
             model_id=model_id,
             layer_index=layer_index,
@@ -1369,15 +1441,15 @@ def run_minimal_layer_forward_bridge(
             cache_sequence_length=0,
             ready=False,
             timings=timings,
-        )
+    )
     phase_started = time.perf_counter()
     q_states = F.linear(normed_input, q_weight, q_bias)
     record_phase("qkv_projection", phase_started)
     del q_weight, q_bias
 
-    k_weight = qkv_tensors[qkv_tensor_names[2]]
-    k_bias = qkv_tensors[qkv_tensor_names[3]]
-    if blockers or k_weight is None or k_bias is None:
+    k_weight = qkv_tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]
+    k_bias = qkv_tensors.get(k_bias_name)
+    if blockers or k_weight is None:
         return LayerBridgeResult(
             model_id=model_id,
             layer_index=layer_index,
@@ -1390,15 +1462,15 @@ def run_minimal_layer_forward_bridge(
             cache_sequence_length=0,
             ready=False,
             timings=timings,
-        )
+    )
     phase_started = time.perf_counter()
     k_states = F.linear(normed_input, k_weight, k_bias)
     record_phase("qkv_projection", phase_started)
     del k_weight, k_bias
 
-    v_weight = qkv_tensors[qkv_tensor_names[4]]
-    v_bias = qkv_tensors[qkv_tensor_names[5]]
-    if blockers or v_weight is None or v_bias is None:
+    v_weight = qkv_tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"]
+    v_bias = qkv_tensors.get(v_bias_name)
+    if blockers or v_weight is None:
         return LayerBridgeResult(
             model_id=model_id,
             layer_index=layer_index,
@@ -1416,11 +1488,17 @@ def run_minimal_layer_forward_bridge(
     v_states = F.linear(normed_input, v_weight, v_bias)
     record_phase("qkv_projection", phase_started)
     del v_weight, v_bias
-    del qkv_tensors
 
     q_states = q_states.view(batch_size, sequence_length, config.num_attention_heads, head_dim).transpose(1, 2)
     k_states = k_states.view(batch_size, sequence_length, config.num_key_value_heads, head_dim).transpose(1, 2)
     v_states = v_states.view(batch_size, sequence_length, config.num_key_value_heads, head_dim).transpose(1, 2)
+    q_norm_weight = qkv_tensors.get(q_norm_name)
+    k_norm_weight = qkv_tensors.get(k_norm_name)
+    if q_norm_weight is not None:
+        q_states = _rms_norm(q_states, q_norm_weight, config.rms_norm_eps)
+    if k_norm_weight is not None:
+        k_states = _rms_norm(k_states, k_norm_weight, config.rms_norm_eps)
+    del qkv_tensors
 
     next_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
     past_length = 0
@@ -1541,75 +1619,148 @@ def run_minimal_layer_forward_bridge(
     record_phase("post_attention_norm", phase_started)
     del post_attention_norm_weight
 
-    mlp_tensor_names = [
-        f"model.layers.{layer_index}.mlp.gate_proj.weight",
-        f"model.layers.{layer_index}.mlp.up_proj.weight",
-        f"model.layers.{layer_index}.mlp.down_proj.weight",
-    ]
-    mlp_tensors = load_required_many(mlp_tensor_names)
-    gate_weight = mlp_tensors[mlp_tensor_names[0]]
-    if blockers or gate_weight is None:
-        return LayerBridgeResult(
-            model_id=model_id,
-            layer_index=layer_index,
-            input_mode=input_mode,
-            input_shape=[int(value) for value in hidden_states.shape],
-            output_shape=[],
-            output_dtype="unknown",
-            loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
-            blockers=blockers,
-            attention_head_dim=head_dim,
-            cache_sequence_length=cache_sequence_length,
-            ready=False,
-            timings=timings,
+    if _is_moe_config(config):
+        router_name = f"model.layers.{layer_index}.mlp.gate.weight"
+        router_weight = load_required(router_name)
+        if blockers or router_weight is None:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        with torch.no_grad():
+            router_probs = torch.softmax(F.linear(normed_post_attention.float(), router_weight.float()), dim=-1)
+            selected_experts = torch.topk(router_probs, max(1, min(config.num_experts_per_tok, config.num_experts)), dim=-1).indices
+            selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
+        expert_tensor_names: list[str] = []
+        for expert_index in selected_expert_ids:
+            record_expert_activation(layer_index, expert_index)
+            expert_tensor_names.extend(
+                [
+                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.gate_proj.weight",
+                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.up_proj.weight",
+                    f"model.layers.{layer_index}.mlp.experts.{expert_index}.down_proj.weight",
+                ]
+            )
+        loaded_experts = load_required_many(expert_tensor_names)
+        expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
+        for expert_index in selected_expert_ids:
+            prefix = f"model.layers.{layer_index}.mlp.experts.{expert_index}"
+            gate_weight = loaded_experts.get(f"{prefix}.gate_proj.weight")
+            up_weight = loaded_experts.get(f"{prefix}.up_proj.weight")
+            down_weight = loaded_experts.get(f"{prefix}.down_proj.weight")
+            if gate_weight is None or up_weight is None or down_weight is None:
+                blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
+                continue
+            expert_tensors[expert_index] = {
+                "gate_proj": gate_weight,
+                "up_proj": up_weight,
+                "down_proj": down_weight,
+            }
+        if blockers or not expert_tensors:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        phase_started = time.perf_counter()
+        mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
+            hidden_states=normed_post_attention,
+            router_weight=router_weight,
+            expert_tensors=expert_tensors,
+            top_k=config.num_experts_per_tok,
+            norm_topk_prob=config.norm_topk_prob,
         )
-    phase_started = time.perf_counter()
-    gated = F.silu(F.linear(normed_post_attention, gate_weight))
-    record_phase("mlp", phase_started)
-    del gate_weight
+        record_phase("mlp", phase_started)
+        del router_weight, loaded_experts, expert_tensors, normed_post_attention
+    else:
+        mlp_tensor_names = [
+            f"model.layers.{layer_index}.mlp.gate_proj.weight",
+            f"model.layers.{layer_index}.mlp.up_proj.weight",
+            f"model.layers.{layer_index}.mlp.down_proj.weight",
+        ]
+        mlp_tensors = load_required_many(mlp_tensor_names)
+        gate_weight = mlp_tensors[mlp_tensor_names[0]]
+        if blockers or gate_weight is None:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        phase_started = time.perf_counter()
+        gated = F.silu(F.linear(normed_post_attention, gate_weight))
+        record_phase("mlp", phase_started)
+        del gate_weight
 
-    up_weight = mlp_tensors[mlp_tensor_names[1]]
-    if blockers or up_weight is None:
-        return LayerBridgeResult(
-            model_id=model_id,
-            layer_index=layer_index,
-            input_mode=input_mode,
-            input_shape=[int(value) for value in hidden_states.shape],
-            output_shape=[],
-            output_dtype="unknown",
-            loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
-            blockers=blockers,
-            attention_head_dim=head_dim,
-            cache_sequence_length=cache_sequence_length,
-            ready=False,
-            timings=timings,
-        )
-    phase_started = time.perf_counter()
-    expanded = F.linear(normed_post_attention, up_weight)
-    record_phase("mlp", phase_started)
-    del up_weight, normed_post_attention
+        up_weight = mlp_tensors[mlp_tensor_names[1]]
+        if blockers or up_weight is None:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        phase_started = time.perf_counter()
+        expanded = F.linear(normed_post_attention, up_weight)
+        record_phase("mlp", phase_started)
+        del up_weight, normed_post_attention
 
-    down_weight = mlp_tensors[mlp_tensor_names[2]]
-    if blockers or down_weight is None:
-        return LayerBridgeResult(
-            model_id=model_id,
-            layer_index=layer_index,
-            input_mode=input_mode,
-            input_shape=[int(value) for value in hidden_states.shape],
-            output_shape=[],
-            output_dtype="unknown",
-            loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
-            blockers=blockers,
-            attention_head_dim=head_dim,
-            cache_sequence_length=cache_sequence_length,
-            ready=False,
-            timings=timings,
-        )
-    phase_started = time.perf_counter()
-    mlp_output = F.linear(gated * expanded, down_weight)
-    record_phase("mlp", phase_started)
-    del down_weight, gated, expanded
-    del mlp_tensors
+        down_weight = mlp_tensors[mlp_tensor_names[2]]
+        if blockers or down_weight is None:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        phase_started = time.perf_counter()
+        mlp_output = F.linear(gated * expanded, down_weight)
+        record_phase("mlp", phase_started)
+        del down_weight, gated, expanded
+        del mlp_tensors
     layer_output = residual_after_attention + mlp_output
     del residual_after_attention, mlp_output
 

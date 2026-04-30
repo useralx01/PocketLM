@@ -13,6 +13,7 @@ from pcketlm.core.runtime.layer_bridge import (
     CANCEL_BLOCKER,
     LayerBridgeResult,
     _recommended_prompt_layer_count,
+    _run_moe_mlp,
     _trim_generated_text_at_stop_string,
     _auto_torch_thread_count,
     _use_scoped_safetensor_handles,
@@ -142,6 +143,50 @@ def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
 
     assert text == "Hello"
     assert marker == "<|im_end|>"
+
+
+def test_run_moe_mlp_routes_top_k_experts_with_real_math() -> None:
+    hidden = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32)
+    router_weight = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+        ],
+        dtype=torch.float32,
+    )
+    expert_tensors = {
+        0: {
+            "gate_proj": torch.eye(2),
+            "up_proj": torch.eye(2),
+            "down_proj": torch.eye(2),
+        },
+        1: {
+            "gate_proj": torch.eye(2) * 2,
+            "up_proj": torch.eye(2),
+            "down_proj": torch.eye(2),
+        },
+    }
+
+    output, touched, selected = _run_moe_mlp(
+        hidden_states=hidden,
+        router_weight=router_weight,
+        expert_tensors=expert_tensors,
+        top_k=2,
+        norm_topk_prob=True,
+    )
+
+    probs = torch.softmax(torch.tensor([1.0, 2.0, -1.0, -2.0]), dim=-1)
+    top_values, _top_indices = torch.topk(probs, 2)
+    weights = top_values / top_values.sum()
+    expert0 = torch.nn.functional.silu(hidden) * hidden
+    expert1 = torch.nn.functional.silu(hidden * 2) * hidden
+    expected = expert1 * weights[0] + expert0 * weights[1]
+
+    assert touched == [0, 1]
+    assert selected.tolist() == [[[1, 0]]]
+    assert torch.allclose(output, expected, atol=1e-6)
 
 
 def _bootstrap_layer_bridge_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
