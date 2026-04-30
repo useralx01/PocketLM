@@ -533,3 +533,17 @@ Why:
 - The Qwen3 telemetry baseline selected thousands of expert groups for the 31-token prompt, so a plain LRU cache is not enough.
 - Decayed scores let the runtime prefer repeatedly routed experts without permanently pinning old traffic.
 - This laptop cannot hold all selected experts for a full prompt, so the policy needs an explicit per-layer cap and total expert-byte budget.
+
+## Phase MoE Speed / STOP-3 cache ceiling
+
+Decision:
+- Stop the phase under STOP-3 before Stage 4/Mixtral, because the required expert cache-hit gate is not reachable with the tested RAM budgets on this machine.
+- Keep the telemetry and expert-aware residency code, since it is tested and gives real visibility into the bottleneck.
+- Do not write `DONE.md`, because the phase did not reach the required Qwen3 speed/hit-rate gate and Mixtral was not attempted.
+
+Why:
+- `PCKETLM_EXPERT_TENSOR_CACHE_MB=0` produced `0.0%` expert hit rate.
+- The default hard-budget policy produced `1.10%` expert hit rate and `50.522s/token` best warm.
+- A `4096 MB` expert cache with `32` experts/layer produced the best result: `8.79%` expert hit rate and `49.262s/token` best warm.
+- A `6144 MB` expert cache with `64` experts/layer regressed to `5.65%` expert hit rate and `71.263s/token` best warm, with `7851 MB` peak working set.
+- The success gate requires `<=10s/token` and `>=70%` expert hit rate. The best observed hit rate after real runs was `8.79%`, so packed reads might reduce read overhead but cannot satisfy the required cache-hit gate on this machine without a deeper routing/prompt-cache design.

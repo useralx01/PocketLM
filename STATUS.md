@@ -557,3 +557,9 @@ Latest MoE foundation outcome:
 - Real full decode generated `<think>` in `54.149s` for `1` token and `<think>\nOkay,` in `134.700s` for `4` tokens, with about `1981 MB` peak working set.
 - Best warm run was `68.129s/token` / `0.01468 tokens/sec`, so the MoE speed target was not met.
 - Qwen 14B regression passed with `Hello! How can`, and the full test suite passed with `223` tests.
+
+Latest MoE speed outcome:
+- Added expert hit/miss telemetry and expert-aware sticky residency for the paged MoE path.
+- Qwen3-30B-A3B best tested cache configuration was `4096 MB` expert cache and `32` experts/layer: `49.262s/token` warm, `8.79%` expert hit rate, `5893 MB` peak working set, generated `<think>`.
+- The phase stopped under STOP-3 because three real cache configurations stayed above `20s/token` and below `50%` hit rate; the required gate was `<=10s/token` and `>=70%`.
+- Full suite passed with `229` tests. Mixtral validation was not run because the STOP condition ended the phase before Stage 6.

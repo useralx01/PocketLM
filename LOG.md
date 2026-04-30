@@ -2977,3 +2977,74 @@ expert_hit_rate=0.0
 expert_resident_count=0
 expert_resident_bytes=0
 ```
+
+## Phase MoE Speed / Stage 3 / expert residency attempts
+
+```text
+attempt=default-adaptive-before-hard-budget-fix
+result=invalidated
+reason=expert tensors were separated from global cache incorrectly and current-step protection allowed expert_resident_bytes to exceed the intended budget.
+observed_hit_rate=0.1813
+observed_expert_resident_bytes=7474249728
+best_warm_seconds=52.591
+
+attempt=default-adaptive-after-hard-budget-fix
+env=default
+run=1 elapsed_seconds=53.514 generated_text=<think> peak_working_set_mb=2882 free_ram_before_mb=6607 free_ram_after_mb=4411 tensor_load_seconds=39.9441
+run=2 elapsed_seconds=50.689 generated_text=<think> peak_working_set_mb=3150 free_ram_before_mb=4411 free_ram_after_mb=4692 tensor_load_seconds=37.5811
+run=3 elapsed_seconds=50.522 generated_text=<think> peak_working_set_mb=3182 free_ram_before_mb=4692 free_ram_after_mb=4481 tensor_load_seconds=37.5726
+expert_hit_rate=0.0110
+expert_hits=288
+expert_misses=25920
+expert_resident_count=144
+expert_resident_bytes=452984832
+
+attempt=4gb-cache-32-experts-per-layer
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=32
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+run=1 elapsed_seconds=54.254 generated_text=<think> peak_working_set_mb=5893 free_ram_before_mb=5851 free_ram_after_mb=2127 tensor_load_seconds=40.6943
+run=2 elapsed_seconds=49.980 generated_text=<think> peak_working_set_mb=5893 free_ram_before_mb=2128 free_ram_after_mb=2521 tensor_load_seconds=36.7095
+run=3 elapsed_seconds=49.262 generated_text=<think> peak_working_set_mb=5893 free_ram_before_mb=2521 free_ram_after_mb=2275 tensor_load_seconds=36.2129
+expert_hit_rate=0.0879
+expert_hits=2304
+expert_misses=23904
+expert_resident_count=1152
+expert_resident_bytes=3623878656
+
+attempt=6gb-cache-64-experts-per-layer
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=64
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=6144
+env PCKETLM_EXPERT_CACHE_DECAY=1
+run=1 elapsed_seconds=67.387 generated_text=<think> peak_working_set_mb=7851 free_ram_before_mb=7272 free_ram_after_mb=4293 tensor_load_seconds=50.9865
+run=2 elapsed_seconds=79.714 generated_text=<think> peak_working_set_mb=7851 free_ram_before_mb=4286 free_ram_after_mb=6087 tensor_load_seconds=59.3689
+run=3 elapsed_seconds=71.263 generated_text=<think> peak_working_set_mb=7851 free_ram_before_mb=6055 free_ram_after_mb=6780 tensor_load_seconds=52.3073
+expert_hit_rate=0.0565
+expert_hits=1482
+expert_misses=24726
+expert_resident_count=2048
+expert_resident_bytes=6442450944
+```
+
+## Phase MoE Speed / STOP-3
+
+```text
+condition=STOP-3
+reason=After three distinct expert residency configurations, warm time stayed above 20s/token and expert hit rate stayed below 50%.
+attempts=default-adaptive-after-hard-budget-fix,4gb-cache-32-experts-per-layer,6gb-cache-64-experts-per-layer
+best_warm_seconds_per_token=49.262
+best_expert_hit_rate=0.0879
+target_warm_seconds_per_token=10.0
+target_expert_hit_rate=0.70
+best_generated_text=<think>
+full_pytest=229 passed in 21.81s
+stage4_packed_reads=not_run_stop_condition_triggered
+mixtral_validation=not_run_stop_condition_triggered
+```
+
+## Phase MoE Speed / Tests
+
+```text
+python -m pytest tests/ -q
+229 passed in 21.81s
+```
