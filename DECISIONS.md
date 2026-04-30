@@ -405,3 +405,15 @@ Why:
 - The prior loaded GGUF proof reached about `2.30 tokens/sec`, which is already better than the 2-4s/token target when the server is loaded.
 - The bottleneck is not "agent design"; it is the default runtime path. Agents, conference chat, and broader model support should wait until the 14B chat path is usable.
 - Hiding a 50s cold load behind Send makes the app feel broken. A visible Load fast model action is more honest and easier to debug.
+
+## Phase 4B / Speed target met through warmed GGUF
+
+Decision:
+- Treat warmed Qwen 14B GGUF / llama.cpp as the current normal-chat speed solution.
+- Expose generation speed directly in GGUF chat responses and runtime details.
+- Keep the server loaded after the proof unless the user needs RAM back, because unloading would remove the achieved speed state.
+
+Why:
+- The live warmed app-path proof generated `19` tokens at `0.352s/token` / `2.843 tokens/sec`, beating the `2-4s/token` goal.
+- The direct dense runtime remains around `19-22s/token`, so it is not the release chat path on this hardware.
+- The speed improvement came from using the right backend path and making it the product default, not from another small safetensors cache tweak.

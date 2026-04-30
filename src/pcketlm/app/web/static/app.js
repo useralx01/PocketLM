@@ -370,6 +370,7 @@ function formatClockTime(value) {
 
 function runtimeRows(details) {
   const timings = details?.timings || {};
+  const speed = details?.generation_speed || {};
   const settings = details?.runtime_settings || {};
   const warmRunner = details?.warm_runner || {};
   const warmMemory = warmRunner.memory || {};
@@ -377,6 +378,8 @@ function runtimeRows(details) {
   const policy = settings.tensor_residency_policy || {};
   return [
     ["Total", formatSeconds(details?.elapsed_seconds ?? timings.total)],
+    ["Token speed", speed.generation_seconds_per_token ? `${speed.generation_seconds_per_token}s/token` : "n/a"],
+    ["Speed target", speed.target_met ? "met" : speed.generation_seconds_per_token ? "missed" : "n/a"],
     ["Prefill stack", formatSeconds(timings.prefill_stack)],
     ["Continuation stack", formatSeconds(timings.continuation_stack)],
     ["Decode tail", formatSeconds((Number(timings.prefill_decode_tail || 0) + Number(timings.continuation_decode_tail || 0)) || timings.prefill_decode_tail)],

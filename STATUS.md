@@ -529,3 +529,11 @@ Latest Phase 4 speed reset:
 - Live status proof showed `status=load-fast-path`, `default_chat_mode=GGUF`, `expected_ram_mb=9001`, and `estimated_cold_load_seconds=51.9`.
 - Live warm speed proof was skipped in this slice because free RAM was about `4.5 GB`, below the expected GGUF load footprint.
 - Full suite passed with `210` tests. Current Phase 4 speed estimate: about `20%` complete. The path is corrected; next work must load GGUF under enough RAM and prove warmed chat stays inside the 2-4s/token target.
+
+Latest Phase 4 speed target proof:
+- After reclaiming local memory, Pocket loaded the Qwen 14B GGUF server in `23.24s`; the loaded server reported ready with PID `24156`.
+- Warm app-path chat with `mode=GGUF` generated `19` tokens in `7.28s` wall time, with llama.cpp reporting `0.352s/token` and `2.843 tokens/sec`.
+- This beats the Phase 4 target of `2-4s/token`.
+- GGUF chat responses now include `generation_speed`, and the runtime panel shows Token speed plus whether the speed target was met.
+- Full suite passed with `211` tests, frontend syntax check is clean, and compile verification is clean.
+- Current Phase 4 speed estimate: about `65%` complete. The target speed is achieved for a warmed loaded server; remaining speed work is making the load/recovery/default state smoother and keeping RAM behavior understandable.

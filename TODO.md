@@ -7,8 +7,8 @@
 
 ## Next
 
-- Phase 4 speed target: prove Qwen 14B normal chat at `2-4s/token` or better through the warmed GGUF path.
-- Free enough RAM to load the Qwen 14B GGUF server, then record warm chat timings from the web/API path.
+- Phase 4 hardening: make the loaded GGUF path smooth across app refresh/restart where practical.
+- Improve RAM messaging and recovery for the loaded GGUF server because this machine can drop below `1 GB` free RAM while the fast path is loaded.
 - Add a visible loaded-speed proof in the UI after GGUF server is ready: seconds/token, server RAM, and last warm prompt latency.
 - Make sure app refresh/restart preserves the fact that GGUF is the default fast chat path without silently starting a cold load.
 - Keep direct dense runtime available as an advanced/research path, but do not let normal users enter it accidentally.

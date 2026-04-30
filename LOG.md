@@ -2419,3 +2419,77 @@ exit=0
 python -m pytest tests/ -v
 210 passed in 18.42s
 ```
+
+## Phase 4B / Qwen 14B speed target met on warmed GGUF
+
+Memory cleanup:
+
+```text
+Stopped Claude and Antigravity processes to reclaim local memory for the Qwen 14B GGUF server.
+free_ram_before_cleanup_mb=4346
+free_ram_after_cleanup_mb=6482
+```
+
+Fast model load:
+
+```text
+model=qwen2.5-14b-instruct
+backend=llama.cpp GGUF server
+load_elapsed_seconds=23.24
+server_ready=true
+server_pid=24156
+server_working_set_gb=9.83 immediately after load
+free_ram_after_load_mb=254
+```
+
+Warm app-path chat proof:
+
+```text
+prompt="Give one concise sentence about why local AI speed matters."
+mode=GGUF
+max_new_tokens=32
+ready=true
+strategy=llama-cpp-gguf-server
+wall_seconds=7.28
+app_reported_elapsed_seconds=7.12
+server_working_set_gb=8.08
+generated_tokens=19
+generation_seconds_per_token=0.352
+generation_tokens_per_second=2.843
+target_seconds_per_token_max=4.0
+target_met=true
+free_ram_before_mb=662
+free_ram_after_mb=828
+text="Local AI speed matters because faster processing allows for more efficient and timely decision-making and interactions."
+```
+
+Earlier warm checks in same loaded-server session:
+
+```text
+1-token prompt: wall=4.99s, text="OK"
+4-token prompt: wall=2.05s, generated at about 0.280s/token, text="Compact, efficient language"
+16-token prompt: wall=6.83s, generated at about 0.365s/token, text="Pocket LLM is a compact, local AI model running on your device for quick"
+```
+
+Product change:
+
+```text
+GGUF chat responses now include generation_speed with generated token count, seconds/token, tokens/sec, and target_met.
+The runtime panel now shows Token speed and Speed target rows after chat.
+```
+
+Verification:
+
+```text
+python -m pytest tests/test_web_main.py -v
+46 passed in 4.56s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+python -m compileall -q src tests
+exit=0
+
+python -m pytest tests/ -v
+211 passed in 5.87s
+```

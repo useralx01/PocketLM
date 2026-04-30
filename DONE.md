@@ -441,3 +441,4 @@
 - Added an honest backend comparison surface for GGUF, Direct Standard, and Direct Boosted. It tags fastest, best quality, lowest RAM, and recommended from measured rows and marks missing rows as `needs-benchmark`. Full suite passed with `204` tests.
 - Completed Phase 3 speed/reliability productization: dedicated comparison benchmark measured Direct Standard `21.03s`, Direct Boosted `19.81s`, and GGUF Compare `26.05s`; stronger GGUF agent checks passed; artifact disk summaries are shown; full suite passed with `208` tests.
 - Started Phase 4 speed-first work for Qwen 14B: Chat now defaults to GGUF, direct paths are labeled as Direct, hidden GGUF cold loads are blocked from Send, a Load fast model action is visible, and full suite passed with `210` tests.
+- Met the Phase 4 Qwen 14B speed target on the warmed GGUF path: live app chat generated `19` tokens at `0.352s/token` / `2.843 tokens/sec`, with full suite passing `211` tests.

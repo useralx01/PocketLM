@@ -1059,6 +1059,32 @@ def test_run_chat_payload_gguf_allows_longer_replies_than_direct_modes(monkeypat
     assert payload["max_new_tokens"] == 48
 
 
+def test_run_chat_payload_gguf_reports_generation_speed(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    def fake_run_gguf_prompt(model_id: str, prompt: str, **kwargs):
+        return SimpleNamespace(
+            ready=True,
+            generated_text="Pocket LLM is local and fast.",
+            backend="llama-cpp-gguf-server",
+            blockers=[],
+            timings={"total": 3.0, "server": {"predicted_n": 8, "predicted_ms": 2400.0, "predicted_per_second": 3.333}},
+        )
+
+    monkeypatch.setattr(web.main, "run_gguf_prompt", fake_run_gguf_prompt)
+    monkeypatch.setattr(
+        web.main,
+        "build_gguf_backend_status",
+        lambda model_id: SimpleNamespace(to_dict=lambda: {"ready": True, "llama_server": {"ready": True, "running": True}}),
+    )
+
+    payload = _run_chat_payload({"model_id": "qwen-test", "prompt": "Explain Pocket LLM.", "mode": "GGUF", "max_new_tokens": 8})
+
+    assert payload["generation_speed"]["generation_seconds_per_token"] == 0.3
+    assert payload["generation_speed"]["generation_tokens_per_second"] == 3.333
+    assert payload["generation_speed"]["target_met"] is True
+
+
 def test_run_chat_payload_gguf_requires_loaded_server_before_chat(monkeypatch) -> None:
     from pcketlm.app import web
 

@@ -372,6 +372,32 @@ def _runtime_performance_summary(timings: dict) -> dict:
     }
 
 
+def _gguf_generation_speed_payload(timings: dict) -> dict:
+    server = dict(timings.get("server") or {})
+    predicted_n = int(server.get("predicted_n") or 0)
+    predicted_ms = float(server.get("predicted_ms") or 0.0)
+    tokens_per_second = float(server.get("predicted_per_second") or 0.0)
+    seconds_per_token = None
+    if predicted_n > 0 and predicted_ms > 0:
+        seconds_per_token = round((predicted_ms / 1000.0) / predicted_n, 3)
+    elif tokens_per_second > 0:
+        seconds_per_token = round(1.0 / tokens_per_second, 3)
+    target_max = 4.0
+    return {
+        "backend": "llama-cpp-gguf",
+        "generated_tokens": predicted_n,
+        "generation_seconds_per_token": seconds_per_token,
+        "generation_tokens_per_second": round(tokens_per_second, 3) if tokens_per_second > 0 else None,
+        "target_seconds_per_token_max": target_max,
+        "target_met": bool(seconds_per_token is not None and seconds_per_token <= target_max),
+        "summary": (
+            f"GGUF generated at {seconds_per_token}s/token."
+            if seconds_per_token is not None
+            else "GGUF token speed was not reported by llama.cpp."
+        ),
+    }
+
+
 def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
     """Describe customer-facing safety bounds for the direct runtime path."""
     policy = tensor_residency_policy_snapshot()
@@ -1213,6 +1239,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
         timings["web_runtime_settings"] = runtime_settings_elapsed
         timings["web_speed_status"] = speed_status_elapsed
         timings["web_server_status"] = server_status_elapsed
+        gguf_generation_speed = _gguf_generation_speed_payload(timings)
         response = {
             "ready": bool(gguf_result.ready),
             "generated_text": gguf_result.generated_text,
@@ -1228,6 +1255,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "elapsed_seconds": round(time.perf_counter() - started, 2),
             "timings": timings,
             "performance_summary": _runtime_performance_summary(timings),
+            "generation_speed": gguf_generation_speed,
             "prefix_reuse": {"enabled": False, "used": False, "reason": "gguf-backend"},
             "reusable_token_count": 0,
             "runtime_settings": runtime_settings,

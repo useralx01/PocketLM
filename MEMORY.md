@@ -46,7 +46,10 @@ Codex should operate autonomously by default on Pocket LLM:
 - Success target: normal Qwen 14B chat must move from about `19-22s/token` direct runtime to `2-4s/token` or better.
 - First Phase 4A slice changed the product default to GGUF, labeled direct modes as Direct, added qwen14b_speed_target status, and blocked hidden cold GGUF loads behind Send.
 - Current status: GGUF fast path is available but not loaded; expected RAM is about `9001 MB`, cold load estimate about `51.9s`, current free RAM after tests was about `4.5 GB`.
-- Next work should free enough RAM or ask Issa to free RAM, load the GGUF server through the product path, and record warm token speed with normal chat prompts.
+- Phase 4B loaded Qwen 14B GGUF after reclaiming memory. The server loaded in `23.24s` and reported ready.
+- Live app-path warm speed proof: prompt `Give one concise sentence about why local AI speed matters.`, `mode=GGUF`, generated `19` tokens at `0.352s/token` / `2.843 tokens/sec`, wall `7.28s`, target met.
+- GGUF chat responses now include `generation_speed`; runtime details show Token speed and Speed target.
+- Current status: Qwen 14B speed goal is achieved for the warmed GGUF path. Remaining work is product hardening around load state, RAM pressure, persistence/recovery, and making this feel smooth after app restart.
 - High effort is best for architecture, native crash debugging, large runtime changes, and phase planning. Medium is enough for docs, UI polish, focused tests, and small productization slices.
 
 ## Verification Habit

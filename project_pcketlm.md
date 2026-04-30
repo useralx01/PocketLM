@@ -68,14 +68,14 @@ Current Phase 4A state:
 - GGUF Send no longer hides a cold model load; it returns `gguf-load-required` until the fast model is loaded.
 - Status exposes `qwen14b_speed_target`, expected RAM, cold-load estimate, and server state.
 - Full suite passed with 210 tests.
-- Warm speed proof still needs enough free RAM to load the GGUF server.
+- Phase 4B loaded the Qwen 14B GGUF server and proved warmed app-path chat at `0.352s/token` / `2.843 tokens/sec`, beating the `2-4s/token` target.
+- Full suite passed with 211 tests after adding generation-speed reporting.
 
 Next actions:
-1. Free enough RAM to load the Qwen 14B GGUF server safely.
-2. Load fast model through the product path.
-3. Run warm chat prompts and record seconds/token.
-4. Make the loaded GGUF path persist cleanly across app refresh/restart where practical.
-5. Only after warm Qwen 14B chat is reliably in the target range should the project resume agent work.
+1. Keep the loaded GGUF path smooth across app refresh/restart where practical.
+2. Improve RAM messaging and unload/reload recovery because the loaded server can leave less than 1 GB free on this machine.
+3. Add a small speed proof/history card so users can see the last warm token speed without opening runtime details.
+4. Only after warm Qwen 14B chat remains reliably in the target range should the project resume agent work.
 
 ## Orchestration Checklist After Another Session
 
