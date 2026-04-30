@@ -25,7 +25,7 @@
 - Keep the new `speed_status` surface as the customer-facing explanation layer for why a pack was selected or rejected
 - Continue heavy runtime work before profile/UI polish: target repeated full-layer tensor loading, longer conversation stability, and release-grade speed without falling back to rough partial-layer answers
 - Run a fresh measured benchmark before the next high phase so the new timing-summary fields become the baseline for stack/load/tail comparisons
-- Next high-speed phase: reduce Quality full-stack time enough that 6-8 token open-ended model answers do not take multiple minutes
+- Next high-speed phase: reduce Quality full-stack time enough that 8-token open-ended model answers do not take several minutes
 - Investigate the full-stack bottleneck shown by live smokes: deterministic identity is now local/instant, but real Qwen logic still spends about `16.4s` to `17.3s` in tensor loading for a 1-token run
 - Keep request-scoped safetensors handle reuse automatic only for one-token Quick runs; forcing it through multi-token decode is still unsafe and should stay opt-in until redesigned
 - Free enough system RAM before the next real speed benchmark; below `4 GB`, Pocket LLM now blocks generation to avoid crashing or entering severe memory pressure

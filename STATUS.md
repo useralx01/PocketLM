@@ -431,3 +431,10 @@ Latest 32B experimental-run preflight:
 - skipped the experimental `8` token 32B live proof because free RAM was about `4830 MB`, below the new `5120 MB` recommended headroom
 - the guardrail correctly reports `stable-low-headroom` and warns that longer-than-`4` token runs are experimental
 - current Phase 2 recovery estimate remains about `88%` complete until the longer proof can run with enough RAM.
+
+Latest Phase 2 completion update:
+- after freeing RAM, Qwen 32B `full --max-new-tokens 8` passed with `Hello World! It's great to see` in about `331.0s`, ending at `1421 MB` process working set
+- Qwen 14B regression still matches the baseline: `Hello! How can` in about `74.4s`
+- the web policy now treats `8` new tokens as the proven local Qwen 32B range; longer 32B web replies still require `allow_experimental_32b_tokens=true`
+- the latest full unit suite passes with `185` tests, and compile verification is clean
+- current Phase 2 estimate: about `96%` complete. The 32B page-runtime path is proven and guarded for short output; remaining work is mainly broader long-run proof, speed, and product packaging.

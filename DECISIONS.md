@@ -250,12 +250,12 @@ Qwen 32B direct runtime should be presented as a stable but slow power-user path
 Guardrail policy:
 - Minimum free RAM for direct web chat remains `4 GB`.
 - Recommended free RAM for Qwen 32B is `5 GB`.
-- The proven local 32B range is currently `4` new tokens.
-- Normal direct web chat caps Qwen 32B requests to `4` new tokens.
-- Requests above `4` new tokens require `allow_experimental_32b_tokens=true` and should be marked experimental until a longer live proof passes.
+- The proven local 32B range is currently `8` new tokens.
+- Normal direct web chat caps Qwen 32B requests to `8` new tokens.
+- Requests above `8` new tokens require `allow_experimental_32b_tokens=true` and should be marked experimental until a longer live proof passes.
 - Scoped safetensor handle caching remains disabled by default for Qwen 32B and is surfaced in the guardrail payload.
 
 Why:
-- Live proof shows 32B can run through full prompt/decode for `1`, `2`, and `4` new tokens.
-- The same proof also shows the path is very slow on this machine: `44.501s`, `77.28s`, and `156.6s`.
+- Live proof shows 32B can run through full prompt/decode for `1`, `2`, `4`, and `8` new tokens.
+- The same proof also shows the path is very slow on this machine: `44.501s`, `77.28s`, `156.6s`, and `330.955s`.
 - Beginners should see plain status labels and blockers instead of needing to know the env var or native crash history.

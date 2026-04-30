@@ -172,11 +172,11 @@ def test_direct_model_guardrails_marks_qwen_32b_as_stable_slow(monkeypatch) -> N
         },
     )
 
-    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=4)
+    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=8)
 
     assert payload["ready"] is True
     assert payload["status"] == "stable-slow"
-    assert payload["proven_max_new_tokens"] == 4
+    assert payload["proven_max_new_tokens"] == 8
     assert payload["scoped_safetensor_handle_cache"]["default_enabled"] is False
     assert payload["warnings"] == []
 
@@ -192,11 +192,11 @@ def test_direct_model_guardrails_warns_on_unproven_qwen_32b_length(monkeypatch) 
         },
     )
 
-    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=8)
+    payload = _direct_model_guardrails("qwen2.5-32b-instruct", requested_max_new_tokens=12)
 
     assert payload["ready"] is True
     assert payload["status"] == "stable-slow"
-    assert "proven to 4 new tokens" in payload["warnings"][0]
+    assert "proven to 8 new tokens" in payload["warnings"][0]
 
 
 def test_direct_model_guardrails_blocks_qwen_32b_below_ram_floor(monkeypatch) -> None:
@@ -428,7 +428,7 @@ def test_run_chat_payload_includes_qwen_32b_guardrails(monkeypatch) -> None:
 
     assert payload["ready"] is True
     assert payload["model_guardrails"]["status"] == "stable-slow"
-    assert payload["model_guardrails"]["proven_max_new_tokens"] == 4
+    assert payload["model_guardrails"]["proven_max_new_tokens"] == 8
     assert payload["model_guardrails"]["scoped_safetensor_handle_cache"]["default_enabled"] is False
 
 
@@ -441,11 +441,11 @@ def test_run_chat_payload_caps_qwen_32b_to_proven_token_range(monkeypatch) -> No
         captured.update(kwargs)
         return SimpleNamespace(
             ready=True,
-            generated_text="Hello World! It",
-            full_text="Hello World! It",
-            generated_token_ids=[9707, 4337, 0, 1084],
+            generated_text="Hello World! It's great to see",
+            full_text="Hello World! It's great to see",
+            generated_token_ids=[9707, 4337, 0, 1084, 594, 2244, 311, 1490],
             prompt_token_ids=[1, 2, 3],
-            steps_completed=4,
+            steps_completed=8,
             max_new_tokens=kwargs["max_new_tokens"],
             stop_reason="step-limit",
             strategy="fake",
@@ -469,9 +469,9 @@ def test_run_chat_payload_caps_qwen_32b_to_proven_token_range(monkeypatch) -> No
         }
     )
 
-    assert captured["max_new_tokens"] == 4
-    assert payload["max_new_tokens"] == 4
-    assert payload["model_guardrails"]["requested_max_new_tokens"] == 4
+    assert captured["max_new_tokens"] == 8
+    assert payload["max_new_tokens"] == 8
+    assert payload["model_guardrails"]["requested_max_new_tokens"] == 8
     assert payload["model_guardrails"]["warnings"] == []
 
 
@@ -508,14 +508,14 @@ def test_run_chat_payload_allows_explicit_experimental_qwen_32b_length(monkeypat
             "model_id": "qwen2.5-32b-instruct",
             "prompt": "hello world",
             "mode": "Quality",
-            "max_new_tokens": 8,
+            "max_new_tokens": 12,
             "allow_experimental_32b_tokens": True,
         }
     )
 
-    assert captured["max_new_tokens"] == 8
-    assert payload["max_new_tokens"] == 8
-    assert "proven to 4 new tokens" in payload["model_guardrails"]["warnings"][0]
+    assert captured["max_new_tokens"] == 12
+    assert payload["max_new_tokens"] == 12
+    assert "proven to 8 new tokens" in payload["model_guardrails"]["warnings"][0]
 
 
 def test_run_chat_payload_reuses_session_prefix_when_followup_matches(monkeypatch) -> None:

@@ -1516,3 +1516,58 @@ recommended_free_ram_mb=5120
 warning=Qwen 32B is proven to 4 new tokens on this machine; longer runs are experimental.
 decision=do not run experimental 8-token live proof until free RAM is at least 5120 MB
 ```
+
+## Phase 2 / Recovery 11 / Qwen 32B eight-token proof
+
+Self-prompt:
+
+```text
+After freeing enough RAM, run the real Qwen 32B full prompt/decode path for 8 new tokens. If it passes, promote the product guardrail from 4 to 8; if it crashes, localize the failure before changing policy.
+```
+
+Live 32B evidence:
+
+```text
+py -3.14 -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --max-new-tokens 8
+exit=0
+free_ram_start_mb=9200
+free_ram_end_mb=8117
+process_working_set_end_mb=1421
+operation_seconds=330.955
+generated_text=Hello World! It's great to see
+generated_token_ids=[9707, 4337, 0, 1084, 594, 2244, 311, 1490]
+cache_sequence_length_each_layer=38
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py tests/test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b -v
+35 passed in 8.21s
+
+node --check src/pcketlm/app/web/static/app.js
+exit=0
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+185 passed in 20.00s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
+
+Qwen 14B regression:
+
+```text
+py -3.14 -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 4
+exit=0
+free_ram_start_mb=9009
+free_ram_end_mb=8269
+process_working_set_end_mb=1020
+operation_seconds=74.428
+generated_text=Hello! How can
+generated_token_ids=[9707, 0, 2585, 646]
+```
