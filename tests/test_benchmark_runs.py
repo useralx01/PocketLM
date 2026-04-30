@@ -210,6 +210,11 @@ def test_run_lightweight_benchmark_persists_run_and_latest(tmp_path: Path, monke
         "skips",
         "resident_bytes",
         "resident_count",
+        "expert_hits",
+        "expert_misses",
+        "expert_evictions",
+        "expert_resident_bytes",
+        "expert_resident_count",
     }
     assert result.benchmark_path.exists()
     assert result.benchmark_path.name.endswith(".lightweight-benchmark.json")
