@@ -1804,3 +1804,38 @@ Focused verification:
 py -3.14 -m pytest tests/test_web_main.py -v
 39 passed in 7.77s
 ```
+
+## Phase 3 / Persistent handle cache rejection
+
+Self-prompt:
+
+```text
+Before designing a warm runner from scratch, test the existing persistent safetensor handle cache on 14B Agent reuse. Promote it only if the second call is both faster and stable.
+```
+
+Live evidence:
+
+```text
+PCKETLM_SAFETENSOR_HANDLE_CACHE=1
+first Agent call:
+ready=True
+elapsed_seconds=38.7
+generated_text=Hello!
+
+second Agent call:
+ready=False
+elapsed_seconds=0.0
+
+load_stats:
+shard_opens=8
+artifact_pack_opens=65
+artifact_tensor_hits=145
+persistent_handle_reuses=284
+loaded_mb=50402.0
+```
+
+Verdict:
+
+```text
+Rejected as a default. Persistent handle reuse reduced shard opens, but the two-call Agent path was not stable enough to promote.
+```

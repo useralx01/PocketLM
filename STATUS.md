@@ -457,3 +457,8 @@ Latest 32B proof-ladder update:
 - Qwen 32B `12` tokens completed without a crash, but it used only `24` layers and produced bad mixed-language output, so it is not promoted
 - explicit longer-than-proven direct web runs now force full-stack layer count; normal web chat still caps Qwen 14B and 32B at the proven `8` token range
 - current Phase 3 estimate: about `48%` complete. Longer-run policy is safer, but true longer 32B quality still needs a slow full-stack proof or a better backend.
+
+Latest warm-cache rejection:
+- persistent safetensor handle caching was tested on repeated 14B Agent calls and rejected as a default
+- it reduced shard opens but the second Agent call failed, so the next speed path should be a controlled warm runner or backend change
+- current Phase 3 estimate: about `50%` complete. We now know what not to promote, which matters because this path can otherwise look tempting from one metric alone.

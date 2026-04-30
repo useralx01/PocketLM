@@ -297,3 +297,13 @@ Why:
 - A Qwen 32B 12-token diagnostic completed without crashing, but it automatically reduced to `24` layers and produced bad mixed-language text: `您好战росл无论是其ПетерLLU SQETCHing查看全文长长长长`.
 - That result proves the process can survive a longer run, but it is not release-quality output and should not be promoted.
 - Experimental longer direct runs must prefer honest full-stack slowness over hidden partial-stack slop.
+
+## Phase 3 / Persistent handle cache
+
+Decision:
+- Do not enable `PCKETLM_SAFETENSOR_HANDLE_CACHE=1` by default.
+
+Why:
+- A live 14B Agent two-call test reused persistent handles (`284` persistent handle reuses), but the second Agent call returned `ready=False`.
+- The cache reduced shard opens, but did not produce a stable repeated-Agent path.
+- The next speed design should be a controlled warm runner or backend change, not a hidden global handle-cache default.

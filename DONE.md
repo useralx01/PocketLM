@@ -429,3 +429,4 @@
 - Added `performance_summary` to chat responses so each run reports total, stack, tensor-load, decode-tail, tensor-load share, and bottleneck.
 - Tested Qwen 32B at `12` tokens. It did not crash, but it fell to a `24`-layer automatic path and produced bad output, so it was not promoted.
 - Fixed the web runtime path so explicit longer-than-proven direct runs use the full model layer count instead of a hidden reduced-layer path.
+- Tested the existing persistent safetensor handle cache for Agent reuse and rejected it as a default after the second 14B Agent call failed despite `284` persistent handle reuses.
