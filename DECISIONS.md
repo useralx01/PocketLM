@@ -275,3 +275,14 @@ Why:
 - The Phase 3 baseline shows repeated tensor loading is the dominant bottleneck: about `131.1s` of Qwen 14B's `155.5s` 8-token run and about `301.7s` of Qwen 32B's `346.5s` 8-token run.
 - Bigger cache/pack changes are not the next safe default on this 16 GB machine; the safer customer behavior is to cap normal direct replies, expose timing estimates, and make repeated agent-style calls explicitly short.
 - The live Agent smoke produced `Hello!` in `40.16s`, close to the new `39.0s` guard estimate.
+
+## Phase 3 / Agent reuse
+
+Decision:
+- Do not promote Boosted automatically for Agent mode yet.
+- Keep Agent as a short full-stack mode and expose `performance_summary` in every response.
+
+Why:
+- The second live Agent call reused session prefix successfully, but still took `38.72s`.
+- The reused call spent about `32.64s` loading tensors across prefix append and continuation.
+- A live Boosted check did not prove a meaningful speed win, so changing defaults would add risk without enough benefit.

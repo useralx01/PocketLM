@@ -446,3 +446,9 @@ Latest Phase 3 speed/reliability update:
 - live Agent proof on 14B generated `Hello!` in about `40.2s`, matching the new estimate closely
 - focused web/benchmark tests pass with `43` tests, and frontend syntax check is clean
 - current Phase 3 estimate: about `35%` complete. The app is safer and more honest about speed, but raw runtime speed still needs a backend or tensor-loading redesign.
+
+Latest Agent reuse update:
+- repeated Agent calls reuse session prefix correctly: the second live 14B call reused `64` prompt tokens and appended `14`
+- speed did not materially improve because tensor loading still dominated: the second call took about `38.7s`
+- chat responses now include a `performance_summary` field so future runs expose the bottleneck without manually reading raw timing keys
+- current Phase 3 estimate: about `42%` complete. Reliability and measurement are much better; the next real speed work needs a warm runner or backend change.

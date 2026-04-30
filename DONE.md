@@ -425,3 +425,5 @@
 - Added Agent mode as a real full-stack short-work path capped to `2` direct tokens; live 14B smoke generated `Hello!` in `40.16s`.
 - Added measured direct-runtime timing estimates and bottleneck labels to guardrails, and capped normal Qwen 14B/32B direct web replies to the proven `8` token range unless an experimental override is set.
 - Added Agent to measured benchmark runs so speed comparisons cover the repeated-short-work path.
+- Proved repeated Agent session reuse: the second 14B Agent call reused `64` prompt tokens and batch-appended `14`, but still took `38.72s` because tensor loading remained dominant.
+- Added `performance_summary` to chat responses so each run reports total, stack, tensor-load, decode-tail, tensor-load share, and bottleneck.

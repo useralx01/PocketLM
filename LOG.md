@@ -1706,3 +1706,49 @@ guard_status=stable-slow
 guard_estimate_seconds=39.0
 guard_bottleneck=tensor loading
 ```
+
+## Phase 3 / Agent reuse and performance summary
+
+Self-prompt:
+
+```text
+Measure repeated Agent calls in one web-runtime process. If prefix reuse works but speed barely improves, do not fake a speed win; expose the bottleneck structurally in response payloads.
+```
+
+Live repeated Agent evidence:
+
+```text
+first Agent call:
+ready=True
+elapsed_seconds=40.58
+generated_text=Hello!
+prefix_reuse.used=False
+
+second Agent call, same session with chat history:
+ready=True
+elapsed_seconds=38.72
+generated_text=Ok
+prefix_reuse.used=True
+matched_token_count=64
+appended_token_count=14
+prefix_append_stack_op_load_tensors=16.3822
+continuation_stack_op_load_tensors=16.2546
+```
+
+Verdict:
+
+```text
+Session-prefix reuse works, but Agent calls are still dominated by repeated tensor loading.
+Boosted was not promoted automatically because the live Agent run stayed around 40.72s and reported the standard saved preset.
+Response payloads now include performance_summary so every future live run records stack seconds, tensor-load seconds, decode-tail seconds, tensor-load share, and bottleneck.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py tests/test_benchmark_runs.py -v
+43 passed in 8.34s
+
+node --check src/pcketlm/app/web/static/app.js
+exit=0
+```

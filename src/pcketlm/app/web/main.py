@@ -284,6 +284,44 @@ def _direct_runtime_baseline(model_id: str, requested_max_new_tokens: int | None
     }
 
 
+def _runtime_performance_summary(timings: dict) -> dict:
+    """Summarize timing keys into a customer-safe speed diagnosis."""
+    prefill_load = float(timings.get("prefill_stack_op_load_tensors", 0.0) or 0.0)
+    continuation_load = float(timings.get("continuation_stack_op_load_tensors", 0.0) or 0.0)
+    prefix_load = float(timings.get("prefix_append_stack_op_load_tensors", 0.0) or 0.0)
+    tensor_load_seconds = round(prefill_load + continuation_load + prefix_load, 3)
+    prefill_stack = float(timings.get("prefill_stack", 0.0) or timings.get("prefill_stack_total", 0.0) or 0.0)
+    continuation_steps = float(timings.get("continuation_steps", 0.0) or 0.0)
+    prefix_append = float(timings.get("prefix_append", 0.0) or 0.0)
+    decode_tail = round(
+        float(timings.get("prefill_decode_tail", 0.0) or 0.0)
+        + float(timings.get("continuation_decode_tail", 0.0) or 0.0),
+        3,
+    )
+    total = float(timings.get("total", 0.0) or 0.0)
+    stack_seconds = round(prefill_stack + continuation_steps + prefix_append, 3)
+    components = {
+        "tensor loading": tensor_load_seconds,
+        "layer stack": stack_seconds,
+        "decode tail": decode_tail,
+    }
+    bottleneck, bottleneck_seconds = max(components.items(), key=lambda item: item[1])
+    return {
+        "total_seconds": round(total, 3) if total else None,
+        "stack_seconds": stack_seconds,
+        "tensor_load_seconds": tensor_load_seconds,
+        "decode_tail_seconds": decode_tail,
+        "tensor_load_share": round(tensor_load_seconds / total, 2) if total else None,
+        "bottleneck": bottleneck if bottleneck_seconds > 0 else None,
+        "bottleneck_seconds": bottleneck_seconds if bottleneck_seconds > 0 else None,
+        "summary": (
+            f"Main bottleneck: {bottleneck}."
+            if bottleneck_seconds > 0
+            else "No detailed runtime timing was recorded."
+        ),
+    }
+
+
 def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
     """Describe customer-facing safety bounds for the direct runtime path."""
     policy = tensor_residency_policy_snapshot()
@@ -1026,6 +1064,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "blockers": list(gguf_result.blockers),
             "elapsed_seconds": round(time.perf_counter() - started, 2),
             "timings": timings,
+            "performance_summary": _runtime_performance_summary(timings),
             "prefix_reuse": {"enabled": False, "used": False, "reason": "gguf-backend"},
             "reusable_token_count": 0,
             "runtime_settings": runtime_settings,
@@ -1284,6 +1323,7 @@ def _status_payload() -> dict:
 
 
 def _prompt_result_payload(result: Any, elapsed_seconds: float | None = None) -> dict:
+    timings = dict(getattr(result, "timings", {}) or {})
     return {
         "ready": bool(result.ready),
         "generated_text": result.generated_text,
@@ -1297,7 +1337,8 @@ def _prompt_result_payload(result: Any, elapsed_seconds: float | None = None) ->
         "cache_sequence_lengths": dict(result.cache_sequence_lengths),
         "blockers": list(result.blockers),
         "elapsed_seconds": elapsed_seconds,
-        "timings": dict(getattr(result, "timings", {}) or {}),
+        "timings": timings,
+        "performance_summary": _runtime_performance_summary(timings),
         "prefix_reuse": dict(getattr(result, "prefix_reuse", {}) or {}),
         "reusable_token_count": len(getattr(result, "reusable_token_ids", []) or []),
         "runtime_settings": _runtime_settings_payload(),

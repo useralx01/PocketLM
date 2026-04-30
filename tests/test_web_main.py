@@ -310,6 +310,12 @@ def test_prompt_result_payload_serializes_runtime_result() -> None:
         strategy="greedy-prompt-kv-cache-rope",
         cache_sequence_lengths={"0": 32},
         blockers=[],
+        timings={
+            "total": 12.0,
+            "prefill_stack_op_load_tensors": 7.0,
+            "continuation_stack_op_load_tensors": 2.0,
+            "prefill_decode_tail": 1.0,
+        },
     )
 
     payload = _prompt_result_payload(result, elapsed_seconds=12.5)
@@ -319,6 +325,9 @@ def test_prompt_result_payload_serializes_runtime_result() -> None:
     assert payload["generated_token_ids"] == [9707, 0]
     assert payload["prompt_token_count"] == 2
     assert payload["elapsed_seconds"] == 12.5
+    assert payload["performance_summary"]["bottleneck"] == "tensor loading"
+    assert payload["performance_summary"]["tensor_load_seconds"] == 9.0
+    assert payload["performance_summary"]["tensor_load_share"] == 0.75
     assert "runtime_settings" in payload
 
 
