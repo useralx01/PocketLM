@@ -992,7 +992,9 @@ def _recommended_prompt_layer_count(
     if config.num_hidden_layers <= 2:
         return config.num_hidden_layers
 
-    if max_new_tokens <= 8:
+    if getattr(config, "num_experts", 0) and getattr(config, "num_experts_per_tok", 0) and max_new_tokens > 8:
+        target = min(config.num_hidden_layers, 12)
+    elif max_new_tokens <= 8:
         target = config.num_hidden_layers
     elif max_new_tokens <= 24:
         target = min(config.num_hidden_layers, 24)

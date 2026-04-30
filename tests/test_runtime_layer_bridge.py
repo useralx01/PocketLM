@@ -42,11 +42,23 @@ from pcketlm.core.runtime import layer_bridge as layer_bridge_module
 class _PromptBudgetConfig:
     ready = True
     num_hidden_layers = 48
+    num_experts = 0
+    num_experts_per_tok = 0
+
+
+class _MoePromptBudgetConfig(_PromptBudgetConfig):
+    num_experts = 128
+    num_experts_per_tok = 8
 
 
 def test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack() -> None:
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=4) == 48
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=260, max_new_tokens=4) == 32
+
+
+def test_recommended_prompt_layer_count_caps_moe_long_generations() -> None:
+    assert _recommended_prompt_layer_count(_MoePromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 12
+    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 24
 
 
 def test_runtime_torch_thread_count_uses_safe_auto_and_env_override(monkeypatch) -> None:

@@ -3063,4 +3063,7 @@ python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop
 
 python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_full_honors_max_new_tokens tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reports_per_token_expert_telemetry -q
 2 passed in 1.55s
+
+python -m pytest tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_caps_moe_long_generations tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack -q
+2 passed in 1.96s
 ```
