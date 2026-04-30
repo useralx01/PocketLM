@@ -443,12 +443,14 @@ def _store_resident_tensor(
     global _resident_bytes, _resident_expert_bytes
     nbytes = tensor.element_size() * tensor.nelement()
     expert_key = _expert_key(entry)
-    if nbytes > policy.max_resident_bytes:
-        _stats.skips += 1
-        return
-    if expert_key is not None and nbytes > policy.expert_max_resident_bytes:
-        _stats.skips += 1
-        return
+    if expert_key is None:
+        if nbytes > policy.max_resident_bytes:
+            _stats.skips += 1
+            return
+    else:
+        if nbytes > policy.expert_max_resident_bytes:
+            _stats.skips += 1
+            return
 
     with _cache_lock:
         if key in _resident_tensors:
@@ -457,16 +459,14 @@ def _store_resident_tensor(
             if old.expert_key is not None:
                 _resident_expert_bytes -= old.nbytes
 
-        while _resident_tensors and _resident_bytes + nbytes > policy.max_resident_bytes:
-            evict_key = _select_eviction_key(policy)
-            if evict_key is None:
-                break
-            old = _resident_tensors.pop(evict_key)
-            _resident_bytes -= old.nbytes
-            if old.expert_key is not None:
-                _resident_expert_bytes -= old.nbytes
-                _stats.expert_evictions += 1
-            _stats.evictions += 1
+        if expert_key is None:
+            while _resident_tensors and _non_expert_resident_bytes() + nbytes > policy.max_resident_bytes:
+                evict_key = _select_non_expert_eviction_key(policy)
+                if evict_key is None:
+                    break
+                old = _resident_tensors.pop(evict_key)
+                _resident_bytes -= old.nbytes
+                _stats.evictions += 1
 
         if expert_key is not None:
             while _resident_tensors and _resident_expert_bytes + nbytes > policy.expert_max_resident_bytes:
@@ -513,6 +513,23 @@ def _select_eviction_key(policy: TensorResidencyPolicy) -> _CacheKey | None:
             return key
     for key, resident in _resident_tensors.items():
         if not _is_always_resident_entry(resident.entry):
+            return key
+    return None
+
+
+def _non_expert_resident_bytes() -> int:
+    return sum(resident.nbytes for resident in _resident_tensors.values() if resident.expert_key is None)
+
+
+def _select_non_expert_eviction_key(policy: TensorResidencyPolicy) -> _CacheKey | None:
+    sticky_floor = _residency_step - int(policy.sticky_residency_steps)
+    for key, resident in _resident_tensors.items():
+        if resident.expert_key is not None or _is_always_resident_entry(resident.entry):
+            continue
+        if resident.loaded_step < sticky_floor:
+            return key
+    for key, resident in _resident_tensors.items():
+        if resident.expert_key is None and not _is_always_resident_entry(resident.entry):
             return key
     return None
 

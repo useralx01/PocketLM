@@ -340,6 +340,39 @@ def test_expert_residency_respects_zero_expert_budget(tmp_path: Path, monkeypatc
     assert snapshot["expert_resident_count"] == 0
 
 
+def test_expert_residency_uses_separate_budget_from_dense_cache(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-separate-budget-test"
+    expert_name = "model.layers.0.mlp.experts.5.gate_proj.weight"
+    entry = _entry(tmp_path, expert_name)
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 5
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        return _loaded_tensor(model_id_arg, entry)
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=1,
+        max_tensor_bytes=1024,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=1,
+        expert_max_resident_bytes=1024,
+    )
+    record_expert_activation(0, 5)
+    first = load_resident_tensor(model_id, expert_name, policy=policy)
+    second = load_resident_tensor(model_id, expert_name, policy=policy)
+    snapshot = expert_residency_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert snapshot["expert_hits"] == 1
+    assert snapshot["expert_misses"] == 1
+    assert snapshot["expert_resident_count"] == 1
+
+
 def test_expert_residency_decay_lets_new_hot_expert_replace_old_one(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.setenv("PCKETLM_EXPERT_CACHE_DECAY", "0.5")
