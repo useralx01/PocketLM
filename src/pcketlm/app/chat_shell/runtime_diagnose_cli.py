@@ -936,9 +936,15 @@ def main(argv: list[str] | None = None) -> int:
                         "generated_text": run_result.get("generated_text"),
                         "timings": run_result.get("timings", {}),
                         "tensor_load_stats": run_result.get("tensor_load_stats", {}),
+                        "expert_telemetry": expert_residency_snapshot(),
                     }
                 )
-            result = {"ready": all(item["ready"] for item in repeated), "runs": repeated, "blockers": []}
+            result = {
+                "ready": all(item["ready"] for item in repeated),
+                "runs": repeated,
+                "expert_telemetry": expert_residency_snapshot(),
+                "blockers": [],
+            }
         else:
             selected_callback = (lambda _model_id: _full_forward(_model_id, max_new_tokens)) if slice_name == "full" else callback
             result = _run_checkpoint(
@@ -966,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         started_at=started_at,
         ready=bool(result.get("ready", False)),
         blockers=list(result.get("blockers", [])),
+        expert_telemetry=expert_residency_snapshot(),
     )
     return 0
 

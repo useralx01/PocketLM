@@ -250,6 +250,89 @@ def test_expert_residency_evicts_cold_expert_before_hot_expert(tmp_path: Path, m
     assert tensor_residency_stats().expert_misses >= 4
 
 
+def test_expert_residency_snapshot_reports_hit_miss_and_touch_rankings(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-telemetry-test"
+    hot_name = "model.layers.0.mlp.experts.5.gate_proj.weight"
+    cold_name = "model.layers.0.mlp.experts.12.gate_proj.weight"
+    hot_entry = _entry(tmp_path, hot_name)
+    hot_entry.component_group = "expert_mlp"
+    hot_entry.expert_index = 5
+    cold_entry = _entry(tmp_path, cold_name)
+    cold_entry.component_group = "expert_mlp"
+    cold_entry.expert_index = 12
+    entries = {hot_name: hot_entry, cold_name: cold_entry}
+    calls = {"count": 0}
+
+    def fake_load_tensors_by_name(model_id_arg: str, tensor_names: list[str]) -> dict[str, LoadedTensorSlice]:
+        calls["count"] += 1
+        return {tensor_name: _loaded_tensor(model_id_arg, entries[tensor_name]) for tensor_name in tensor_names}
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensors_by_name", fake_load_tensors_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=1024,
+        max_tensor_bytes=1024,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=1,
+        expert_max_resident_bytes=1024,
+    )
+    record_expert_activation(0, 5)
+    record_expert_activation(0, 5)
+    record_expert_activation(0, 12)
+    load_resident_tensors(model_id, [hot_name, cold_name], policy=policy)
+    load_resident_tensors(model_id, [hot_name], policy=policy)
+
+    snapshot = expert_residency_snapshot(top_k=1)
+
+    assert snapshot["total_expert_requests"] == 3
+    assert snapshot["expert_hits"] == 1
+    assert snapshot["expert_misses"] == 2
+    assert snapshot["expert_hit_rate"] == 0.3333
+    assert snapshot["expert_activation_total"] == 3
+    assert snapshot["top_touched_experts"] == [{"layer": 0, "expert": 5, "touches": 2}]
+    assert snapshot["least_touched_experts"] == [{"layer": 0, "expert": 12, "touches": 1}]
+    assert snapshot["expert_resident_count"] == 2
+    assert calls["count"] == 1
+
+
+def test_expert_residency_respects_zero_expert_budget(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-zero-budget-test"
+    expert_name = "model.layers.0.mlp.experts.5.gate_proj.weight"
+    entry = _entry(tmp_path, expert_name)
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 5
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        assert tensor_name == expert_name
+        return _loaded_tensor(model_id_arg, entry)
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=1024,
+        max_tensor_bytes=1024,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=1,
+        expert_max_resident_bytes=0,
+    )
+    record_expert_activation(0, 5)
+    load_resident_tensor(model_id, expert_name, policy=policy)
+    load_resident_tensor(model_id, expert_name, policy=policy)
+    snapshot = expert_residency_snapshot()
+
+    assert snapshot["expert_hits"] == 0
+    assert snapshot["expert_misses"] == 2
+    assert snapshot["expert_hit_rate"] == 0.0
+    assert snapshot["expert_resident_count"] == 0
+
+
 def test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom(monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)

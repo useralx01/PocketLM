@@ -236,18 +236,41 @@ def record_expert_activation(layer_index: int, expert_index: int) -> None:
         _expert_activation_counts[key] = _expert_activation_counts.get(key, 0) + 1
 
 
-def expert_residency_snapshot() -> dict:
+def expert_residency_snapshot(top_k: int = 10) -> dict:
     """Return expert-cache counters for diagnostics."""
     with _cache_lock:
-        total = sum(_expert_activation_counts.values())
+        total_activations = sum(_expert_activation_counts.values())
         hits = int(_stats.expert_hits)
         misses = int(_stats.expert_misses)
         denominator = hits + misses
+        sorted_by_touch = sorted(
+            _expert_activation_counts.items(),
+            key=lambda item: (-item[1], item[0][0], item[0][1]),
+        )
+        sorted_least_touched = sorted(
+            _expert_activation_counts.items(),
+            key=lambda item: (item[1], item[0][0], item[0][1]),
+        )
+        def format_experts(items: list[tuple[tuple[int, int], int]]) -> list[dict]:
+            return [
+                {
+                    "layer": int(layer),
+                    "expert": int(expert),
+                    "touches": int(count),
+                }
+                for (layer, expert), count in items[: max(0, int(top_k))]
+            ]
+
         return {
             "activated_experts": {f"{layer}:{expert}": count for (layer, expert), count in sorted(_expert_activation_counts.items())},
             "current_step_experts": [f"{layer}:{expert}" for layer, expert in sorted(_current_step_experts)],
+            "total_expert_requests": denominator,
+            "expert_hits": hits,
+            "expert_misses": misses,
             "expert_hit_rate": 0.0 if denominator == 0 else round(hits / denominator, 4),
-            "expert_activation_total": total,
+            "expert_activation_total": total_activations,
+            "top_touched_experts": format_experts(sorted_by_touch),
+            "least_touched_experts": format_experts(sorted_least_touched),
             "expert_resident_bytes": _resident_expert_bytes,
             "expert_resident_count": sum(1 for resident in _resident_tensors.values() if resident.expert_key is not None),
         }
@@ -357,7 +380,11 @@ def _store_resident_tensor(
 ) -> None:
     global _resident_bytes, _resident_expert_bytes
     nbytes = tensor.element_size() * tensor.nelement()
+    expert_key = _expert_key(entry)
     if nbytes > policy.max_resident_bytes:
+        _stats.skips += 1
+        return
+    if expert_key is not None and nbytes > policy.expert_max_resident_bytes:
         _stats.skips += 1
         return
 
@@ -379,7 +406,6 @@ def _store_resident_tensor(
                 _stats.expert_evictions += 1
             _stats.evictions += 1
 
-        expert_key = _expert_key(entry)
         if expert_key is not None:
             while _resident_tensors and _resident_expert_bytes + nbytes > policy.expert_max_resident_bytes:
                 evict_key = _select_expert_eviction_key()
