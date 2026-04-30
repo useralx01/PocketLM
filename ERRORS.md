@@ -71,6 +71,14 @@ Follow-up:
 - lesson: the bridge must distinguish attention projection width from residual hidden width.
 
 ## Error
+- date: 2026-04-30
+- area: Phase MoE / Step 9 / Qwen3 full prompt decode
+- what went wrong: `qwen3-30b-a3b --slice=full --max-new-tokens 1` succeeded with `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0`, but the same command with the default scoped handle policy exited after the `before full-prompt-decode` checkpoint without an `after` record.
+- why it happened: Qwen3's full decode path has the same scoped safetensor handle instability previously observed on Qwen 32B. The model can run when scoped handle reuse is disabled.
+- fix: make `qwen3-30b-a3b` default to no scoped safetensor handle cache, while preserving the explicit env override for diagnostics.
+- lesson: correctness defaults beat handle reuse for large paged models until the scoped handle lifecycle is redesigned.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files

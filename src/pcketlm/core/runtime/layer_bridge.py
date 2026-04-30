@@ -2997,7 +2997,7 @@ def _use_scoped_safetensor_handles(model_id: str, effective_steps: int) -> bool:
     if scoped_setting in {"0", "false", "no"}:
         return False
     normalized_model_id = model_id.strip().lower()
-    if normalized_model_id in {"qwen2.5-32b-instruct", "qwen-2.5-32b-instruct"}:
+    if normalized_model_id in {"qwen2.5-32b-instruct", "qwen-2.5-32b-instruct", "qwen3-30b-a3b"}:
         return False
     return scoped_setting in {"", "auto"} and effective_steps <= 1
 

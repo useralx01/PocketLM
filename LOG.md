@@ -2829,3 +2829,41 @@ index_total_size=61064245248
 actual_safetensors_bytes=61066575648
 import_validation=ok
 ```
+
+## Phase MoE / Step 9 / diagnostic slices
+
+```text
+router-only:
+elapsed_seconds=7.612
+selected_experts=[62, 87, 21, 38, 4, 103, 125, 109]
+router_logits_shape=[1, 1, 128]
+peak_working_set_mb=437
+free_ram_start_mb=5304
+free_ram_end_mb=5103
+
+one-expert:
+elapsed_seconds=3.687
+output_shape=[1, 1, 2048]
+expert_resident_bytes=9437184
+expert_resident_count=3
+peak_working_set_mb=437
+
+top-k-experts:
+elapsed_seconds=3.786
+selected_experts=[4, 21, 38, 62, 87, 103, 109, 125]
+expert_resident_bytes=75497472
+expert_resident_count=24
+peak_working_set_mb=513
+
+all-layers-moe:
+elapsed_seconds=21.848
+operation_seconds_layers_0_through_47=18.563
+executed_layers=0..47
+output_shape=[1, 1, 2048]
+tensor_load_seconds=16.7484
+mlp_seconds=1.4577
+peak_working_set_mb=852
+free_ram_start_mb=5215
+free_ram_end_mb=4659
+ready=true
+```
