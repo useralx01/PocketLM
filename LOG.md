@@ -3181,3 +3181,10 @@ model-00003-of-00019.safetensors 4983004016
 download_started_background=true
 download_status_file=state/downloads/mixtral-8x7b-instruct-v01.json
 ```
+
+## Phase MoE Speed v2 / Stage 4 / pytest while downloading
+
+```text
+python -m pytest tests/ -q
+234 passed in 19.63s
+```
