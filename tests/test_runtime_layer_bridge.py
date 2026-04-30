@@ -785,6 +785,27 @@ def test_run_prompt_decode_loop_uses_real_prompt_tokenization(tmp_path: Path, mo
     assert "prefill_decode_tail" in result.timings
 
 
+def test_run_prompt_decode_loop_reports_per_token_expert_telemetry(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+
+    payload = result.to_dict()
+    assert result.ready is True
+    assert [summary["token_index"] for summary in payload["token_summaries"]] == [1, 2]
+    assert all("elapsed_seconds" in summary for summary in payload["token_summaries"])
+    assert all("expert_hit_rate" in summary for summary in payload["token_summaries"])
+
+
 def test_run_prompt_decode_loop_can_cancel_before_heavy_generation(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
 

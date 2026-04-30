@@ -547,3 +547,12 @@ Why:
 - A `4096 MB` expert cache with `32` experts/layer produced the best result: `8.79%` expert hit rate and `49.262s/token` best warm.
 - A `6144 MB` expert cache with `64` experts/layer regressed to `5.65%` expert hit rate and `71.263s/token` best warm, with `7851 MB` peak working set.
 - The success gate requires `<=10s/token` and `>=70%` expert hit rate. The best observed hit rate after real runs was `8.79%`, so packed reads might reduce read overhead but cannot satisfy the required cache-hit gate on this machine without a deeper routing/prompt-cache design.
+
+## Phase MoE Speed v2 / Stage 1 / telemetry correction
+
+Decision:
+- Add per-token expert telemetry to the full prompt decode result before re-measuring Qwen3 with `max_new_tokens=20`.
+
+Why:
+- The previous phase measured mostly one-token runs, which cannot prove whether expert residency pays off across continuation steps.
+- Per-token snapshots make the cache question measurable at token 1, 5, 10, 15, and 20 and allow last-15-token hit-rate deltas instead of relying on a single cumulative run total.

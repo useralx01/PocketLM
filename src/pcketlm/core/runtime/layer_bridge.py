@@ -21,6 +21,7 @@ from safetensors import safe_open
 from pcketlm.core.runtime.tensor_loader import scoped_tensor_handle_cache
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
+    expert_residency_snapshot,
     load_resident_tensor,
     load_resident_tensors,
     record_expert_activation,
@@ -600,6 +601,7 @@ class PromptDecodeLoopResult:
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
     timings: dict[str, float] = field(default_factory=dict)
+    token_summaries: list[dict] = field(default_factory=list)
     prefix_reuse: dict = field(default_factory=dict)
     reusable_token_ids: list[int] = field(default_factory=list)
     final_decode_state: KVDecodeState | None = None
@@ -624,6 +626,7 @@ class PromptDecodeLoopResult:
             "blockers": list(self.blockers),
             "ready": self.ready,
             "timings": dict(self.timings),
+            "token_summaries": [dict(summary) for summary in self.token_summaries],
             "prefix_reuse": dict(self.prefix_reuse),
             "reusable_token_count": len(self.reusable_token_ids),
         }
@@ -3043,6 +3046,23 @@ def _run_prompt_decode_loop(
             timing_key = f"{prefix}_{key}"
             timings[timing_key] = round(timings.get(timing_key, 0.0) + float(value), 4)
 
+    token_summaries: list[dict] = []
+
+    def record_token_summary(token_index: int, token_id: int, token_seconds: float) -> None:
+        telemetry = expert_residency_snapshot()
+        token_summaries.append(
+            {
+                "token_index": int(token_index),
+                "token_id": int(token_id),
+                "elapsed_seconds": round(float(token_seconds), 4),
+                "expert_hits": int(telemetry.get("expert_hits", 0)),
+                "expert_misses": int(telemetry.get("expert_misses", 0)),
+                "expert_hit_rate": float(telemetry.get("expert_hit_rate", 0.0)),
+                "expert_resident_count": int(telemetry.get("expert_resident_count", 0)),
+                "expert_resident_bytes": int(telemetry.get("expert_resident_bytes", 0)),
+            }
+        )
+
     configure_runtime_threads()
     blockers: list[str] = []
     effective_max_new_tokens = steps if max_new_tokens is None else max_new_tokens
@@ -3430,6 +3450,7 @@ def _run_prompt_decode_loop(
     effective_stop_token_ids = list(config.eos_token_ids) if stop_token_ids is None else [int(value) for value in stop_token_ids]
     first_generated_token_id = first_selection.chosen_token_id
     first_generated_chain = list(prompt_token_ids) + [first_generated_token_id]
+    record_token_summary(1, first_generated_token_id, time.perf_counter() - total_started)
     reached_stop = effective_min_new_tokens <= 1 and first_generated_token_id in effective_stop_token_ids
     first_stop_reason = "eos-token" if reached_stop and stop_token_ids is None else ("custom-stop-token" if reached_stop else None)
 
@@ -3472,6 +3493,7 @@ def _run_prompt_decode_loop(
             blockers=list(prefill_stack.blockers) + list(prefill_tail.blockers) + list(decode_generated_blockers) + list(decode_full_blockers),
             ready=True,
             timings=finish_timings(),
+            token_summaries=token_summaries,
             prefix_reuse=prefix_reuse,
             reusable_token_ids=list(prompt_token_ids),
             final_decode_state=decode_state,
@@ -3518,6 +3540,7 @@ def _run_prompt_decode_loop(
             should_cancel=should_cancel,
             collect_layer_details=False,
         )
+        step_elapsed = time.perf_counter() - phase_started
         record_phase("continuation_steps", phase_started)
         add_nested_timings("continuation", step_result.timings)
         latest_cache_lengths = dict(step_result.cache_sequence_lengths)
@@ -3529,6 +3552,7 @@ def _run_prompt_decode_loop(
         latest_chain = list(decode_state.generated_token_ids)
         generated_token_ids = list(latest_chain[len(prompt_token_ids):])
         steps_completed = len(generated_token_ids)
+        record_token_summary(steps_completed, generated_token_ids[-1], step_elapsed)
 
         generated_text, decode_generated_blockers = decode_token_ids_to_text(model_id, generated_token_ids)
         full_text, decode_full_blockers = decode_token_ids_to_text(model_id, latest_chain)
@@ -3573,6 +3597,7 @@ def _run_prompt_decode_loop(
         blockers=blockers,
         ready=not continuation_blockers,
         timings=finish_timings(),
+        token_summaries=token_summaries,
         prefix_reuse=prefix_reuse,
         reusable_token_ids=list(latest_chain[:-1]) if len(latest_chain) > len(prompt_token_ids) else list(prompt_token_ids),
         final_decode_state=decode_state,

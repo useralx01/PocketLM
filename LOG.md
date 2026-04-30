@@ -3048,3 +3048,16 @@ mixtral_validation=not_run_stop_condition_triggered
 python -m pytest tests/ -q
 229 passed in 21.81s
 ```
+
+## Phase MoE Speed v2 / Setup
+
+```text
+phase-moe-speed
+```
+
+## Phase MoE Speed v2 / Stage 1 / instrumentation test
+
+```text
+python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reports_per_token_expert_telemetry -q
+1 passed in 1.68s
+```
