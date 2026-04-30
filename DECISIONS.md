@@ -442,3 +442,47 @@ Why:
 - Zero-copy reduced reported warm tensor-load time to `0.9611s`, but total stayed around `19s/token`; the cost moved into `mlp`, `qkv_projection`, and `o_projection`.
 - Prefetch warm runs regressed to `21.295s` and `24.999s`, with `13.8-16.0s` in `prefetch_wait` and free RAM falling near `1.9 GB`.
 - The direct paged runtime bottleneck is now architectural: full dense 14B CPU Torch execution streams too much weight data per token. The viable next speed work is quantized direct execution, a native fused backend, GPU execution, or a redesigned packed execution path.
+
+## Phase MoE / Step 2 / architecture reference
+
+Source: Hugging Face `Qwen/Qwen3-30B-A3B` `config.json` and `model.safetensors.index.json` read on 2026-04-30.
+
+```text
+architecture=Qwen3MoeForCausalLM
+model_type=qwen3_moe
+num_hidden_layers=48
+hidden_size=2048
+num_attention_heads=32
+num_key_value_heads=4
+head_dim=128
+vocab_size=151936
+intermediate_size=6144
+moe_intermediate_size=768
+num_experts=128
+num_experts_per_tok=8
+norm_topk_prob=true
+torch_dtype=bfloat16
+safetensors_total_size=61064245248
+safetensors_shards=16
+```
+
+Tensor name patterns:
+
+```text
+attention: model.layers.<L>.self_attn.{q_proj,k_proj,v_proj,o_proj}.weight
+attention norms: model.layers.<L>.self_attn.{q_norm,k_norm}.weight
+layer norms: model.layers.<L>.{input_layernorm,post_attention_layernorm}.weight
+router: model.layers.<L>.mlp.gate.weight
+expert: model.layers.<L>.mlp.experts.<E>.{gate_proj,up_proj,down_proj}.weight
+final norm: model.norm.weight
+head: lm_head.weight
+```
+
+No shared expert tensors were present in the inspected index (`shared_expert`, `mlp.shared` counts were 0).
+
+## Phase MoE / Step 3 / catalog and execution plan
+
+```text
+pytest tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_classifies_moe_router_and_experts tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_groups_moe_experts_separately -v
+2 passed in 2.04s
+```

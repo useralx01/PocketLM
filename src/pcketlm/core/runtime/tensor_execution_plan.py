@@ -19,6 +19,7 @@ class TensorExecutionUnit:
     label: str
     phase: str
     layer_index: int | None
+    expert_index: int | None
     component_group: str
     tensor_count: int
     total_nbytes: int
@@ -31,6 +32,7 @@ class TensorExecutionUnit:
             "label": self.label,
             "phase": self.phase,
             "layer_index": self.layer_index,
+            "expert_index": self.expert_index,
             "component_group": self.component_group,
             "tensor_count": self.tensor_count,
             "total_nbytes": self.total_nbytes,
@@ -45,6 +47,7 @@ class TensorExecutionUnit:
             label=str(payload.get("label", "")),
             phase=str(payload.get("phase", "")),
             layer_index=payload.get("layer_index"),
+            expert_index=payload.get("expert_index"),
             component_group=str(payload.get("component_group", "other")),
             tensor_count=int(payload.get("tensor_count", 0)),
             total_nbytes=int(payload.get("total_nbytes", 0)),
@@ -102,6 +105,10 @@ def _phase_for_group(layer_index: int | None, component_group: str) -> str:
         return "prefill"
     if layer_index is None and component_group in {"final_norm", "lm_head"}:
         return "decode-head"
+    if component_group == "router":
+        return "layer-router"
+    if component_group == "expert_mlp":
+        return "layer-expert"
     if component_group == "layer_norm":
         return "layer-entry"
     if component_group == "attention":
@@ -128,31 +135,39 @@ def _group_key(entry: TensorCatalogEntry) -> tuple[int, int, str]:
         "prefill": 0,
         "layer-entry": 1,
         "layer-attention": 2,
-        "layer-mlp": 3,
-        "decode-head": 4,
-        "misc": 5,
+        "layer-router": 3,
+        "layer-expert": 4,
+        "layer-mlp": 5,
+        "decode-head": 6,
+        "misc": 7,
     }
     phase = _phase_for_group(entry.layer_index, entry.component_group)
     return (layer_sort, phase_order.get(phase, 99), entry.component_group)
 
 
 def _build_units(catalog: TensorCatalog) -> list[TensorExecutionUnit]:
-    grouped: dict[tuple[int | None, str], list[TensorCatalogEntry]] = {}
+    grouped: dict[tuple[int | None, str, int | None], list[TensorCatalogEntry]] = {}
     for entry in sorted(catalog.tensors, key=_group_key):
-        key = (entry.layer_index, entry.component_group)
+        key = (
+            entry.layer_index,
+            entry.component_group,
+            entry.expert_index if entry.component_group == "expert_mlp" else None,
+        )
         grouped.setdefault(key, []).append(entry)
 
     units: list[TensorExecutionUnit] = []
-    def grouped_key(item: tuple[int | None, str]) -> tuple[int, int, str]:
-        layer_index, component_group = item
+    def grouped_key(item: tuple[int | None, str, int | None]) -> tuple[int, int, str, int]:
+        layer_index, component_group, expert_index = item
         phase = _phase_for_group(layer_index, component_group)
         phase_order = {
             "prefill": 0,
             "layer-entry": 1,
             "layer-attention": 2,
-            "layer-mlp": 3,
-            "decode-head": 4,
-            "misc": 5,
+            "layer-router": 3,
+            "layer-expert": 4,
+            "layer-mlp": 5,
+            "decode-head": 6,
+            "misc": 7,
         }
         if layer_index is None and component_group == "embeddings":
             layer_sort = -1
@@ -160,22 +175,28 @@ def _build_units(catalog: TensorCatalog) -> list[TensorExecutionUnit]:
             layer_sort = 10_000
         else:
             layer_sort = layer_index
-        return (layer_sort, phase_order.get(phase, 99), component_group)
+        return (layer_sort, phase_order.get(phase, 99), component_group, -1 if expert_index is None else expert_index)
 
-    for layer_index, component_group in sorted(grouped.keys(), key=grouped_key):
-        entries = grouped[(layer_index, component_group)]
+    for layer_index, component_group, expert_index in sorted(grouped.keys(), key=grouped_key):
+        entries = grouped[(layer_index, component_group, expert_index)]
         phase = _phase_for_group(layer_index, component_group)
-        unit_id = (
-            f"{component_group}"
-            if layer_index is None
-            else f"layer-{layer_index:02d}-{component_group}"
-        )
+        if layer_index is None:
+            unit_id = f"{component_group}"
+        elif component_group == "expert_mlp" and expert_index is not None:
+            unit_id = f"layer-{layer_index:02d}-expert-{expert_index:03d}"
+        else:
+            unit_id = f"layer-{layer_index:02d}-{component_group}"
         units.append(
             TensorExecutionUnit(
                 unit_id=unit_id,
-                label=_unit_label(layer_index, component_group),
+                label=(
+                    f"Layer {layer_index} Expert {expert_index}"
+                    if component_group == "expert_mlp" and expert_index is not None
+                    else _unit_label(layer_index, component_group)
+                ),
                 phase=phase,
                 layer_index=layer_index,
+                expert_index=expert_index,
                 component_group=component_group,
                 tensor_count=len(entries),
                 total_nbytes=sum(entry.data_nbytes for entry in entries),

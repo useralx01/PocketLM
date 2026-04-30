@@ -26,6 +26,7 @@ class TensorCatalogEntry:
     data_nbytes: int
     layer_index: int | None
     component_group: str
+    expert_index: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +39,7 @@ class TensorCatalogEntry:
             "data_offset_end": self.data_offset_end,
             "data_nbytes": self.data_nbytes,
             "layer_index": self.layer_index,
+            "expert_index": self.expert_index,
             "component_group": self.component_group,
         }
 
@@ -53,6 +55,7 @@ class TensorCatalogEntry:
             data_offset_end=int(payload.get("data_offset_end", 0)),
             data_nbytes=int(payload.get("data_nbytes", 0)),
             layer_index=payload.get("layer_index"),
+            expert_index=payload.get("expert_index"),
             component_group=str(payload.get("component_group", "other")),
         )
 
@@ -73,6 +76,10 @@ class TensorCatalog:
     num_key_value_heads: int | None = None
     vocab_size: int | None = None
     intermediate_size: int | None = None
+    num_experts: int | None = None
+    num_experts_per_tok: int | None = None
+    moe_intermediate_size: int | None = None
+    model_type: str | None = None
     dtype_counts: dict[str, int] = field(default_factory=dict)
     component_group_counts: dict[str, int] = field(default_factory=dict)
     tensors: list[TensorCatalogEntry] = field(default_factory=list)
@@ -93,6 +100,10 @@ class TensorCatalog:
             "num_key_value_heads": self.num_key_value_heads,
             "vocab_size": self.vocab_size,
             "intermediate_size": self.intermediate_size,
+            "num_experts": self.num_experts,
+            "num_experts_per_tok": self.num_experts_per_tok,
+            "moe_intermediate_size": self.moe_intermediate_size,
+            "model_type": self.model_type,
             "dtype_counts": dict(self.dtype_counts),
             "component_group_counts": dict(self.component_group_counts),
             "tensors": [entry.to_dict() for entry in self.tensors],
@@ -115,6 +126,10 @@ class TensorCatalog:
             num_key_value_heads=_optional_int(payload.get("num_key_value_heads")),
             vocab_size=_optional_int(payload.get("vocab_size")),
             intermediate_size=_optional_int(payload.get("intermediate_size")),
+            num_experts=_optional_int(payload.get("num_experts")),
+            num_experts_per_tok=_optional_int(payload.get("num_experts_per_tok")),
+            moe_intermediate_size=_optional_int(payload.get("moe_intermediate_size")),
+            model_type=payload.get("model_type"),
             dtype_counts={str(key): int(value) for key, value in (payload.get("dtype_counts") or {}).items()},
             component_group_counts={
                 str(key): int(value) for key, value in (payload.get("component_group_counts") or {}).items()
@@ -147,6 +162,10 @@ def _model_config_values(model_dir: Path) -> dict[str, int | None]:
         "num_key_value_heads": _optional_int(payload.get("num_key_value_heads")),
         "vocab_size": _optional_int(payload.get("vocab_size")),
         "intermediate_size": _optional_int(payload.get("intermediate_size")),
+        "num_experts": _optional_int(payload.get("num_experts")),
+        "num_experts_per_tok": _optional_int(payload.get("num_experts_per_tok")),
+        "moe_intermediate_size": _optional_int(payload.get("moe_intermediate_size")),
+        "model_type": payload.get("model_type"),
     }
 
 
@@ -166,6 +185,15 @@ def _layer_index_for_tensor(tensor_name: str) -> int | None:
     return int(layer_part) if layer_part.isdigit() else None
 
 
+def _expert_index_for_tensor(tensor_name: str) -> int | None:
+    marker = ".mlp.experts."
+    if marker not in tensor_name:
+        return None
+    remainder = tensor_name.split(marker, 1)[1]
+    expert_part = remainder.split(".", 1)[0]
+    return int(expert_part) if expert_part.isdigit() else None
+
+
 def _component_group_for_tensor(tensor_name: str) -> str:
     if tensor_name.startswith("model.embed_tokens."):
         return "embeddings"
@@ -173,6 +201,10 @@ def _component_group_for_tensor(tensor_name: str) -> str:
         return "lm_head"
     if tensor_name.startswith("model.norm."):
         return "final_norm"
+    if ".mlp.experts." in tensor_name:
+        return "expert_mlp"
+    if ".mlp.gate." in tensor_name:
+        return "router"
     if ".self_attn." in tensor_name:
         return "attention"
     if ".mlp." in tensor_name:
@@ -236,6 +268,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
 
             offsets = tensor_meta.get("data_offsets") or [0, 0]
             layer_index = _layer_index_for_tensor(tensor_name)
+            expert_index = _expert_index_for_tensor(tensor_name)
             if layer_index is not None:
                 seen_layers.add(layer_index)
             component_group = _component_group_for_tensor(tensor_name)
@@ -253,6 +286,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
                     data_offset_end=int(offsets[1]),
                     data_nbytes=int(offsets[1]) - int(offsets[0]),
                     layer_index=layer_index,
+                    expert_index=expert_index,
                     component_group=component_group,
                 )
             )
