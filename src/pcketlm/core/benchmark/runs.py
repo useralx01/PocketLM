@@ -427,7 +427,7 @@ def run_measured_benchmark(
     min_new_tokens: int = 1,
     repetition_penalty: float = 1.1,
 ) -> MeasuredBenchmarkRun:
-    """Run and persist timed Quick, Fast, Balanced, and Quality prompt checks."""
+    """Run and persist timed Quick, Agent, Fast, Balanced, and Quality prompt checks."""
     readiness: BenchmarkReadiness = build_benchmark_readiness(model_id, model_dir)
     created_at = datetime.now(timezone.utc).isoformat()
     run_id = _run_id(created_at)
@@ -442,6 +442,7 @@ def run_measured_benchmark(
     if readiness.ready:
         for label, layer_count, case_max_new_tokens in [
             ("Quick", None, 1),
+            ("Agent", None, min(2, max_new_tokens)),
             ("Fast", 8, max_new_tokens),
             ("Balanced", 32, max_new_tokens),
             ("Quality", None, max_new_tokens),

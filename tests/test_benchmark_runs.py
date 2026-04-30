@@ -78,6 +78,8 @@ def test_run_measured_benchmark_persists_timed_mode_cases(tmp_path: Path, monkey
         layer_count = kwargs.get("layer_count")
         if layer_count is None and kwargs.get("max_new_tokens") == 1:
             label = "Quick"
+        elif layer_count is None and kwargs.get("max_new_tokens") == 2:
+            label = "Agent"
         else:
             label = "Quality" if layer_count is None else ("Balanced" if layer_count == 32 else "Fast")
         return SimpleNamespace(
@@ -100,15 +102,16 @@ def test_run_measured_benchmark_persists_timed_mode_cases(tmp_path: Path, monkey
     monkeypatch.setattr(benchmark.runs, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
     monkeypatch.setattr(benchmark.runs, "_run_gguf_benchmark_cases", lambda model_id: [])
 
-    result = run_measured_benchmark("qwen-test", tmp_path / "model")
+    result = run_measured_benchmark("qwen-test", tmp_path / "model", max_new_tokens=4)
 
     assert result.ready is True
-    assert [case.label for case in result.cases] == ["Quick", "Fast", "Balanced", "Quality"]
-    assert [case.layer_count for case in result.cases] == [None, 8, 32, None]
-    assert result.cases[3].generated_text == "Quality output"
-    assert result.cases[3].timing_summary["stack_seconds"] == 17.0
-    assert result.cases[3].timing_summary["tensor_load_seconds"] == 5.0
-    assert result.cases[3].timing_summary["bottleneck"] == "prefill stack"
+    assert [case.label for case in result.cases] == ["Quick", "Agent", "Fast", "Balanced", "Quality"]
+    assert [case.layer_count for case in result.cases] == [None, None, 8, 32, None]
+    assert result.cases[1].max_new_tokens == 2
+    assert result.cases[4].generated_text == "Quality output"
+    assert result.cases[4].timing_summary["stack_seconds"] == 17.0
+    assert result.cases[4].timing_summary["tensor_load_seconds"] == 5.0
+    assert result.cases[4].timing_summary["bottleneck"] == "prefill stack"
     assert result.benchmark_path.name.endswith(".measured-benchmark.json")
     latest = tmp_path / "models" / "qwen-test" / "benchmarks" / "latest.measured-benchmark.json"
     assert latest.exists()
@@ -150,7 +153,7 @@ def test_run_measured_benchmark_treats_non_blocking_readiness_notes_as_warnings(
     )
     monkeypatch.setattr(benchmark.runs, "_run_gguf_benchmark_cases", lambda model_id: [])
 
-    result = run_measured_benchmark("qwen-test", tmp_path / "model")
+    result = run_measured_benchmark("qwen-test", tmp_path / "model", max_new_tokens=4)
 
     assert result.ready is True
     assert result.blockers == []
@@ -207,7 +210,7 @@ def test_run_measured_benchmark_includes_gguf_cases(tmp_path: Path, monkeypatch)
 
     result = run_measured_benchmark("qwen-test", tmp_path / "model")
 
-    assert [case.label for case in result.cases] == ["Quick", "Fast", "Balanced", "Quality", "GGUF 1"]
+    assert [case.label for case in result.cases] == ["Quick", "Agent", "Fast", "Balanced", "Quality", "GGUF 1"]
     assert result.cases[-1].backend == "llama-cpp-gguf-server"
     assert result.cases[-1].prompt_kind == "instruction"
 

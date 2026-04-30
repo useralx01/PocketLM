@@ -421,3 +421,7 @@
 - Enforced the Qwen 32B proven-token policy in web chat: normal direct 32B requests cap at `4` new tokens, while `allow_experimental_32b_tokens=true` explicitly opts into longer unproven output with a warning.
 - Completed the Phase 2 Qwen 32B recovery proof: Qwen 32B `full --max-new-tokens 8` generated `Hello World! It's great to see` in `330.955s` with working set `1421 MB`; Qwen 14B regression still generated `Hello! How can` in `74.428s`.
 - Promoted the customer-facing Qwen 32B proven-token policy from `4` to `8` new tokens after live proof, while keeping longer output behind the explicit experimental override.
+- Started Phase 3 speed/reliability productization with a real baseline: Qwen 14B took `19.494s` / `77.568s` / `155.456s` for `1` / `4` / `8` tokens, and Qwen 32B took `48.254s` / `180.573s` / `346.482s`.
+- Added Agent mode as a real full-stack short-work path capped to `2` direct tokens; live 14B smoke generated `Hello!` in `40.16s`.
+- Added measured direct-runtime timing estimates and bottleneck labels to guardrails, and capped normal Qwen 14B/32B direct web replies to the proven `8` token range unless an experimental override is set.
+- Added Agent to measured benchmark runs so speed comparisons cover the repeated-short-work path.

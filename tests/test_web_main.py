@@ -41,6 +41,7 @@ def clear_chat_response_cache():
 
 def test_chat_layer_count_maps_web_modes() -> None:
     assert _chat_layer_count("Quick") is None
+    assert _chat_layer_count("Agent") is None
     assert _chat_layer_count("Fast") == 8
     assert _chat_layer_count("Balanced") == 32
     assert _chat_layer_count("Quality") is None
@@ -177,7 +178,32 @@ def test_direct_model_guardrails_marks_qwen_32b_as_stable_slow(monkeypatch) -> N
     assert payload["ready"] is True
     assert payload["status"] == "stable-slow"
     assert payload["proven_max_new_tokens"] == 8
+    assert payload["recommended_mode"] == "Agent"
+    assert payload["baseline_estimate"]["bottleneck"] == "tensor loading"
     assert payload["scoped_safetensor_handle_cache"]["default_enabled"] is False
+    assert payload["warnings"] == []
+
+
+def test_direct_model_guardrails_marks_qwen_14b_as_proven_short_path(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_main,
+        "tensor_residency_policy_snapshot",
+        lambda: {
+            "free_memory_bytes": 6 * 1024**3,
+            "free_memory_gb": 6.0,
+            "memory_guard_active": False,
+        },
+    )
+
+    payload = _direct_model_guardrails("qwen2.5-14b-instruct", requested_max_new_tokens=8)
+
+    assert payload["ready"] is True
+    assert payload["status"] == "stable-slow"
+    assert payload["model_size_class"] == "direct-14b"
+    assert payload["proven_max_new_tokens"] == 8
+    assert payload["recommended_mode"] == "Quality"
+    assert payload["baseline_estimate"]["measured_tokens"] == 8
+    assert payload["baseline_estimate"]["tensor_load_share"] >= 0.8
     assert payload["warnings"] == []
 
 
@@ -197,6 +223,7 @@ def test_direct_model_guardrails_warns_on_unproven_qwen_32b_length(monkeypatch) 
     assert payload["ready"] is True
     assert payload["status"] == "stable-slow"
     assert "proven to 8 new tokens" in payload["warnings"][0]
+    assert payload["recommended_mode"] == "Agent"
 
 
 def test_direct_model_guardrails_blocks_qwen_32b_below_ram_floor(monkeypatch) -> None:
@@ -473,6 +500,90 @@ def test_run_chat_payload_caps_qwen_32b_to_proven_token_range(monkeypatch) -> No
     assert payload["max_new_tokens"] == 8
     assert payload["model_guardrails"]["requested_max_new_tokens"] == 8
     assert payload["model_guardrails"]["warnings"] == []
+
+
+def test_run_chat_payload_caps_qwen_14b_to_proven_token_range(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="Hello! How can I assist you today",
+            full_text="Hello! How can I assist you today",
+            generated_token_ids=[9707, 0, 2585, 646, 358, 7789, 498, 3351],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=8,
+            max_new_tokens=kwargs["max_new_tokens"],
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 38},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-14b-instruct",
+            "prompt": "hello world",
+            "mode": "Quality",
+            "max_new_tokens": 16,
+        }
+    )
+
+    assert captured["max_new_tokens"] == 8
+    assert payload["max_new_tokens"] == 8
+    assert payload["model_guardrails"]["proven_max_new_tokens"] == 8
+    assert payload["model_guardrails"]["warnings"] == []
+
+
+def test_run_chat_payload_agent_mode_caps_direct_runtime_to_short_work(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="OK",
+            generated_token_ids=[9707, 0],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=2,
+            max_new_tokens=kwargs["max_new_tokens"],
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 32},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-14b-instruct",
+            "prompt": "next action",
+            "mode": "Agent",
+            "max_new_tokens": 8,
+        }
+    )
+
+    assert captured["max_new_tokens"] == 2
+    assert payload["max_new_tokens"] == 2
 
 
 def test_run_chat_payload_allows_explicit_experimental_qwen_32b_length(monkeypatch) -> None:

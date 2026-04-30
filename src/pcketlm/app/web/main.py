@@ -56,12 +56,28 @@ CHAT_SESSION_PREFIX_MAX_ENTRIES = 8
 DEFAULT_WEB_PORT = 8765
 SINGLE_INSTANCE_LOCK_PORT = 8764
 MIN_CHAT_FREE_MEMORY_MB = 4 * 1024
+QWEN_14B_MODEL_IDS = {"qwen2.5-14b-instruct", "qwen-2.5-14b-instruct"}
 QWEN_32B_MODEL_IDS = {"qwen2.5-32b-instruct", "qwen-2.5-32b-instruct"}
+QWEN_14B_PROVEN_MAX_NEW_TOKENS = 8
 QWEN_32B_PROVEN_MAX_NEW_TOKENS = 8
 QWEN_32B_RECOMMENDED_FREE_MEMORY_MB = 5 * 1024
+AGENT_MODE_MAX_NEW_TOKENS = 2
 RUNTIME_SETTINGS_FILE_NAME = "runtime-settings.json"
 VALID_TENSOR_CACHE_PRESETS = {"standard", "boosted"}
 DOWNLOAD_STATUS_DIR_NAME = "downloads"
+
+DIRECT_RUNTIME_BASELINES = {
+    "qwen2.5-14b-instruct": {
+        1: {"seconds": 19.494, "working_set_mb": 577, "tensor_load_seconds": 14.11},
+        4: {"seconds": 77.568, "working_set_mb": 1022, "tensor_load_seconds": 65.05},
+        8: {"seconds": 155.456, "working_set_mb": 1017, "tensor_load_seconds": 131.07},
+    },
+    "qwen2.5-32b-instruct": {
+        1: {"seconds": 48.254, "working_set_mb": 1410, "tensor_load_seconds": 40.87},
+        4: {"seconds": 180.573, "working_set_mb": 1318, "tensor_load_seconds": 156.96},
+        8: {"seconds": 346.482, "working_set_mb": 1437, "tensor_load_seconds": 301.71},
+    },
+}
 
 
 @dataclass(slots=True)
@@ -183,7 +199,7 @@ def _update_runtime_settings(payload: dict) -> dict:
 
 def _chat_layer_count(mode: str) -> int | None:
     normalized = mode.strip().lower()
-    if normalized.startswith("quick"):
+    if normalized.startswith("quick") or normalized.startswith("agent"):
         return None
     if normalized.startswith("fast"):
         return 8
@@ -231,8 +247,41 @@ def _is_qwen_32b_model(model_id: str) -> bool:
     return model_id.strip().lower() in QWEN_32B_MODEL_IDS
 
 
+def _is_qwen_14b_model(model_id: str) -> bool:
+    return model_id.strip().lower() in QWEN_14B_MODEL_IDS
+
+
 def _bytes_to_mb(value: int) -> int:
     return int(round(value / (1024**2)))
+
+
+def _direct_runtime_proven_max_tokens(model_id: str) -> int | None:
+    if _is_qwen_32b_model(model_id):
+        return QWEN_32B_PROVEN_MAX_NEW_TOKENS
+    if _is_qwen_14b_model(model_id):
+        return QWEN_14B_PROVEN_MAX_NEW_TOKENS
+    return None
+
+
+def _direct_runtime_baseline(model_id: str, requested_max_new_tokens: int | None = None) -> dict | None:
+    baseline = DIRECT_RUNTIME_BASELINES.get(model_id.strip().lower())
+    if not baseline:
+        return None
+    requested = int(requested_max_new_tokens or max(baseline))
+    nearest_tokens = min(baseline, key=lambda tokens: abs(tokens - requested))
+    row = baseline[nearest_tokens]
+    seconds = float(row["seconds"])
+    tensor_load_seconds = float(row["tensor_load_seconds"])
+    return {
+        "measured_tokens": nearest_tokens,
+        "estimated_seconds": round(seconds * max(1, requested) / nearest_tokens, 1),
+        "measured_seconds": seconds,
+        "working_set_mb": int(row["working_set_mb"]),
+        "tensor_load_seconds": tensor_load_seconds,
+        "tensor_load_share": round(tensor_load_seconds / seconds, 2) if seconds else None,
+        "bottleneck": "tensor loading",
+        "source": "Phase 3 local baseline",
+    }
 
 
 def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
@@ -241,37 +290,43 @@ def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None
     free_bytes = policy.get("free_memory_bytes")
     free_ram_mb = None if free_bytes is None else _bytes_to_mb(int(free_bytes))
     is_32b = _is_qwen_32b_model(model_id)
+    is_14b = _is_qwen_14b_model(model_id)
+    proven_max_tokens = _direct_runtime_proven_max_tokens(model_id)
     min_free_ram_mb = MIN_CHAT_FREE_MEMORY_MB
     recommended_free_ram_mb = QWEN_32B_RECOMMENDED_FREE_MEMORY_MB if is_32b else MIN_CHAT_FREE_MEMORY_MB
     requested_tokens = None if requested_max_new_tokens is None else int(requested_max_new_tokens)
     below_min = free_ram_mb is not None and free_ram_mb < min_free_ram_mb
-    above_proven = is_32b and requested_tokens is not None and requested_tokens > QWEN_32B_PROVEN_MAX_NEW_TOKENS
+    above_proven = proven_max_tokens is not None and requested_tokens is not None and requested_tokens > proven_max_tokens
     blockers: list[str] = []
     warnings: list[str] = []
     if below_min:
         blockers.append(f"Free RAM is below the direct-runtime guard of {round(min_free_ram_mb / 1024, 1)} GB.")
     if above_proven:
         warnings.append(
-            f"Qwen 32B is proven to {QWEN_32B_PROVEN_MAX_NEW_TOKENS} new tokens on this machine; longer runs are experimental."
+            f"{_display_model_name(model_id)} is proven to {proven_max_tokens} new tokens on this machine; longer runs are experimental."
         )
 
-    if not is_32b:
+    if not is_32b and not is_14b:
         status = "standard"
         summary = "This model uses the standard direct-runtime guardrails."
     elif below_min:
         status = "blocked-low-ram"
-        summary = "Qwen 32B is available but should not start while free RAM is below the direct-runtime guard."
+        summary = f"{_display_model_name(model_id)} is available but should not start while free RAM is below the direct-runtime guard."
     elif free_ram_mb is not None and free_ram_mb < recommended_free_ram_mb:
         status = "stable-low-headroom"
-        summary = "Qwen 32B can run, but it is slow and close to the RAM floor; keep replies short."
+        summary = f"{_display_model_name(model_id)} can run, but it is slow and close to the RAM floor; keep replies short."
+    elif is_14b:
+        status = "stable-slow"
+        summary = "Qwen 14B is proven for short direct-runtime replies, but tensor loading dominates longer answers."
     else:
         status = "stable-slow"
         summary = "Qwen 32B is stable for short direct-runtime replies, but it is still a slow power-user path."
+    baseline = _direct_runtime_baseline(model_id, requested_tokens)
 
     return {
         "model_id": model_id,
         "model_label": _display_model_name(model_id),
-        "model_size_class": "direct-32b" if is_32b else "direct-standard",
+        "model_size_class": "direct-32b" if is_32b else ("direct-14b" if is_14b else "direct-standard"),
         "status": status,
         "ready": not blockers,
         "summary": summary,
@@ -279,7 +334,14 @@ def _direct_model_guardrails(model_id: str, requested_max_new_tokens: int | None
         "min_free_ram_mb": min_free_ram_mb,
         "recommended_free_ram_mb": recommended_free_ram_mb,
         "requested_max_new_tokens": requested_tokens,
-        "proven_max_new_tokens": QWEN_32B_PROVEN_MAX_NEW_TOKENS if is_32b else None,
+        "proven_max_new_tokens": proven_max_tokens,
+        "recommended_mode": "Agent" if is_32b or above_proven else "Quality",
+        "token_policy": {
+            "agent_mode_max_new_tokens": AGENT_MODE_MAX_NEW_TOKENS,
+            "experimental_override": "allow_experimental_direct_tokens",
+            "legacy_32b_override": "allow_experimental_32b_tokens",
+        },
+        "baseline_estimate": baseline,
         "scoped_safetensor_handle_cache": {
             "default_enabled": not is_32b,
             "override_env": "PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE",
@@ -809,13 +871,17 @@ def _chat_request_runtime_defaults(payload: dict) -> tuple[str, str, Any | None,
     )
     if mode.strip().lower().startswith("quick"):
         max_new_tokens = 1
+    if mode.strip().lower().startswith("agent") and not _is_gguf_mode(mode):
+        max_new_tokens = min(max_new_tokens, AGENT_MODE_MAX_NEW_TOKENS)
+    proven_max_tokens = _direct_runtime_proven_max_tokens(model_id)
     if (
-        _is_qwen_32b_model(model_id)
+        proven_max_tokens is not None
         and not _is_gguf_mode(mode)
-        and max_new_tokens > QWEN_32B_PROVEN_MAX_NEW_TOKENS
+        and max_new_tokens > proven_max_tokens
+        and not bool(payload.get("allow_experimental_direct_tokens"))
         and not bool(payload.get("allow_experimental_32b_tokens"))
     ):
-        max_new_tokens = QWEN_32B_PROVEN_MAX_NEW_TOKENS
+        max_new_tokens = proven_max_tokens
     min_new_tokens = _clamp_int(payload.get("min_new_tokens"), default=1, minimum=1, maximum=max_new_tokens)
     repetition_penalty = float(payload.get("repetition_penalty") or 1.1)
     return model_id, prompt, profile, mode, max_new_tokens, min_new_tokens, repetition_penalty

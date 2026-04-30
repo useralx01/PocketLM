@@ -259,3 +259,19 @@ Why:
 - Live proof shows 32B can run through full prompt/decode for `1`, `2`, `4`, and `8` new tokens.
 - The same proof also shows the path is very slow on this machine: `44.501s`, `77.28s`, `156.6s`, and `330.955s`.
 - Beginners should see plain status labels and blockers instead of needing to know the env var or native crash history.
+
+## Phase 3 / Speed policy
+
+Measured baseline:
+- Qwen 14B direct full prompt/decode: `1` token in `19.494s`, `4` tokens in `77.568s`, `8` tokens in `155.456s`.
+- Qwen 32B direct full prompt/decode: `1` token in `48.254s`, `4` tokens in `180.573s`, `8` tokens in `346.482s`.
+
+Decision:
+- Treat `8` new tokens as the normal proven direct-runtime ceiling for both Qwen 14B and Qwen 32B on this machine.
+- Require `allow_experimental_direct_tokens=true` for longer direct web replies. The old `allow_experimental_32b_tokens=true` override still works for compatibility.
+- Add `Agent` mode as a full-stack direct path capped to `2` new tokens.
+
+Why:
+- The Phase 3 baseline shows repeated tensor loading is the dominant bottleneck: about `131.1s` of Qwen 14B's `155.5s` 8-token run and about `301.7s` of Qwen 32B's `346.5s` 8-token run.
+- Bigger cache/pack changes are not the next safe default on this 16 GB machine; the safer customer behavior is to cap normal direct replies, expose timing estimates, and make repeated agent-style calls explicitly short.
+- The live Agent smoke produced `Hello!` in `40.16s`, close to the new `39.0s` guard estimate.

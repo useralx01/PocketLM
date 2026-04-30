@@ -438,3 +438,11 @@ Latest Phase 2 completion update:
 - the web policy now treats `8` new tokens as the proven local Qwen 32B range; longer 32B web replies still require `allow_experimental_32b_tokens=true`
 - the latest full unit suite passes with `185` tests, and compile verification is clean
 - current Phase 2 estimate: about `96%` complete. The 32B page-runtime path is proven and guarded for short output; remaining work is mainly broader long-run proof, speed, and product packaging.
+
+Latest Phase 3 speed/reliability update:
+- baseline numbers are now recorded for 14B and 32B at `1`, `4`, and `8` direct tokens; repeated tensor loading is the measured bottleneck
+- normal Qwen 14B and 32B direct web replies now stay inside the proven `8` token range unless an experimental override is set
+- Agent mode exists as a full-stack short-work mode and caps direct replies to `2` tokens
+- live Agent proof on 14B generated `Hello!` in about `40.2s`, matching the new estimate closely
+- focused web/benchmark tests pass with `43` tests, and frontend syntax check is clean
+- current Phase 3 estimate: about `35%` complete. The app is safer and more honest about speed, but raw runtime speed still needs a backend or tensor-loading redesign.

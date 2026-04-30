@@ -51,6 +51,7 @@ function setMode(mode) {
   const hints = {
     Quality: "Quality mode uses the full current stack and gives the best current output.",
     Quick: "Quick uses the full current stack but caps the reply to one token for fast checks.",
+    Agent: "Agent uses the full current stack but caps replies to two tokens for repeated local work.",
     GGUF: "GGUF uses the optional llama.cpp power-user backend when the GGUF Queen artifact is ready.",
     Balanced: "Balanced is a speed preview. It is faster, but it can drift or answer oddly.",
     Fast: "Fast is only for quick smoke tests. Output quality can be rough.",
@@ -59,6 +60,7 @@ function setMode(mode) {
   if (tokenInput) {
     tokenInput.max = mode === "GGUF" ? 64 : 16;
     if (mode === "Quick") tokenInput.value = 1;
+    if (mode === "Agent") tokenInput.value = Math.min(Number(tokenInput.value || 2), 2);
     if (Number(tokenInput.value || 4) > Number(tokenInput.max)) tokenInput.value = tokenInput.max;
   }
   $("#chat-subtitle").textContent = hints[mode] || hints.Quality;

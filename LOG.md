@@ -1571,3 +1571,138 @@ operation_seconds=74.428
 generated_text=Hello! How can
 generated_token_ids=[9707, 0, 2585, 646]
 ```
+
+## Phase 3 / Setup
+
+```text
+branch=phase-3-speed-reliability-productization
+starting_point=8f2c8f4 phase2/recovery11: prove 32b eight token path
+untracked_left_untouched=MEMORY.md, project_pcketlm.md
+```
+
+## Phase 3 / Baseline benchmark
+
+Self-prompt:
+
+```text
+Before speed-policy changes, measure the real 14B and 32B direct full prompt/decode path at 1, 4, and 8 new tokens. Use these numbers to choose policy instead of guessing.
+```
+
+Baseline evidence:
+
+```text
+qwen2.5-14b-instruct / 1 token
+exit=0
+operation_seconds=19.494
+free_ram_start_mb=8999
+free_ram_end_mb=11086
+working_set_mb=577
+generated_text=Hello
+generated_token_ids=[9707]
+prefill_stack_seconds=16.765
+tensor_load_seconds=14.110
+
+qwen2.5-14b-instruct / 4 tokens
+exit=0
+operation_seconds=77.568
+free_ram_start_mb=10956
+free_ram_end_mb=9809
+working_set_mb=1022
+generated_text=Hello! How can
+generated_token_ids=[9707, 0, 2585, 646]
+prefill_stack_seconds=19.023
+continuation_steps_seconds=57.134
+tensor_load_seconds=65.046
+
+qwen2.5-14b-instruct / 8 tokens
+exit=0
+operation_seconds=155.456
+free_ram_start_mb=10573
+free_ram_end_mb=9048
+working_set_mb=1017
+generated_text=Hello! How can I assist you today
+generated_token_ids=[9707, 0, 2585, 646, 358, 7789, 498, 3351]
+prefill_stack_seconds=19.182
+continuation_steps_seconds=134.853
+tensor_load_seconds=131.068
+
+qwen2.5-32b-instruct / 1 token
+exit=0
+operation_seconds=48.254
+free_ram_start_mb=9769
+free_ram_end_mb=8119
+working_set_mb=1410
+generated_text=Hello
+generated_token_ids=[9707]
+prefill_stack_seconds=46.720
+tensor_load_seconds=40.870
+
+qwen2.5-32b-instruct / 4 tokens
+exit=0
+operation_seconds=180.573
+free_ram_start_mb=9278
+free_ram_end_mb=8406
+working_set_mb=1318
+generated_text=Hello World! It
+generated_token_ids=[9707, 4337, 0, 1084]
+prefill_stack_seconds=46.735
+continuation_steps_seconds=132.351
+tensor_load_seconds=156.956
+
+qwen2.5-32b-instruct / 8 tokens
+exit=0
+operation_seconds=346.482
+free_ram_start_mb=9580
+free_ram_end_mb=8121
+working_set_mb=1437
+generated_text=Hello World! It's great to see
+generated_token_ids=[9707, 4337, 0, 1084, 594, 2244, 311, 1490]
+prefill_stack_seconds=43.931
+continuation_steps_seconds=301.021
+tensor_load_seconds=301.708
+```
+
+Bottleneck verdict:
+
+```text
+The dominant cost is repeated tensor loading, not prompt formatting or decode tail.
+14B 8-token tensor loading: about 131.1s of 155.5s.
+32B 8-token tensor loading: about 301.7s of 346.5s.
+```
+
+## Phase 3 / Speed policy and Agent mode
+
+Change:
+
+```text
+Added measured direct-runtime baselines for Qwen 14B and Qwen 32B.
+Qwen 14B and 32B normal direct web chat now cap at the proven 8-token local range unless allow_experimental_direct_tokens=true.
+Added Agent mode, which uses the full stack but caps direct replies to 2 new tokens for repeated local work.
+Benchmarks now include Agent between Quick and Fast.
+Guardrails now expose baseline_estimate, bottleneck, recommended_mode, and token policy.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_benchmark_runs.py tests/test_web_main.py -v
+43 passed in 7.73s
+
+node --check src/pcketlm/app/web/static/app.js
+exit=0
+```
+
+Live Agent smoke:
+
+```text
+_run_chat_payload({model_id=qwen2.5-14b-instruct, mode=Agent, max_new_tokens=8, prompt=hello world})
+ready=True
+elapsed_seconds=40.16
+generated_text=Hello!
+max_new_tokens=2
+steps_completed=2
+generated_token_ids=[9707, 0]
+guard_status=stable-slow
+guard_estimate_seconds=39.0
+guard_bottleneck=tensor loading
+```
