@@ -163,7 +163,8 @@ def build_runtime_backend_report(model_id: str) -> RuntimeBackendReport:
     torch_cuda_ready = bool(cuda_devices)
     directml_package = _module_available("torch_directml")
     gguf_status = build_gguf_backend_status(model_id)
-    llama_cpp_package = gguf_status.package_available
+    gguf_runtime_available = bool(gguf_status.ready)
+    llama_cpp_package = bool(gguf_status.package_available)
     gguf_files = [model_file.path for model_file in gguf_status.model_files]
     conversion_disk_free_gb = _disk_free_gb(artifacts_root(model_id))
     conversion_disk_ready = conversion_disk_free_gb is not None and conversion_disk_free_gb >= MIN_GGUF_CONVERSION_DISK_GB
@@ -222,15 +223,15 @@ def build_runtime_backend_report(model_id: str) -> RuntimeBackendReport:
         RuntimeBackendCandidate(
             backend_id="llama-cpp-gguf",
             label="llama.cpp / GGUF",
-            status="ready-to-prototype" if llama_cpp_package and gguf_files else "conversion-needed",
-            available_now=llama_cpp_package and bool(gguf_files),
-            implemented_now=False,
+            status="ready" if gguf_runtime_available else "conversion-needed",
+            available_now=gguf_runtime_available,
+            implemented_now=gguf_runtime_available,
             package_available=llama_cpp_package,
             hardware_available=True,
             requires_model_conversion=not bool(gguf_files),
             summary=(
-                "A GGUF runtime package and GGUF model file are present, so this is ready for a local prototype."
-                if llama_cpp_package and gguf_files
+                "GGUF is ready now through the local llama.cpp adapter and is the practical speed path for chat."
+                if gguf_runtime_available
                 else "This is the best next speed target for weak hardware, but it needs a GGUF runtime package and/or converted model file."
             ),
             blockers=[
@@ -242,7 +243,11 @@ def build_runtime_backend_report(model_id: str) -> RuntimeBackendReport:
                 ]
                 if blocker is not None
             ],
-            next_action="Prepare a GGUF conversion/prototype only after the user approves the conversion/download cost.",
+            next_action=(
+                "Use GGUF mode or load the GGUF server for faster customer chat when RAM is available."
+                if gguf_runtime_available
+                else "Prepare a GGUF conversion/prototype only after the user approves the conversion/download cost."
+            ),
             details={
                 "gguf_files": [str(path) for path in gguf_files],
                 "conversion_disk_free_gb": conversion_disk_free_gb,
@@ -254,12 +259,14 @@ def build_runtime_backend_report(model_id: str) -> RuntimeBackendReport:
 
     recommended_id = "llama-cpp-gguf"
     recommended_summary = (
-        "The next serious speed prototype should be llama.cpp/GGUF, because current safetensors repacking gave only small gains and this path is proven for weak hardware."
+        "Use llama.cpp/GGUF for the practical speed path when the GGUF artifact is ready; keep Direct CPU as the dense research fallback."
+        if gguf_runtime_available
+        else "The next serious speed prototype should be llama.cpp/GGUF, because current safetensors repacking gave only small gains and this path is proven for weak hardware."
     )
-    if largest_cuda_vram >= MIN_CUDA_ACCELERATION_VRAM_GB:
+    if not gguf_runtime_available and largest_cuda_vram >= MIN_CUDA_ACCELERATION_VRAM_GB:
         recommended_id = "cuda"
         recommended_summary = "CUDA is visible with enough VRAM, so a CUDA prototype would be the most direct acceleration target after the CPU fallback."
-    elif directml_package:
+    elif not gguf_runtime_available and directml_package:
         recommended_id = "directml"
         recommended_summary = "DirectML is installed on Windows, so it is the next GPU-style prototype target before asking for a model conversion."
 
@@ -280,6 +287,7 @@ def select_runtime_engine(model_id: str) -> RuntimeEngineDecision:
     """Choose the safe runtime engine for the current machine."""
     report = build_runtime_backend_report(model_id)
     free_gb = report.system_free_gb
+    gguf_recommended = report.recommended_backend_id == "llama-cpp-gguf"
 
     cuda_devices = _cuda_devices()
     if cuda_devices:
@@ -321,5 +329,9 @@ def select_runtime_engine(model_id: str) -> RuntimeEngineDecision:
         cuda_devices=[],
         recommended_backend_id=report.recommended_backend_id,
         blockers=["No CUDA GPU backend is available to the current Python runtime."],
-        summary="Pocket LLM selected the direct CPU runtime because no supported GPU backend is available yet.",
+        summary=(
+            "GGUF is ready and recommended for faster chat; Direct CPU remains the dense fallback and research path."
+            if gguf_recommended
+            else "Pocket LLM selected the direct CPU runtime because no supported GPU backend is available yet."
+        ),
     )

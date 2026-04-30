@@ -487,3 +487,8 @@ Latest GGUF speed update:
 - found the Qwen 14B Q4_K_M GGUF artifact and llama.cpp binaries on disk
 - cold GGUF call took `52.26s`, then the loaded server answered a 4-token prompt in `2.36s` at about `2.30 tokens/sec`
 - unloaded the GGUF server after the proof; current Phase 3 estimate: about `72%` complete because the first practical speed path is proven, but routing/policy still needs to make GGUF the recommended customer path when available.
+
+Latest GGUF recommendation update:
+- backend report now marks ready GGUF as implemented and recommended
+- live selector smoke returns `recommended_backend_id=llama-cpp-gguf` while keeping Direct CPU as the dense fallback
+- current Phase 3 estimate: about `76%` complete. The app now points users toward the proven faster path when it exists.

@@ -1630,6 +1630,48 @@ Verdict:
 This is the first real speed jump. Direct CPU page runtime remains important for the dense-model research path, but customer-speed chat/agent work should route through loaded GGUF when the artifact is available and enough RAM exists.
 ```
 
+## Phase 3C / GGUF recommendation routing
+
+Change:
+
+```text
+Backend report now marks llama.cpp/GGUF as ready and implemented when the local GGUF adapter is ready.
+Engine decision keeps Direct CPU as the dense fallback but recommends llama-cpp-gguf for faster chat.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_runtime_engine_selector.py tests/test_web_main.py -v
+45 passed in 12.53s
+
+py -3.14 -m compileall -q src\pcketlm\core\runtime\engine_selector.py tests\test_runtime_engine_selector.py
+exit=0
+```
+
+Live selector smoke:
+
+```text
+build_runtime_backend_report('qwen2.5-14b-instruct').recommended_backend_id
+llama-cpp-gguf
+
+select_runtime_engine('qwen2.5-14b-instruct'):
+selected_engine=direct-cpu
+selected_backend=torch-cpu
+recommended_backend_id=llama-cpp-gguf
+summary=GGUF is ready and recommended for faster chat; Direct CPU remains the dense fallback and research path.
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+197 passed in 21.55s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
+
 ## Phase 3B / Warm Agent controls
 
 Change:
