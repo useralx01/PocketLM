@@ -2814,3 +2814,18 @@ Added slices: `router-only`, `one-expert`, `top-k-experts`, `all-layers-moe`. Th
 pytest tests/ -q
 222 passed in 19.82s
 ```
+
+## Phase MoE / Step 7 / real download
+
+```text
+free_disk_c_gb=599.29
+download_status=complete
+expected_files=23
+present_expected_files=23
+bytes_on_disk_gb=56.89
+shard_count=16
+missing_shards=[]
+index_total_size=61064245248
+actual_safetensors_bytes=61066575648
+import_validation=ok
+```
