@@ -10,8 +10,10 @@ from pcketlm.core.runtime.tensor_residency import (
     advance_tensor_residency_step,
     clear_tensor_residency_cache,
     current_tensor_residency_step,
+    expert_residency_snapshot,
     load_resident_tensor,
     load_resident_tensors,
+    record_expert_activation,
     tensor_residency_stats,
 )
 
@@ -185,6 +187,67 @@ def test_zero_copy_kill_switch_restores_clone_for_live_handle_tensor(tmp_path: P
 
     assert result.tensor is not None
     assert result.tensor.data_ptr() != source_tensor.data_ptr()
+
+
+def test_expert_residency_evicts_cold_expert_before_hot_expert(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-residency-test"
+    shard_path = tmp_path / "model-00001-of-00001.safetensors"
+    shard_path.write_bytes(b"test")
+    entries = {
+        f"expert-{index}": TensorCatalogEntry(
+            tensor_name=f"model.layers.0.mlp.experts.{index}.gate_proj.weight",
+            shard_name=shard_path.name,
+            shard_path=shard_path,
+            dtype="BF16",
+            shape=[2, 2],
+            data_offset_start=0,
+            data_offset_end=8,
+            data_nbytes=8,
+            layer_index=0,
+            component_group="expert_mlp",
+            expert_index=index,
+        )
+        for index in range(3)
+    }
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        entry = entries[tensor_name]
+        return _loaded_tensor(model_id_arg, entry, value=float(entry.expert_index + 1))
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=64,
+        max_tensor_bytes=1024,
+        expert_max_resident_bytes=32,
+        sticky_residency_steps=0,
+    )
+
+    record_expert_activation(0, 0)
+    record_expert_activation(0, 0)
+    load_resident_tensor(model_id, "expert-0", policy=policy)
+    advance_tensor_residency_step()
+    record_expert_activation(0, 1)
+    load_resident_tensor(model_id, "expert-1", policy=policy)
+    advance_tensor_residency_step()
+    record_expert_activation(0, 2)
+    load_resident_tensor(model_id, "expert-2", policy=policy)
+
+    stats = tensor_residency_stats()
+    snapshot = expert_residency_snapshot()
+    hot = load_resident_tensor(model_id, "expert-0", policy=policy)
+    cold = load_resident_tensor(model_id, "expert-1", policy=policy)
+
+    assert stats.expert_evictions == 1
+    assert snapshot["expert_resident_count"] == 2
+    assert hot.tensor is not None
+    assert cold.tensor is not None
+    assert tensor_residency_stats().expert_hits >= 1
+    assert tensor_residency_stats().expert_misses >= 4
 
 
 def test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom(monkeypatch) -> None:

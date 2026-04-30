@@ -2771,3 +2771,12 @@ free_ram_end_mb=8193
 peak_working_set_mb=9031
 ready=true
 ```
+
+## Phase MoE / Step 4 / expert residency
+
+```text
+pytest tests/test_tensor_residency.py::test_expert_residency_evicts_cold_expert_before_hot_expert -v
+1 passed in 1.74s
+```
+
+Policy: expert activations are counted by `(layer_index, expert_index)`. Under pressure, cold expert tensors evict before current-step or frequently activated expert tensors. Expert cache budget is controlled separately by `PCKETLM_EXPERT_TENSOR_CACHE_MB`.
