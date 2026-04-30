@@ -544,3 +544,10 @@ Latest direct paged speed attempt:
 - Sticky residency was implemented and tested, but Step 2 best warm result was `17.684s/token` / `0.0565 tokens/sec`, with `14.554s` spent loading tensors.
 - Per stop condition, the phase stopped at Lever 1. Sticky residency does not address the first-pass prefill IO wall for a one-token full prompt.
 - Outcome: direct paged runtime speed target not met. A real direct-speed phase must reduce first-pass tensor IO/copy cost, not just eviction behavior.
+
+Latest direct paged speed v2 outcome:
+- Added diagnostic timing breakdown, tensor-load counters, repeat-in-one-process measurement, persistent-handle accounting, opt-in zero-copy hot tensors, and opt-in layer prefetch.
+- Zero-copy reduced reported warm tensor-load time to `0.9611s`, but wall-clock stayed around `19s/token` because page faults and weight streaming moved into compute.
+- Layer prefetch regressed warm runs to `21.295s` and `24.999s`, with free RAM falling near `1.9 GB`, so it is disabled by default.
+- Final default best warm was `17.686s/token` by process time, `16.5091s/token` by runtime result timing, with tensor-load still `13.2415s`.
+- Outcome: direct paged runtime speed target not met; full suite passed with `217` tests. The next speed path must be architectural: quantized direct execution, native fused backend, GPU path, or redesigned packed execution.

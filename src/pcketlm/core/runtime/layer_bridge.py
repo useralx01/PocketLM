@@ -7,6 +7,7 @@ import math
 import os
 import time
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -878,6 +879,29 @@ def _runtime_math_dtype() -> torch.dtype:
     return torch.bfloat16 if runtime_math_dtype_name() == "bfloat16" else torch.float32
 
 
+def _layer_prefetch_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_LAYER_PREFETCH", "0").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_LAYER_PREFETCH", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _layer_tensor_names(layer_index: int) -> list[str]:
+    return [
+        f"model.layers.{layer_index}.input_layernorm.weight",
+        f"model.layers.{layer_index}.post_attention_layernorm.weight",
+        f"model.layers.{layer_index}.self_attn.q_proj.weight",
+        f"model.layers.{layer_index}.self_attn.q_proj.bias",
+        f"model.layers.{layer_index}.self_attn.k_proj.weight",
+        f"model.layers.{layer_index}.self_attn.k_proj.bias",
+        f"model.layers.{layer_index}.self_attn.v_proj.weight",
+        f"model.layers.{layer_index}.self_attn.v_proj.bias",
+        f"model.layers.{layer_index}.self_attn.o_proj.weight",
+        f"model.layers.{layer_index}.mlp.gate_proj.weight",
+        f"model.layers.{layer_index}.mlp.up_proj.weight",
+        f"model.layers.{layer_index}.mlp.down_proj.weight",
+    ]
+
+
 def _recommended_prompt_layer_count(
     config: LayerBridgeModelConfig,
     prompt_token_count: int,
@@ -1188,6 +1212,7 @@ def run_minimal_layer_forward_bridge(
     return_kv_cache: bool = False,
     collect_metrics: bool = True,
     tensor_policy: TensorResidencyPolicy | None = None,
+    prefetched_tensors: dict[str, torch.Tensor] | None = None,
 ) -> LayerBridgeResult:
     """Run one real CPU-only layer slice using real loaded layer tensors."""
     timings: dict[str, float] = {}
@@ -1196,12 +1221,16 @@ def run_minimal_layer_forward_bridge(
         timings[name] = round(timings.get(name, 0.0) + (time.perf_counter() - started), 4)
 
     def load_required(tensor_name: str) -> torch.Tensor | None:
+        if prefetched_tensors is not None and tensor_name in prefetched_tensors:
+            return prefetched_tensors[tensor_name]
         phase_started = time.perf_counter()
         tensor = _load_required_tensor(model_id, tensor_name, blockers, policy=tensor_policy)
         record_phase("load_tensors", phase_started)
         return tensor
 
     def load_required_many(tensor_names: list[str]) -> dict[str, torch.Tensor | None]:
+        if prefetched_tensors is not None and all(tensor_name in prefetched_tensors for tensor_name in tensor_names):
+            return {tensor_name: prefetched_tensors[tensor_name] for tensor_name in tensor_names}
         phase_started = time.perf_counter()
         loaded_by_name = load_resident_tensors(
             model_id,
@@ -1670,82 +1699,120 @@ def run_layer_bridge_stack(
     cache_sequence_lengths: dict[str, int] = {}
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     tensor_policy = TensorResidencyPolicy.from_environment(model_id)
+    prefetch_enabled = _layer_prefetch_enabled() and layer_count > 1
+    prefetch_executor: ThreadPoolExecutor | None = None
+    prefetch_future: Future | None = None
 
-    for layer_index in range(start_layer, start_layer + layer_count):
-        if _cancel_requested(should_cancel):
-            return LayerBridgeStackResult(
-                model_id=model_id,
-                start_layer=start_layer,
-                layer_count=layer_count,
-                input_mode=input_mode,
-                input_shape=first_input_shape,
-                output_shape=output_shape,
-                output_dtype=output_dtype,
-                executed_layers=executed_layers,
-                step_summaries=step_summaries,
-                cache_sequence_lengths=cache_sequence_lengths,
-                blockers=[CANCEL_BLOCKER],
-                ready=False,
-                timings=finish_timings(),
-                output_tensor=current_hidden if executed_layers else None,
-                next_kv_caches=next_kv_caches,
-            )
-        layer_started = time.perf_counter()
-        result = run_minimal_layer_forward_bridge(
+    def load_prefetch(layer_index: int) -> dict[str, torch.Tensor]:
+        loaded = load_resident_tensors(
             model_id,
-            layer_index=layer_index,
-            input_hidden=current_hidden,
-            past_key_value=None if past_key_values is None else past_key_values.get(layer_index),
-            position_offset=position_offset,
-            return_kv_cache=return_kv_cache,
-            collect_metrics=collect_metrics,
-            tensor_policy=tensor_policy,
+            _layer_tensor_names(layer_index),
+            dtype=_runtime_math_dtype(),
+            policy=tensor_policy,
         )
-        layer_times[layer_index] = time.perf_counter() - layer_started
-        for key, value in result.timings.items():
-            operation_times[key] = operation_times.get(key, 0.0) + float(value)
-        if not first_input_shape:
-            first_input_shape = list(result.input_shape)
-        cache_sequence_lengths[str(layer_index)] = result.cache_sequence_length
+        tensors: dict[str, torch.Tensor] = {}
+        for tensor_name, loaded_slice in loaded.items():
+            if loaded_slice.ready and loaded_slice.tensor is not None:
+                tensors[tensor_name] = loaded_slice.tensor
+        return tensors
 
-        if collect_step_summaries or not result.ready:
-            step_summaries.append(
-                LayerBridgeStepSummary(
-                    layer_index=layer_index,
+    def submit_prefetch(layer_index: int) -> Future | None:
+        if not prefetch_enabled or layer_index >= start_layer + layer_count:
+            return None
+        assert prefetch_executor is not None
+        return prefetch_executor.submit(load_prefetch, layer_index)
+
+    try:
+        prefetch_executor = ThreadPoolExecutor(max_workers=1) if prefetch_enabled else None
+
+        for layer_index in range(start_layer, start_layer + layer_count):
+            if _cancel_requested(should_cancel):
+                return LayerBridgeStackResult(
+                    model_id=model_id,
+                    start_layer=start_layer,
+                    layer_count=layer_count,
+                    input_mode=input_mode,
+                    input_shape=first_input_shape,
+                    output_shape=output_shape,
+                    output_dtype=output_dtype,
+                    executed_layers=executed_layers,
+                    step_summaries=step_summaries,
+                    cache_sequence_lengths=cache_sequence_lengths,
+                    blockers=[CANCEL_BLOCKER],
+                    ready=False,
+                    timings=finish_timings(),
+                    output_tensor=current_hidden if executed_layers else None,
+                    next_kv_caches=next_kv_caches,
+                )
+            prefetched_tensors: dict[str, torch.Tensor] | None = None
+            if prefetch_future is not None:
+                wait_started = time.perf_counter()
+                prefetched_tensors = prefetch_future.result()
+                operation_times["prefetch_wait"] = operation_times.get("prefetch_wait", 0.0) + (
+                    time.perf_counter() - wait_started
+                )
+            prefetch_future = submit_prefetch(layer_index + 1)
+
+            layer_started = time.perf_counter()
+            result = run_minimal_layer_forward_bridge(
+                model_id,
+                layer_index=layer_index,
+                input_hidden=current_hidden,
+                past_key_value=None if past_key_values is None else past_key_values.get(layer_index),
+                position_offset=position_offset,
+                return_kv_cache=return_kv_cache,
+                collect_metrics=collect_metrics,
+                tensor_policy=tensor_policy,
+                prefetched_tensors=prefetched_tensors,
+            )
+            layer_times[layer_index] = time.perf_counter() - layer_started
+            for key, value in result.timings.items():
+                operation_times[key] = operation_times.get(key, 0.0) + float(value)
+            if not first_input_shape:
+                first_input_shape = list(result.input_shape)
+            cache_sequence_lengths[str(layer_index)] = result.cache_sequence_length
+
+            if collect_step_summaries or not result.ready:
+                step_summaries.append(
+                    LayerBridgeStepSummary(
+                        layer_index=layer_index,
+                        output_shape=list(result.output_shape),
+                        output_dtype=result.output_dtype,
+                        output_mean_abs=result.output_mean_abs,
+                        output_l2_norm=result.output_l2_norm,
+                        loaded_unit_ids=list(result.loaded_unit_ids),
+                        blockers=list(result.blockers),
+                        ready=result.ready,
+                    )
+                )
+
+            if not result.ready or result.output_tensor is None:
+                blockers.extend(result.blockers)
+                return LayerBridgeStackResult(
+                    model_id=model_id,
+                    start_layer=start_layer,
+                    layer_count=layer_count,
+                    input_mode=input_mode,
+                    input_shape=first_input_shape,
                     output_shape=list(result.output_shape),
                     output_dtype=result.output_dtype,
-                    output_mean_abs=result.output_mean_abs,
-                    output_l2_norm=result.output_l2_norm,
-                    loaded_unit_ids=list(result.loaded_unit_ids),
-                    blockers=list(result.blockers),
-                    ready=result.ready,
+                    executed_layers=executed_layers,
+                    step_summaries=step_summaries,
+                    cache_sequence_lengths=cache_sequence_lengths,
+                    blockers=blockers or [f"Layer {layer_index} bridge failed."],
+                    ready=False,
+                    timings=finish_timings(),
                 )
-            )
 
-        if not result.ready or result.output_tensor is None:
-            blockers.extend(result.blockers)
-            return LayerBridgeStackResult(
-                model_id=model_id,
-                start_layer=start_layer,
-                layer_count=layer_count,
-                input_mode=input_mode,
-                input_shape=first_input_shape,
-                output_shape=list(result.output_shape),
-                output_dtype=result.output_dtype,
-                executed_layers=executed_layers,
-                step_summaries=step_summaries,
-                cache_sequence_lengths=cache_sequence_lengths,
-                blockers=blockers or [f"Layer {layer_index} bridge failed."],
-                ready=False,
-                timings=finish_timings(),
-            )
-
-        current_hidden = result.output_tensor
-        executed_layers.append(layer_index)
-        output_shape = list(result.output_shape)
-        output_dtype = result.output_dtype
-        if return_kv_cache and result.next_kv_cache is not None:
-            next_kv_caches[layer_index] = result.next_kv_cache
+            current_hidden = result.output_tensor
+            executed_layers.append(layer_index)
+            output_shape = list(result.output_shape)
+            output_dtype = result.output_dtype
+            if return_kv_cache and result.next_kv_cache is not None:
+                next_kv_caches[layer_index] = result.next_kv_cache
+    finally:
+        if prefetch_executor is not None:
+            prefetch_executor.shutdown(wait=False, cancel_futures=True)
 
     return LayerBridgeStackResult(
         model_id=model_id,

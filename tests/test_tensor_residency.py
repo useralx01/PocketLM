@@ -118,6 +118,75 @@ def test_sticky_residency_prefers_evicting_stale_tensor_over_recent_tensor(tmp_p
     assert calls == ["a", "b", "c", "a"]
 
 
+def test_live_handle_tensor_can_skip_hot_path_clone(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "resident-zero-copy-test"
+    entry = _entry(tmp_path, tensor_name="borrowed")
+    source_tensor = torch.ones((2, 2), dtype=torch.bfloat16)
+    loaded = LoadedTensorSlice(
+        model_id=model_id,
+        tensor_name="borrowed",
+        shard_name=entry.shard_name,
+        dtype=str(source_tensor.dtype),
+        shape=[2, 2],
+        tensor=source_tensor,
+        layer_index=entry.layer_index,
+        component_group=entry.component_group,
+        loaded_nbytes=source_tensor.nelement() * source_tensor.element_size(),
+        ready=True,
+        borrowed_from_live_handle=True,
+    )
+
+    monkeypatch.delenv("PCKETLM_DISABLE_ZERO_COPY_TENSORS", raising=False)
+    monkeypatch.setenv("PCKETLM_ENABLE_ZERO_COPY_TENSORS", "1")
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", lambda *_args: loaded)
+
+    result = load_resident_tensor(
+        model_id,
+        "borrowed",
+        dtype=torch.bfloat16,
+        policy=TensorResidencyPolicy(enabled=False),
+    )
+
+    assert result.tensor is not None
+    assert result.tensor.data_ptr() == source_tensor.data_ptr()
+
+
+def test_zero_copy_kill_switch_restores_clone_for_live_handle_tensor(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "resident-zero-copy-off-test"
+    entry = _entry(tmp_path, tensor_name="borrowed")
+    source_tensor = torch.ones((2, 2), dtype=torch.bfloat16)
+    loaded = LoadedTensorSlice(
+        model_id=model_id,
+        tensor_name="borrowed",
+        shard_name=entry.shard_name,
+        dtype=str(source_tensor.dtype),
+        shape=[2, 2],
+        tensor=source_tensor,
+        layer_index=entry.layer_index,
+        component_group=entry.component_group,
+        loaded_nbytes=source_tensor.nelement() * source_tensor.element_size(),
+        ready=True,
+        borrowed_from_live_handle=True,
+    )
+
+    monkeypatch.setenv("PCKETLM_DISABLE_ZERO_COPY_TENSORS", "1")
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", lambda *_args: loaded)
+
+    result = load_resident_tensor(
+        model_id,
+        "borrowed",
+        dtype=torch.bfloat16,
+        policy=TensorResidencyPolicy(enabled=False),
+    )
+
+    assert result.tensor is not None
+    assert result.tensor.data_ptr() != source_tensor.data_ptr()
+
+
 def test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom(monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)

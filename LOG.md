@@ -2650,3 +2650,101 @@ verdict=not met
 reason=Sticky residency does not help the single-token full-prompt benchmark because Qwen 14B prefill loads each layer's large tensors once, then moves on. There is almost no same-process tensor reuse for sticky residency to exploit before the first generated token.
 architectural_conclusion=The requested 4-5s/token direct paged runtime target needs a different lever than residency pinning, most likely persistent per-layer weight service, memory-mapped packed weights with lower copy cost, larger contiguous derived packs, or backend execution changes.
 ```
+
+## Phase Speed v2 / Setup
+
+```text
+phase-speed-paged-runtime
+```
+
+## Phase Speed v2 / Lever A-B-D / zero-copy probe
+
+Command:
+
+```text
+python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 1 --repeat 3
+```
+
+Rows:
+
+```text
+run,total_process_s,result_total_s,prefill_stack_s,tensor_load_s,mlp_s,o_proj_s,qkv_s,free_before_mb,free_after_mb,peak_working_set_mb,generated
+1,20.741,19.7084,18.3280,1.9962,11.8913,2.1226,2.0451,7601,9407,9375,Hello
+2,20.045,18.9252,17.9122,1.2570,12.8438,1.3893,2.1823,9408,10134,9934,Hello
+3,20.466,19.3428,18.3633,0.9611,12.7207,1.4830,2.9354,10135,10125,9953,Hello
+```
+
+Verdict: tensor-load timing fell below 1s warm, but total time did not improve. The cost moved into page-faulted matmul / weight streaming inside compute phases.
+
+## Phase Speed v2 / Lever C / layer prefetch probe
+
+Command:
+
+```text
+PCKETLM_ENABLE_LAYER_PREFETCH=1 python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 1 --repeat 3
+```
+
+Rows:
+
+```text
+run,total_process_s,result_total_s,prefill_stack_s,tensor_load_s,prefetch_wait_s,free_before_mb,free_after_mb,peak_working_set_mb,generated
+1,19.898,19.8352,18.3039,0.3898,13.8355,8337,2518,8569,Hello
+2,21.295,21.2901,20.2075,0.1428,14.3258,2518,1902,9268,Hello
+3,24.999,24.9802,23.7895,0.5247,16.0423,1902,1989,9268,Hello
+```
+
+Verdict: prefetch regressed wall-clock time and pushed free RAM near the safety floor. It remains available only behind `PCKETLM_ENABLE_LAYER_PREFETCH=1`.
+
+## Phase Speed v2 / Final
+
+Command:
+
+```text
+python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 1 --repeat 5
+```
+
+Rows:
+
+```text
+run,total_process_s,result_total_s,prefill_stack_s,tensor_load_s,free_before_mb,free_after_mb,peak_working_set_mb,generated
+1,19.073,18.1502,16.7265,14.7358,8933,9126,9686,Hello
+2,17.686,16.5091,15.3537,13.2415,9121,9064,9730,Hello
+3,22.598,21.3135,19.8551,16.8974,9065,7813,9730,Hello
+4,23.640,22.0820,20.3932,16.9736,7814,7612,9730,Hello
+5,19.125,18.1429,17.0158,14.4830,7599,8332,9730,Hello
+```
+
+Warm best: `17.686s/token` by process time, `16.5091s/token` by runtime result timing. Target `<=5.0s/token` was not met.
+
+## Phase Speed v2 / Kill-switch sanity
+
+Command:
+
+```text
+PCKETLM_DISABLE_PACKED_LAYER_READS=1 PCKETLM_DISABLE_PERSISTENT_HANDLES=1 PCKETLM_DISABLE_LAYER_PREFETCH=1 PCKETLM_DISABLE_ZERO_COPY_TENSORS=1 python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 1
+```
+
+Result:
+
+```text
+total_process_s=19.842
+result_total_s=19.8415
+prefill_stack_s=18.3395
+tensor_load_s=16.2736
+free_before_mb=8587
+free_after_mb=7399
+peak_working_set_mb=2485
+generated=Hello
+```
+
+Kill-switch sanity: returned to baseline-speed territory, but not within 10% of the locked best warm `17.407s` because this was a single cold-ish run.
+
+## Phase Speed v2 / pytest
+
+```text
+217 passed in 19.70s
+```
+
+## Phase Speed v2 / STOP
+
+STOP condition: after all tested levers, warm remains above `8s/token`. The only lever that reduced reported tensor-load time by more than 20% moved the cost into compute/page faults and did not reduce wall-clock latency. Direct paged Qwen 14B on this CPU path needs a deeper architectural change: packed quantized execution, a native fused backend, GPU execution, or a different direct-runtime design that does not stream the full dense 14B weights through Python/Torch per token.

@@ -262,7 +262,29 @@ def _loaded_slice_with_tensor(loaded: LoadedTensorSlice, tensor: torch.Tensor) -
         loaded_nbytes=nbytes,
         blockers=list(loaded.blockers),
         ready=loaded.ready,
+        borrowed_from_live_handle=loaded.borrowed_from_live_handle,
     )
+
+
+def _zero_copy_hot_tensors_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_ZERO_COPY_TENSORS", "0").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_ZERO_COPY_TENSORS", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _hot_tensor_for_compute(loaded: LoadedTensorSlice, dtype: torch.dtype) -> torch.Tensor:
+    tensor = loaded.tensor.detach().cpu().to(dtype=dtype)
+    if tensor.data_ptr() != loaded.tensor.data_ptr():
+        return tensor
+    if loaded.borrowed_from_live_handle and _zero_copy_hot_tensors_enabled():
+        return tensor
+    return tensor.clone()
+
+
+def _tensor_for_residency_store(tensor: torch.Tensor, loaded: LoadedTensorSlice) -> torch.Tensor:
+    if loaded.borrowed_from_live_handle and tensor.data_ptr() == loaded.tensor.data_ptr():
+        return tensor.clone()
+    return tensor
 
 
 def _is_cacheable(tensor: torch.Tensor, entry: TensorCatalogEntry, policy: TensorResidencyPolicy) -> bool:
@@ -357,12 +379,10 @@ def load_resident_tensor(
     if not loaded.ready or loaded.tensor is None:
         return loaded
 
-    converted = loaded.tensor.detach().cpu().to(dtype=dtype)
-    if converted.data_ptr() == loaded.tensor.data_ptr():
-        converted = converted.clone()
+    converted = _hot_tensor_for_compute(loaded, dtype)
     converted_slice = _loaded_slice_with_tensor(loaded, converted)
     if _is_cacheable(converted, entry, effective_policy):
-        _store_resident_tensor(key, entry, converted, effective_policy)
+        _store_resident_tensor(key, entry, _tensor_for_residency_store(converted, loaded), effective_policy)
     else:
         _stats.skips += 1
         _stats.resident_bytes = _resident_bytes
@@ -413,12 +433,15 @@ def load_resident_tensors(
                 results[tensor_name] = loaded
                 continue
 
-            converted = loaded.tensor.detach().cpu().to(dtype=dtype)
-            if converted.data_ptr() == loaded.tensor.data_ptr():
-                converted = converted.clone()
+            converted = _hot_tensor_for_compute(loaded, dtype)
             converted_slice = _loaded_slice_with_tensor(loaded, converted)
             if _is_cacheable(converted, entry, effective_policy):
-                _store_resident_tensor(_cache_key(model_id, entry, dtype), entry, converted, effective_policy)
+                _store_resident_tensor(
+                    _cache_key(model_id, entry, dtype),
+                    entry,
+                    _tensor_for_residency_store(converted, loaded),
+                    effective_policy,
+                )
             else:
                 _stats.skips += 1
                 _stats.resident_bytes = _resident_bytes

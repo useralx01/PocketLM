@@ -76,6 +76,42 @@ def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tm
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert captured["max_new_tokens"] == 4
     assert lines[2]["result"]["generated_text"] == "Hello! How can"
+    assert "tensor_load_stats" in lines[2]["result"]
+
+
+def test_runtime_diagnose_cli_full_repeat_runs_in_one_process(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    calls = {"count": 0}
+
+    class _FakeResult:
+        def to_dict(self) -> dict:
+            calls["count"] += 1
+            return {
+                "ready": True,
+                "generated_text": f"Hello {calls['count']}",
+                "blockers": [],
+                "timings": {"total": float(calls["count"])},
+            }
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+    monkeypatch.setattr(runtime_diagnose_cli, "run_prompt_decode_loop", lambda *_args, **_kwargs: _FakeResult())
+
+    exit_code = runtime_diagnose_cli.main(
+        ["--model", "qwen-test", "--slice", "full", "--max-new-tokens", "1", "--repeat", "3"]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    after_lines = [line for line in lines if line["event"] == "after"]
+    assert len(after_lines) == 3
+    assert lines[-1]["ready"] is True
+    assert calls["count"] == 3
 
 
 def test_runtime_diagnose_cli_summarizes_kv_cache_bytes() -> None:

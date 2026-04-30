@@ -27,6 +27,7 @@ from pcketlm.core.runtime import (
 )
 from pcketlm.core.runtime.layer_bridge import _can_select_from_topk, select_next_token, select_next_token_from_topk
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
+from pcketlm.core.runtime.tensor_loader import reset_tensor_load_stats, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tokenizer_runtime import (
     decode_token_ids_to_text,
     load_generation_settings,
@@ -74,7 +75,7 @@ def _bytes_to_mb(value: int) -> int:
     return int(round(value / (1024**2)))
 
 
-def _working_set_mb() -> int:
+def _process_memory_payload() -> dict:
     counters = _ProcessMemoryCounters()
     counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -85,16 +86,25 @@ def _working_set_mb() -> int:
     handle = kernel32.GetCurrentProcess()
     ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
     if not ok:
-        return -1
-    return _bytes_to_mb(int(counters.WorkingSetSize))
+        return {"process_working_set_mb": -1, "process_peak_working_set_mb": -1}
+    return {
+        "process_working_set_mb": _bytes_to_mb(int(counters.WorkingSetSize)),
+        "process_peak_working_set_mb": _bytes_to_mb(int(counters.PeakWorkingSetSize)),
+    }
+
+
+def _working_set_mb() -> int:
+    return int(_process_memory_payload()["process_working_set_mb"])
 
 
 def _ram_payload() -> dict:
     memory = _memory_snapshot()
+    process_payload = _process_memory_payload()
     return {
         "free_ram_mb": _bytes_to_mb(int(memory.free_bytes)),
         "total_ram_mb": _bytes_to_mb(int(memory.total_bytes)),
         "process_working_set_mb": _working_set_mb(),
+        "process_peak_working_set_mb": int(process_payload["process_peak_working_set_mb"]),
     }
 
 
@@ -626,6 +636,7 @@ def _second_decode_step_checkpoint(model_id: str, slice_name: str, started_at: f
 
 
 def _full_forward(model_id: str, max_new_tokens: int = 1) -> dict:
+    reset_tensor_load_stats()
     result = run_prompt_decode_loop(
         model_id,
         prompt="hello world",
@@ -634,6 +645,7 @@ def _full_forward(model_id: str, max_new_tokens: int = 1) -> dict:
     )
     payload = result.to_dict()
     payload.pop("final_decode_state", None)
+    payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
     return payload
 
 
@@ -678,6 +690,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Model id, for example qwen2.5-32b-instruct")
     parser.add_argument("--slice", required=True, choices=sorted(VALID_SLICES), help="Progressive slice to run")
     parser.add_argument("--max-new-tokens", type=int, default=1, help="Token cap for the full prompt slice")
+    parser.add_argument("--repeat", type=int, default=1, help="Run the chosen slice repeatedly in one process")
     return parser.parse_args(argv)
 
 
@@ -686,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
     model_id = str(args.model)
     slice_name = str(args.slice)
     max_new_tokens = max(1, int(args.max_new_tokens))
+    repeat = max(1, int(args.repeat))
     started_at = time.perf_counter()
     _emit(
         "start",
@@ -719,6 +733,29 @@ def main(argv: list[str] | None = None) -> int:
             result.pop("decode_state", None)
         elif slice_name == "decode-step-2":
             result = _second_decode_step_checkpoint(model_id, slice_name, started_at)
+        elif repeat > 1:
+            repeated: list[dict[str, Any]] = []
+            for run_index in range(1, repeat + 1):
+                selected_callback = (
+                    (lambda _model_id: _full_forward(_model_id, max_new_tokens)) if slice_name == "full" else callback
+                )
+                run_result = _run_checkpoint(
+                    model_id=model_id,
+                    slice_name=slice_name,
+                    operation=f"{operation}-run-{run_index}",
+                    started_at=started_at,
+                    callback=lambda selected_callback=selected_callback: selected_callback(model_id),
+                )
+                repeated.append(
+                    {
+                        "run": run_index,
+                        "ready": bool(run_result.get("ready", False)),
+                        "generated_text": run_result.get("generated_text"),
+                        "timings": run_result.get("timings", {}),
+                        "tensor_load_stats": run_result.get("tensor_load_stats", {}),
+                    }
+                )
+            result = {"ready": all(item["ready"] for item in repeated), "runs": repeated, "blockers": []}
         else:
             selected_callback = (lambda _model_id: _full_forward(_model_id, max_new_tokens)) if slice_name == "full" else callback
             result = _run_checkpoint(

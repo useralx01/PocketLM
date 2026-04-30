@@ -428,3 +428,17 @@ Why:
 - After sticky residency, best warm run was `17.684s/token`, with `14.554s` in tensor loading.
 - The single-token full-prompt path loads each layer's large tensors once during prefill; residency only helps when the same tensors are requested again inside the same process and budget window.
 - The 4-5s/token target for direct paged runtime needs an architectural lever that reduces first-pass tensor IO/copy cost, not only a cache eviction policy.
+
+## Phase Speed v2 / Loader levers
+
+Decision:
+- Keep packed/scoped loader diagnostics and per-run timing output.
+- Keep persistent handles available through `PCKETLM_SAFETENSOR_HANDLE_CACHE=1`, with `PCKETLM_DISABLE_PERSISTENT_HANDLES=1` as a hard kill switch.
+- Keep layer prefetch available only behind `PCKETLM_ENABLE_LAYER_PREFETCH=1`; default off because the live run regressed.
+- Keep zero-copy hot tensors available only behind `PCKETLM_ENABLE_ZERO_COPY_TENSORS=1`; default off because the live run moved cost into compute/page faults instead of reducing wall-clock latency.
+
+Why:
+- The existing Qwen 14B one-token path already batches shard loads and uses request-scoped safetensor handles, so handle reuse was not the missing 4-5s lever.
+- Zero-copy reduced reported warm tensor-load time to `0.9611s`, but total stayed around `19s/token`; the cost moved into `mlp`, `qkv_projection`, and `o_projection`.
+- Prefetch warm runs regressed to `21.295s` and `24.999s`, with `13.8-16.0s` in `prefetch_wait` and free RAM falling near `1.9 GB`.
+- The direct paged runtime bottleneck is now architectural: full dense 14B CPU Torch execution streams too much weight data per token. The viable next speed work is quantized direct execution, a native fused backend, GPU execution, or a redesigned packed execution path.

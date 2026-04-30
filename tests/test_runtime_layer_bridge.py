@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,7 @@ from pcketlm.core.runtime.layer_bridge import (
 )
 from pcketlm.core.runtime.tokenizer_runtime import prepare_prompt_text
 from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_plan
+from pcketlm.core.runtime import layer_bridge as layer_bridge_module
 
 
 class _PromptBudgetConfig:
@@ -66,6 +68,73 @@ def test_scoped_safetensor_handles_default_off_for_qwen_32b(monkeypatch) -> None
 
     monkeypatch.setenv("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", "1")
     assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 1) is True
+
+
+def test_layer_prefetch_starts_next_load_before_current_compute_finishes(monkeypatch) -> None:
+    events: list[tuple[str, int, float]] = []
+
+    monkeypatch.delenv("PCKETLM_DISABLE_LAYER_PREFETCH", raising=False)
+    monkeypatch.setenv("PCKETLM_ENABLE_LAYER_PREFETCH", "1")
+    monkeypatch.setattr(
+        layer_bridge_module,
+        "load_layer_bridge_config",
+        lambda _model_id: SimpleNamespace(ready=True, blockers=[], num_hidden_layers=2),
+    )
+    monkeypatch.setattr(
+        layer_bridge_module.TensorResidencyPolicy,
+        "from_environment",
+        classmethod(lambda cls, _model_id=None: cls(enabled=False)),
+    )
+
+    def fake_load_resident_tensors(model_id, tensor_names, **_kwargs):
+        del model_id
+        layer_index = 1 if any(".1." in name for name in tensor_names) else 0
+        events.append(("load-start", layer_index, time.perf_counter()))
+        time.sleep(0.02)
+        events.append(("load-end", layer_index, time.perf_counter()))
+        return {
+            name: SimpleNamespace(ready=True, tensor=torch.zeros((1,), dtype=torch.bfloat16), blockers=[])
+            for name in tensor_names
+        }
+
+    def fake_run_minimal_layer_forward_bridge(*_args, layer_index: int, prefetched_tensors=None, **_kwargs):
+        events.append(("compute-start", layer_index, time.perf_counter()))
+        if layer_index == 1:
+            assert prefetched_tensors
+        time.sleep(0.05)
+        events.append(("compute-end", layer_index, time.perf_counter()))
+        return LayerBridgeResult(
+            model_id="qwen-test",
+            layer_index=layer_index,
+            input_mode="provided",
+            input_shape=[1, 1, 1],
+            output_shape=[1, 1, 1],
+            output_dtype="torch.bfloat16",
+            cache_sequence_length=1,
+            ready=True,
+            output_tensor=torch.zeros((1, 1, 1), dtype=torch.bfloat16),
+        )
+
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+    monkeypatch.setattr(
+        layer_bridge_module,
+        "run_minimal_layer_forward_bridge",
+        fake_run_minimal_layer_forward_bridge,
+    )
+
+    result = layer_bridge_module.run_layer_bridge_stack(
+        "qwen-test",
+        start_layer=0,
+        layer_count=2,
+        input_hidden=torch.zeros((1, 1, 1), dtype=torch.bfloat16),
+        collect_step_summaries=False,
+        collect_metrics=False,
+    )
+
+    assert result.ready is True
+    load_start = next(ts for event, layer, ts in events if event == "load-start" and layer == 1)
+    compute_end = next(ts for event, layer, ts in events if event == "compute-end" and layer == 0)
+    assert load_start < compute_end
 
 
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:

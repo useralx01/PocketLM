@@ -41,6 +41,7 @@ class TensorLoadStats:
     artifact_tensor_hits: int = 0
     scoped_handle_reuses: int = 0
     persistent_handle_reuses: int = 0
+    live_handle_tensor_hits: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +56,7 @@ class TensorLoadStats:
             "artifact_tensor_hits": self.artifact_tensor_hits,
             "scoped_handle_reuses": self.scoped_handle_reuses,
             "persistent_handle_reuses": self.persistent_handle_reuses,
+            "live_handle_tensor_hits": self.live_handle_tensor_hits,
         }
 
 
@@ -81,6 +83,7 @@ def tensor_load_stats_snapshot() -> TensorLoadStats:
             artifact_tensor_hits=_load_stats.artifact_tensor_hits,
             scoped_handle_reuses=_load_stats.scoped_handle_reuses,
             persistent_handle_reuses=_load_stats.persistent_handle_reuses,
+            live_handle_tensor_hits=_load_stats.live_handle_tensor_hits,
         )
 
 
@@ -107,6 +110,7 @@ class LoadedTensorSlice:
     loaded_nbytes: int = 0
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
+    borrowed_from_live_handle: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +124,7 @@ class LoadedTensorSlice:
             "loaded_nbytes": self.loaded_nbytes,
             "blockers": list(self.blockers),
             "ready": self.ready,
+            "borrowed_from_live_handle": self.borrowed_from_live_handle,
         }
 
 
@@ -303,6 +308,7 @@ def _loaded_slice_from_entry(
     tensor: torch.Tensor | None = None,
     blockers: list[str] | None = None,
     ready: bool = True,
+    borrowed_from_live_handle: bool = False,
 ) -> LoadedTensorSlice:
     actual_blockers = [] if blockers is None else list(blockers)
     actual_shape = list(entry.shape) if tensor is None else [int(value) for value in tensor.shape]
@@ -324,11 +330,18 @@ def _loaded_slice_from_entry(
         loaded_nbytes=loaded_nbytes,
         blockers=actual_blockers,
         ready=ready and not actual_blockers and tensor is not None,
+        borrowed_from_live_handle=borrowed_from_live_handle,
     )
 
 
 def _handle_cache_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_PERSISTENT_HANDLES", "0").strip().lower() in {"1", "true", "yes"}:
+        return False
     return os.environ.get("PCKETLM_SAFETENSOR_HANDLE_CACHE", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _packed_layer_reads_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_PACKED_LAYER_READS", "0").strip().lower() not in {"1", "true", "yes"}
 
 
 def _path_mtime_ns(path: Path) -> int:
@@ -374,6 +387,8 @@ def scoped_tensor_handle_cache():
 
 
 def _open_scoped_shard_handle(path: Path, *, open_counter: str = "shard_opens"):
+    if os.environ.get("PCKETLM_DISABLE_PERSISTENT_HANDLES", "0").strip().lower() in {"1", "true", "yes"}:
+        return None
     handles = getattr(_scoped_handles, "handles", None)
     if handles is None:
         return None
@@ -437,16 +452,24 @@ def load_tensor_by_name(model_id: str, tensor_name: str) -> LoadedTensorSlice:
             artifact_handle = _open_scoped_shard_handle(artifact_pack_path, open_counter="artifact_pack_opens")
             if artifact_handle is not None:
                 tensor = artifact_handle.get_tensor(entry.tensor_name)
+                borrowed_from_live_handle = True
+                _update_load_stats(live_handle_tensor_hits=1)
             else:
+                borrowed_from_live_handle = False
                 _update_load_stats(artifact_pack_opens=1)
                 with safe_open(artifact_pack_path, framework="pt", device="cpu") as handle:
                     tensor = handle.get_tensor(entry.tensor_name)
         elif scoped_handle is not None:
             tensor = scoped_handle.get_tensor(entry.tensor_name)
+            borrowed_from_live_handle = True
+            _update_load_stats(live_handle_tensor_hits=1)
         elif _handle_cache_enabled():
             handle = _open_shard_handle(entry.shard_path)
             tensor = handle.get_tensor(entry.tensor_name)
+            borrowed_from_live_handle = True
+            _update_load_stats(live_handle_tensor_hits=1)
         else:
+            borrowed_from_live_handle = False
             _update_load_stats(shard_opens=1)
             with safe_open(entry.shard_path, framework="pt", device="cpu") as handle:
                 tensor = handle.get_tensor(entry.tensor_name)
@@ -463,7 +486,7 @@ def load_tensor_by_name(model_id: str, tensor_name: str) -> LoadedTensorSlice:
             ready=False,
         )
 
-    loaded = _loaded_slice_from_entry(model_id, entry, tensor)
+    loaded = _loaded_slice_from_entry(model_id, entry, tensor, borrowed_from_live_handle=borrowed_from_live_handle)
     if loaded.ready:
         _update_load_stats(tensors_loaded=1, loaded_nbytes=loaded.loaded_nbytes)
     return loaded
@@ -516,11 +539,13 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
             _update_load_stats(artifact_tensor_hits=len(entries))
             scoped_handle = _open_scoped_shard_handle(pack_path, open_counter="artifact_pack_opens")
             if scoped_handle is not None:
+                _update_load_stats(live_handle_tensor_hits=len(entries))
                 for entry in entries:
                     results[entry.tensor_name] = _loaded_slice_from_entry(
                         model_id,
                         entry,
                         scoped_handle.get_tensor(entry.tensor_name),
+                        borrowed_from_live_handle=True,
                     )
             else:
                 _update_load_stats(artifact_pack_opens=1)
@@ -544,19 +569,23 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
         try:
             scoped_handle = _open_scoped_shard_handle(shard_path)
             if scoped_handle is not None:
+                _update_load_stats(live_handle_tensor_hits=len(entries))
                 for entry in entries:
                     results[entry.tensor_name] = _loaded_slice_from_entry(
                         model_id,
                         entry,
                         scoped_handle.get_tensor(entry.tensor_name),
+                        borrowed_from_live_handle=True,
                     )
             elif _handle_cache_enabled():
                 handle = _open_shard_handle(shard_path)
+                _update_load_stats(live_handle_tensor_hits=len(entries))
                 for entry in entries:
                     results[entry.tensor_name] = _loaded_slice_from_entry(
                         model_id,
                         entry,
                         handle.get_tensor(entry.tensor_name),
+                        borrowed_from_live_handle=True,
                     )
             else:
                 _update_load_stats(shard_opens=1)

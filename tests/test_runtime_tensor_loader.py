@@ -189,6 +189,48 @@ def test_scoped_tensor_handle_cache_reuses_handle_across_load_calls(tmp_path: Pa
     assert stats.single_load_calls == 2
     assert stats.shard_opens == 1
     assert stats.scoped_handle_reuses == 1
+    assert first.borrowed_from_live_handle is True
+    assert second.borrowed_from_live_handle is True
+
+
+def test_persistent_tensor_handle_cache_reuses_handle_across_calls(tmp_path: Path, monkeypatch) -> None:
+    reset_tensor_load_stats()
+    model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("PCKETLM_SAFETENSOR_HANDLE_CACHE", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_PERSISTENT_HANDLES", raising=False)
+    calls = {"opens": 0}
+    tensors = {
+        "model.layers.0.input_layernorm.weight": torch.ones((8,), dtype=torch.bfloat16),
+        "model.layers.0.post_attention_layernorm.weight": torch.full((8,), 2, dtype=torch.bfloat16),
+    }
+
+    class FakeHandle:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_tensor(self, tensor_name: str) -> torch.Tensor:
+            return tensors[tensor_name]
+
+    def fake_safe_open(*_args, **_kwargs):
+        calls["opens"] += 1
+        return FakeHandle()
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_loader.safe_open", fake_safe_open)
+
+    first = load_tensor_by_name(model_id, "model.layers.0.input_layernorm.weight")
+    second = load_tensor_by_name(model_id, "model.layers.0.post_attention_layernorm.weight")
+
+    assert first.ready is True
+    assert second.ready is True
+    assert calls["opens"] == 1
+    assert first.borrowed_from_live_handle is True
+    assert second.borrowed_from_live_handle is True
+    stats = tensor_load_stats_snapshot()
+    assert stats.shard_opens == 1
+    assert stats.persistent_handle_reuses == 1
 
 
 def test_load_execution_unit_reads_grouped_runtime_unit(tmp_path: Path, monkeypatch) -> None:

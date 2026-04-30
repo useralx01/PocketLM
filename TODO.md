@@ -76,6 +76,7 @@
 - Define the model registry schema
 - Define the profile schema
 - Define the benchmark schema
+- Rescope direct paged runtime speed around quantized execution, native fused CPU backend, GPU path, or a redesigned packed executor; cache/prefetch/zero-copy levers did not reach the target.
 - Implement first model file validation pass
 - Implement first registry write/read flow
 - Implement import readiness detection from real model folders
