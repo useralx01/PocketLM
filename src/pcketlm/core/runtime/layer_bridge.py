@@ -1391,6 +1391,7 @@ def run_minimal_layer_forward_bridge(
 
     batch_size, sequence_length, _hidden_size = hidden_states.shape
     head_dim = config.head_dim
+    attention_projection_size = config.num_attention_heads * head_dim
     kv_repeat = config.num_attention_heads // config.num_key_value_heads
 
     norm_tensor_names = [
@@ -1595,7 +1596,11 @@ def run_minimal_layer_forward_bridge(
     else:
         causal_mask = _causal_attention_mask(positions, key_positions, q_states.device)
     attention_context = _attention_context(q_states, k_states, v_states, causal_mask, head_dim)
-    attention_context = attention_context.transpose(1, 2).contiguous().view(batch_size, sequence_length, config.hidden_size)
+    attention_context = (
+        attention_context.transpose(1, 2)
+        .contiguous()
+        .view(batch_size, sequence_length, attention_projection_size)
+    )
     record_phase("attention", phase_started)
     del q_states, k_states, v_states, causal_mask
 

@@ -63,6 +63,14 @@ Follow-up:
 - lesson: MoE support must respect explicit config dimensions instead of deriving every attention shape from hidden size.
 
 ## Error
+- date: 2026-04-30
+- area: Phase MoE / Step 9 / Qwen3 all-layers-moe
+- what went wrong: after Q/K/V reshaping was fixed, `qwen3-30b-a3b --slice=all-layers-moe` failed at layer 0 with `RuntimeError("shape '[1, 1, 2048]' is invalid for input of size 4096")`.
+- why it happened: the attention context before `o_proj` is `num_attention_heads * head_dim`, which is 4096 for Qwen3, not `hidden_size` 2048. The bridge was reshaping the pre-output-projection attention context directly to hidden size.
+- fix: reshape attention context to `num_attention_heads * head_dim`, then let `o_proj` map it back to hidden size.
+- lesson: the bridge must distinguish attention projection width from residual hidden width.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files

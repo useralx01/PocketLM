@@ -189,7 +189,9 @@ def test_run_moe_mlp_routes_top_k_experts_with_real_math() -> None:
     assert torch.allclose(output, expected, atol=1e-6)
 
 
-def _bootstrap_layer_bridge_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
+def _bootstrap_layer_bridge_fixture(
+    tmp_path: Path, monkeypatch, *, explicit_head_dim: int | None = None
+) -> tuple[str, Path]:
     from pcketlm.core import storage
 
     monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
@@ -197,27 +199,31 @@ def _bootstrap_layer_bridge_fixture(tmp_path: Path, monkeypatch) -> tuple[str, P
     model_id = "qwen-bridge-test"
     model_dir = tmp_path / "models" / model_id / "original"
     model_dir.mkdir(parents=True)
+    attention_head_dim = explicit_head_dim or 4
+    q_projection_size = 2 * attention_head_dim
+    kv_projection_size = attention_head_dim
+    config_payload = {
+        "architectures": ["Qwen2ForCausalLM"],
+        "model_type": "qwen2",
+        "bos_token_id": 0,
+        "eos_token_id": 6,
+        "hidden_size": 8,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "intermediate_size": 12,
+        "hidden_act": "silu",
+        "rms_norm_eps": 1e-6,
+        "max_position_embeddings": 128,
+        "rope_theta": 10000.0,
+        "vocab_size": 8,
+        "torch_dtype": "bfloat16",
+    }
+    if explicit_head_dim is not None:
+        config_payload["head_dim"] = explicit_head_dim
 
     (model_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "architectures": ["Qwen2ForCausalLM"],
-                "model_type": "qwen2",
-                "bos_token_id": 0,
-                "eos_token_id": 6,
-                "hidden_size": 8,
-                "num_hidden_layers": 2,
-                "num_attention_heads": 2,
-                "num_key_value_heads": 1,
-                "intermediate_size": 12,
-                "hidden_act": "silu",
-                "rms_norm_eps": 1e-6,
-                "max_position_embeddings": 128,
-                "rope_theta": 10000.0,
-                "vocab_size": 8,
-                "torch_dtype": "bfloat16",
-            }
-        ),
+        json.dumps(config_payload),
         encoding="utf-8",
     )
     (model_dir / "generation_config.json").write_text(
@@ -260,57 +266,43 @@ def _bootstrap_layer_bridge_fixture(tmp_path: Path, monkeypatch) -> tuple[str, P
             "model.embed_tokens.weight": torch.arange(64, dtype=torch.bfloat16).reshape(8, 8),
             "model.layers.0.input_layernorm.weight": torch.ones((8,), dtype=torch.bfloat16),
             "model.layers.0.post_attention_layernorm.weight": torch.full((8,), 1.5, dtype=torch.bfloat16),
-            "model.layers.0.self_attn.q_proj.weight": torch.eye(8, dtype=torch.bfloat16),
-            "model.layers.0.self_attn.q_proj.bias": torch.zeros((8,), dtype=torch.bfloat16),
-            "model.layers.0.self_attn.k_proj.weight": torch.tensor(
-                [
-                    [1, 0, 0, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 0, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 0],
-                ],
-                dtype=torch.bfloat16,
+            "model.layers.0.self_attn.q_proj.weight": torch.eye(
+                q_projection_size, 8, dtype=torch.bfloat16
             ),
-            "model.layers.0.self_attn.k_proj.bias": torch.zeros((4,), dtype=torch.bfloat16),
-            "model.layers.0.self_attn.v_proj.weight": torch.tensor(
-                [
-                    [1, 0, 0, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 0, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 0],
-                ],
-                dtype=torch.bfloat16,
+            "model.layers.0.self_attn.q_proj.bias": torch.zeros((q_projection_size,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.k_proj.weight": torch.eye(
+                kv_projection_size, 8, dtype=torch.bfloat16
             ),
-            "model.layers.0.self_attn.v_proj.bias": torch.zeros((4,), dtype=torch.bfloat16),
-            "model.layers.0.self_attn.o_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.0.self_attn.k_proj.bias": torch.zeros((kv_projection_size,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.v_proj.weight": torch.eye(
+                kv_projection_size, 8, dtype=torch.bfloat16
+            ),
+            "model.layers.0.self_attn.v_proj.bias": torch.zeros((kv_projection_size,), dtype=torch.bfloat16),
+            "model.layers.0.self_attn.o_proj.weight": torch.eye(8, q_projection_size, dtype=torch.bfloat16),
             "model.layers.0.mlp.gate_proj.weight": torch.ones((12, 8), dtype=torch.bfloat16),
             "model.layers.0.mlp.up_proj.weight": torch.full((12, 8), 0.5, dtype=torch.bfloat16),
             "model.layers.0.mlp.down_proj.weight": torch.full((8, 12), 0.25, dtype=torch.bfloat16),
             "model.layers.1.input_layernorm.weight": torch.full((8,), 0.75, dtype=torch.bfloat16),
             "model.layers.1.post_attention_layernorm.weight": torch.full((8,), 1.25, dtype=torch.bfloat16),
-            "model.layers.1.self_attn.q_proj.weight": torch.eye(8, dtype=torch.bfloat16),
-            "model.layers.1.self_attn.q_proj.bias": torch.full((8,), 0.1, dtype=torch.bfloat16),
-            "model.layers.1.self_attn.k_proj.weight": torch.tensor(
-                [
-                    [1, 0, 0, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 0, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 0],
-                ],
-                dtype=torch.bfloat16,
+            "model.layers.1.self_attn.q_proj.weight": torch.eye(
+                q_projection_size, 8, dtype=torch.bfloat16
             ),
-            "model.layers.1.self_attn.k_proj.bias": torch.full((4,), 0.05, dtype=torch.bfloat16),
-            "model.layers.1.self_attn.v_proj.weight": torch.tensor(
-                [
-                    [1, 0, 0, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 0, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 0],
-                ],
-                dtype=torch.bfloat16,
+            "model.layers.1.self_attn.q_proj.bias": torch.full(
+                (q_projection_size,), 0.1, dtype=torch.bfloat16
             ),
-            "model.layers.1.self_attn.v_proj.bias": torch.full((4,), -0.05, dtype=torch.bfloat16),
-            "model.layers.1.self_attn.o_proj.weight": torch.eye(8, dtype=torch.bfloat16),
+            "model.layers.1.self_attn.k_proj.weight": torch.eye(
+                kv_projection_size, 8, dtype=torch.bfloat16
+            ),
+            "model.layers.1.self_attn.k_proj.bias": torch.full(
+                (kv_projection_size,), 0.05, dtype=torch.bfloat16
+            ),
+            "model.layers.1.self_attn.v_proj.weight": torch.eye(
+                kv_projection_size, 8, dtype=torch.bfloat16
+            ),
+            "model.layers.1.self_attn.v_proj.bias": torch.full(
+                (kv_projection_size,), -0.05, dtype=torch.bfloat16
+            ),
+            "model.layers.1.self_attn.o_proj.weight": torch.eye(8, q_projection_size, dtype=torch.bfloat16),
             "model.layers.1.mlp.gate_proj.weight": torch.full((12, 8), 0.8, dtype=torch.bfloat16),
             "model.layers.1.mlp.up_proj.weight": torch.full((12, 8), 0.3, dtype=torch.bfloat16),
             "model.layers.1.mlp.down_proj.weight": torch.full((8, 12), 0.2, dtype=torch.bfloat16),
@@ -377,6 +369,24 @@ def test_load_layer_bridge_config_reads_required_qwen_values(tmp_path: Path, mon
     assert config.eos_token_ids == [6, 0]
     assert config.bos_token_id == 0
     assert config.pad_token_id == 0
+
+
+def test_run_minimal_layer_forward_bridge_uses_configured_attention_head_dim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(
+        tmp_path, monkeypatch, explicit_head_dim=6
+    )
+
+    config = load_layer_bridge_config(model_id)
+    result = run_minimal_layer_forward_bridge(model_id)
+
+    assert config.head_dim == 6
+    assert result.ready is True
+    assert result.output_shape == [1, 1, 8]
+    assert result.attention_head_dim == 6
+    assert result.output_tensor is not None
+    assert torch.isfinite(result.output_tensor).all()
 
 
 def test_run_minimal_layer_forward_bridge_executes_real_layer_slice(tmp_path: Path, monkeypatch) -> None:
