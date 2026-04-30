@@ -36,8 +36,10 @@ from pcketlm.core.runtime import (
     runtime_math_dtype_name,
     runtime_torch_thread_count,
     select_runtime_engine,
+    start_warm_runner,
     start_gguf_server,
     stop_gguf_server,
+    stop_warm_runner,
     warm_runner_status,
 )
 from pcketlm.core.runtime.tensor_loader import runtime_pack_selection_snapshot, tensor_load_stats_snapshot
@@ -209,6 +211,23 @@ def _update_runtime_settings(payload: dict) -> dict:
     _clear_session_prefix_cache()
     _clear_chat_response_cache()
     return {"runtime_settings": _runtime_settings_payload()}
+
+
+def _warm_runner_control_payload(payload: dict) -> dict:
+    model_id = str(payload.get("model_id") or "qwen2.5-14b-instruct")
+    action = str(payload.get("action") or "status").strip().lower()
+    if action == "start":
+        status = start_warm_runner(model_id, mode="Agent")
+    elif action in {"stop", "unload"}:
+        status = stop_warm_runner(model_id)
+        _clear_session_prefix_cache()
+        _clear_chat_response_cache()
+    else:
+        status = warm_runner_status(model_id)
+    return {
+        "warm_runner": status,
+        "runtime_settings": _runtime_settings_payload(),
+    }
 
 
 def _chat_layer_count(mode: str) -> int | None:
@@ -1498,6 +1517,9 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/api/settings/runtime":
                 self._handle_runtime_settings(payload)
                 return
+            if self.path == "/api/warm-runner":
+                self._handle_warm_runner(payload)
+                return
             if self.path == "/api/gguf/server":
                 self._handle_gguf_server(payload)
                 return
@@ -1542,6 +1564,9 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_runtime_settings(self, payload: dict) -> None:
         _json_response(self, 200, _update_runtime_settings(payload))
+
+    def _handle_warm_runner(self, payload: dict) -> None:
+        _json_response(self, 200, _warm_runner_control_payload(payload))
 
     def _handle_gguf_server(self, payload: dict) -> None:
         model_id = str(payload.get("model_id") or "qwen2.5-14b-instruct")

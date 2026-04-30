@@ -433,3 +433,4 @@
 - Added an opt-in warm Agent runner with lifecycle state, memory telemetry, CLI controls, and web Settings integration. Live 14B proof generated `Hello!` twice: first in `40.274s` with `1003 MB` working set after completion, second in `39.177s` with `1009 MB` working set after completion.
 - Fixed the opt-in web Agent warm path so prepared Qwen chat prompts are not double-wrapped. Live two-turn proof reused `64` prompt tokens, batch-appended `14`, and returned `Ok<|im_end|>` in `47.06s` with `1069 MB` process working set.
 - Surfaced warm Agent runner state through `/api/status` and the Settings runtime grid, including state, request count, last latency, prefix readiness, and process working set.
+- Added `/api/warm-runner` plus Settings Start/Stop controls so the warm Agent runner can be loaded or freed without using the CLI.

@@ -28,6 +28,7 @@ from pcketlm.app.web.main import (
     _runtime_identity_system_prompt,
     _start_chat_job,
     _update_runtime_settings,
+    _warm_runner_control_payload,
 )
 
 
@@ -1184,6 +1185,32 @@ def test_update_runtime_settings_selects_boosted_cache(monkeypatch, tmp_path) ->
     assert payload["runtime_settings"]["agent_warm_runner"] == "safe"
     assert payload["runtime_settings"]["tensor_residency_policy"]["tensor_cache_preset"] == "boosted"
     assert (tmp_path / "runtime-settings.json").exists()
+
+
+def test_warm_runner_control_start_and_stop(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    calls = {"prefix_cleared": 0, "response_cleared": 0}
+    monkeypatch.setattr(web.main, "start_warm_runner", lambda model_id, mode: {"model_id": model_id, "state": "ready"})
+    monkeypatch.setattr(web.main, "stop_warm_runner", lambda model_id: {"model_id": model_id, "state": "stopped"})
+    monkeypatch.setattr(web.main, "_runtime_settings_payload", lambda: {"agent_warm_runner": "safe"})
+    monkeypatch.setattr(
+        web.main,
+        "_clear_session_prefix_cache",
+        lambda: calls.__setitem__("prefix_cleared", calls["prefix_cleared"] + 1),
+    )
+    monkeypatch.setattr(
+        web.main,
+        "_clear_chat_response_cache",
+        lambda: calls.__setitem__("response_cleared", calls["response_cleared"] + 1),
+    )
+
+    started = _warm_runner_control_payload({"model_id": "qwen-test", "action": "start"})
+    stopped = _warm_runner_control_payload({"model_id": "qwen-test", "action": "stop"})
+
+    assert started["warm_runner"]["state"] == "ready"
+    assert stopped["warm_runner"]["state"] == "stopped"
+    assert calls == {"prefix_cleared": 1, "response_cleared": 1}
 
 
 def test_agent_mode_can_use_opt_in_warm_runner(monkeypatch) -> None:

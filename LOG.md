@@ -1559,6 +1559,47 @@ py -3.14 -m compileall -q src tests
 exit=0
 ```
 
+## Phase 3B / Warm Agent controls
+
+Change:
+
+```text
+Added /api/warm-runner with start, stop, and status actions.
+Settings now has Start Agent runner and Stop buttons.
+Stopping the runner clears session-prefix and exact-response caches.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py tests/test_warm_runner.py -v
+45 passed in 8.55s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+py -3.14 -m compileall -q src\pcketlm\app\web\main.py tests\test_web_main.py
+exit=0
+```
+
+Live control smoke:
+
+```text
+py -3.14 -c "from pcketlm.app.web.main import _warm_runner_control_payload; print(_warm_runner_control_payload({'action':'start','model_id':'qwen2.5-14b-instruct'})['warm_runner']['state']); print(_warm_runner_control_payload({'action':'stop','model_id':'qwen2.5-14b-instruct'})['warm_runner']['state'])"
+ready
+stopped
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+196 passed in 21.40s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
+
 ## Phase 3B / Warm Agent status surface
 
 Change:

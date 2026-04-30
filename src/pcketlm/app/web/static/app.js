@@ -692,6 +692,28 @@ async function updateRuntimePreset(event) {
   }
 }
 
+async function controlWarmRunner(action) {
+  const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
+  const startButton = $("#warm-runner-start");
+  const stopButton = $("#warm-runner-stop");
+  if (startButton) startButton.disabled = true;
+  if (stopButton) stopButton.disabled = true;
+  const status = $("#agent-warm-runner-status");
+  if (status) status.textContent = action === "start" ? "Starting Agent runner..." : "Stopping Agent runner...";
+  try {
+    await api("/api/warm-runner", {
+      method: "POST",
+      body: JSON.stringify({ action, model_id: modelId }),
+    });
+    renderStatus(await api("/api/status"));
+  } catch (error) {
+    if (status) status.textContent = `Agent runner action failed: ${error.message}`;
+  } finally {
+    if (startButton) startButton.disabled = false;
+    if (stopButton) stopButton.disabled = false;
+  }
+}
+
 async function controlGgufServer(action) {
   const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
   const startButton = $("#gguf-start-button");
@@ -725,6 +747,8 @@ async function boot() {
   $("#run-gguf-benchmark").addEventListener("click", runGgufBenchmark);
   $("#tensor-cache-preset").addEventListener("change", updateRuntimePreset);
   $("#agent-warm-runner").addEventListener("change", updateRuntimePreset);
+  $("#warm-runner-start").addEventListener("click", () => controlWarmRunner("start"));
+  $("#warm-runner-stop").addEventListener("click", () => controlWarmRunner("stop"));
   $("#profile-select").addEventListener("change", (event) => {
     state.activeProfileId = event.target.value;
     const profile = (state.status?.profiles || []).find((item) => item.profile_id === state.activeProfileId);

@@ -89,6 +89,7 @@ p { margin: 0; }
 .control-row { display: grid; grid-template-columns: 140px 1fr; gap: 14px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .control-row input { accent-color: var(--accent); }
 .control-row select { color: var(--text); background: #18181b; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .benchmark-table { display: grid; gap: 10px; margin-top: 14px; }
 .section-subhead { margin-top: 18px; }
 .benchmark-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: rgba(255,255,255,.03); font-size: 13px; }

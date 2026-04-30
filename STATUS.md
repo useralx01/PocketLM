@@ -477,3 +477,8 @@ Latest warm Agent visibility update:
 - `/api/status` now exposes the warm runner, and Settings shows Agent runner state, request count, last run, prefix readiness, and working set
 - live status smoke returned `warm_state=ready`, `requests=2`, and `agent_setting=safe`
 - current Phase 3 estimate: about `64%` complete. The Agent path is now easier to inspect during real local use.
+
+Latest warm Agent control update:
+- added `/api/warm-runner` and Settings controls to start or stop the Agent runner
+- live control smoke returned `ready` on start and `stopped` on stop
+- current Phase 3 estimate: about `66%` complete. The warm Agent path is now inspectable and controllable, not just hidden runtime state.
