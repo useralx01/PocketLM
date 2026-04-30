@@ -462,3 +462,8 @@ Latest warm-cache rejection:
 - persistent safetensor handle caching was tested on repeated 14B Agent calls and rejected as a default
 - it reduced shard opens but the second Agent call failed, so the next speed path should be a controlled warm runner or backend change
 - current Phase 3 estimate: about `50%` complete. We now know what not to promote, which matters because this path can otherwise look tempting from one metric alone.
+
+Latest warm-runner update:
+- added an opt-in warm Agent runner with process-local lifecycle state, memory telemetry, CLI controls, and a web Settings switch
+- live 14B proof generated `Hello!` twice: `40.274s` first call, `39.177s` second call, ending around `1009 MB` process working set
+- current Phase 3 estimate: about `58%` complete. The product path for repeated Agent work exists, but the real speed bottleneck is still repeated tensor/layer work rather than runner lifecycle.

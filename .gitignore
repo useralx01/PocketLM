@@ -25,3 +25,4 @@ state/gguf-smoke-*.txt
 state/runtime-settings.json
 state/llama-server.json
 state/downloads/
+state/warm-runner/

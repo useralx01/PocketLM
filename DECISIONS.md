@@ -307,3 +307,17 @@ Why:
 - A live 14B Agent two-call test reused persistent handles (`284` persistent handle reuses), but the second Agent call returned `ready=False`.
 - The cache reduced shard opens, but did not produce a stable repeated-Agent path.
 - The next speed design should be a controlled warm runner or backend change, not a hidden global handle-cache default.
+
+## Phase 3B / Warm Agent runner
+
+Decision:
+- Add an opt-in in-process warm runner for Agent mode.
+- Keep it off by default in the web app with `off`, `safe`, and `experimental` settings.
+- Force `PCKETLM_SAFETENSOR_HANDLE_CACHE=0` inside warm-runner requests so the rejected persistent handle path cannot come back through this feature.
+- Cap warm Agent work to `2` tokens for now.
+
+Why:
+- The live two-call proof was stable and produced `Hello!` twice, but speed only improved from `40.274s` to `39.177s`.
+- Tensor loading still dominated both runs: `33.503s` on the first call and `32.875s` on the second.
+- This is useful product plumbing for future agents because it gives Pocket LLM a clear runner lifecycle, state file, telemetry, Load/Run/Stop CLI, and a web setting.
+- It is not yet the final speed breakthrough; that still needs deeper execution reuse or a different backend.

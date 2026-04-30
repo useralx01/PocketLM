@@ -27,7 +27,7 @@
 - Run a fresh measured benchmark before the next high phase so the new timing-summary fields become the baseline for stack/load/tail comparisons
 - Next high-speed phase: reduce Quality full-stack time enough that 8-token open-ended model answers do not take several minutes
 - Phase 3 next speed target: reduce repeated continuation tensor loading, which currently costs about `131s` on 14B and `302s` on 32B for 8-token direct replies
-- Prove whether a process-level warm runner can keep tensor handles and resident cache alive safely between Agent calls without reviving the 32B scoped-handle crash
+- Use the opt-in warm Agent runner as the next test harness for deeper execution reuse; the runner lifecycle is stable, but repeated tensor/layer work still dominates speed
 - Investigate the full-stack bottleneck shown by live smokes: deterministic identity is now local/instant, but real Qwen logic still spends about `16.4s` to `17.3s` in tensor loading for a 1-token run
 - Keep request-scoped safetensors handle reuse automatic only for one-token Quick runs; forcing it through multi-token decode is still unsafe and should stay opt-in until redesigned
 - Free enough system RAM before the next real speed benchmark; below `4 GB`, Pocket LLM now blocks generation to avoid crashing or entering severe memory pressure

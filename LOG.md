@@ -1839,3 +1839,80 @@ Verdict:
 ```text
 Rejected as a default. Persistent handle reuse reduced shard opens, but the two-call Agent path was not stable enough to promote.
 ```
+
+## Phase 3B / Conservative warm Agent runner
+
+Self-prompt:
+
+```text
+Build a controlled warm runner for short Agent work, keep it opt-in, avoid persistent safetensor handle caching, surface state in the web app, and prove it with a real Qwen 14B two-call run.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_warm_runner.py tests/test_web_main.py -v
+43 passed in 7.68s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+py -3.14 -m compileall -q src\pcketlm\core\runtime\warm_runner.py src\pcketlm\app\chat_shell\warm_runner_cli.py src\pcketlm\app\web\main.py
+exit=0
+```
+
+Live 14B warm proof:
+
+```text
+py -3.14 -m pcketlm.app.chat_shell.warm_runner_cli sequence --model qwen2.5-14b-instruct --prompt "hello world" --second-prompt "hello world" --max-new-tokens 2
+
+start:
+free_ram_mb=5350
+process_working_set_mb=203
+
+first:
+ready=true
+generated_text=Hello!
+generated_token_ids=[9707, 0]
+elapsed_seconds=40.274
+free_ram_before_mb=5350
+free_ram_after_mb=5315
+process_working_set_before_mb=203
+process_working_set_after_mb=1003
+tensor_load_seconds=33.503
+tensor_load_share=0.83
+bottleneck=layer stack
+reusable_token_count=32
+
+second:
+ready=true
+generated_text=Hello!
+generated_token_ids=[9707, 0]
+elapsed_seconds=39.177
+free_ram_before_mb=5315
+free_ram_after_mb=5541
+process_working_set_before_mb=1003
+process_working_set_after_mb=1009
+tensor_load_seconds=32.875
+tensor_load_share=0.84
+bottleneck=layer stack
+prefix_reuse.enabled=true
+prefix_reuse.used=false
+prefix_reuse.summary=Supplied prefix did not safely match this prompt; full prefill was used.
+```
+
+Verdict:
+
+```text
+Promoted as an opt-in lifecycle/product path, not as a speed win. The runner keeps Agent state and telemetry alive safely, but the measured bottleneck remains repeated tensor/layer work.
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+194 passed in 19.97s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```

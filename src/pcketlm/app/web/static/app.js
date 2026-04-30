@@ -120,9 +120,8 @@ function renderProfileSelect(profiles) {
 
 function renderRuntimePresetControls(payload) {
   const select = $("#tensor-cache-preset");
-  if (!select) return;
   const policy = payload.runtime_settings?.tensor_residency_policy || {};
-  select.value = policy.tensor_cache_preset || "standard";
+  if (select) select.value = policy.tensor_cache_preset || "standard";
   const status = $("#tensor-cache-preset-status");
   if (status) {
     status.textContent = policy.memory_guard_active
@@ -130,6 +129,17 @@ function renderRuntimePresetControls(payload) {
       : policy.adaptive_boost_active
         ? "Boosted cache active"
         : "Standard cache active";
+  }
+  const warmSelect = $("#agent-warm-runner");
+  const warmMode = payload.runtime_settings?.agent_warm_runner
+    || payload.runtime_settings?.saved_runtime_settings?.agent_warm_runner
+    || "off";
+  if (warmSelect) warmSelect.value = warmMode;
+  const warmStatus = $("#agent-warm-runner-status");
+  if (warmStatus) {
+    warmStatus.textContent = warmMode === "off"
+      ? "Agent warm runner off"
+      : `Agent warm runner ${warmMode}`;
   }
 }
 
@@ -653,17 +663,22 @@ async function runGgufBenchmark() {
 }
 
 async function updateRuntimePreset(event) {
-  const preset = event.target.value || "standard";
+  const preset = $("#tensor-cache-preset")?.value || "standard";
+  const warmRunner = $("#agent-warm-runner")?.value || "off";
   event.target.disabled = true;
-  $("#tensor-cache-preset-status").textContent = "Saving...";
+  const cacheStatus = $("#tensor-cache-preset-status");
+  const warmStatus = $("#agent-warm-runner-status");
+  if (cacheStatus) cacheStatus.textContent = "Saving...";
+  if (warmStatus) warmStatus.textContent = "Saving...";
   try {
     await api("/api/settings/runtime", {
       method: "POST",
-      body: JSON.stringify({ tensor_cache_preset: preset }),
+      body: JSON.stringify({ tensor_cache_preset: preset, agent_warm_runner: warmRunner }),
     });
     renderStatus(await api("/api/status"));
   } catch (error) {
-    $("#tensor-cache-preset-status").textContent = `Save failed: ${error.message}`;
+    if (cacheStatus) cacheStatus.textContent = `Save failed: ${error.message}`;
+    if (warmStatus) warmStatus.textContent = `Save failed: ${error.message}`;
   } finally {
     event.target.disabled = false;
   }
@@ -701,6 +716,7 @@ async function boot() {
   $("#run-benchmark").addEventListener("click", runBenchmark);
   $("#run-gguf-benchmark").addEventListener("click", runGgufBenchmark);
   $("#tensor-cache-preset").addEventListener("change", updateRuntimePreset);
+  $("#agent-warm-runner").addEventListener("change", updateRuntimePreset);
   $("#profile-select").addEventListener("change", (event) => {
     state.activeProfileId = event.target.value;
     const profile = (state.status?.profiles || []).find((item) => item.profile_id === state.activeProfileId);

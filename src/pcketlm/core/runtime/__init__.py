@@ -95,6 +95,15 @@ from pcketlm.core.runtime.strategy import RuntimeStrategyOption, RuntimeStrategy
 from pcketlm.core.runtime.streaming import StreamingPlan, plan_staged_disk_streaming
 from pcketlm.core.runtime.streaming_state import StreamingBootstrapResult, bootstrap_streaming_state, write_streaming_manifest
 from pcketlm.core.runtime.source import RuntimeSourceDescriptor, describe_runtime_source
+from pcketlm.core.runtime.warm_runner import (
+    WarmRunner,
+    WarmRunnerRequestResult,
+    run_warm_agent_prompt,
+    start_warm_runner,
+    stop_warm_runner,
+    warm_runner_memory_snapshot,
+    warm_runner_status,
+)
 
 __all__ = [
     "RuntimeBootstrapResult",
@@ -143,6 +152,8 @@ __all__ = [
     "TokenEntryBridgeResult",
     "WindowSchedule",
     "RuntimeSourceDescriptor",
+    "WarmRunner",
+    "WarmRunnerRequestResult",
     "StreamingPlan",
     "attempt_real_model_load",
     "advance_streaming_runtime",
@@ -160,6 +171,7 @@ __all__ = [
     "initialize_kv_decode_state",
     "run_decode_benchmark",
     "run_prompt_decode_loop",
+    "run_warm_agent_prompt",
     "runtime_math_dtype_name",
     "runtime_torch_thread_count",
     "build_runtime_backend_report",
@@ -169,6 +181,10 @@ __all__ = [
     "run_gguf_prompt",
     "start_gguf_server",
     "stop_gguf_server",
+    "start_warm_runner",
+    "stop_warm_runner",
+    "warm_runner_memory_snapshot",
+    "warm_runner_status",
     "select_runtime_engine",
     "run_decode_tail",
     "run_kv_decode_loop",

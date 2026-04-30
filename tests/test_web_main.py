@@ -1157,12 +1157,76 @@ def test_update_runtime_settings_selects_boosted_cache(monkeypatch, tmp_path) ->
     monkeypatch.setattr(web.main, "tensor_load_stats_snapshot", lambda: SimpleNamespace(to_dict=lambda: {}))
     monkeypatch.setenv("PCKETLM_TENSOR_CACHE_PRESET", "standard")
 
-    payload = _update_runtime_settings({"tensor_cache_preset": "boosted"})
+    payload = _update_runtime_settings({"tensor_cache_preset": "boosted", "agent_warm_runner": "safe"})
 
     assert calls == {"resident_cleared": 1, "response_cleared": 1, "prefix_cleared": 1}
     assert payload["runtime_settings"]["saved_runtime_settings"]["tensor_cache_preset"] == "boosted"
+    assert payload["runtime_settings"]["saved_runtime_settings"]["agent_warm_runner"] == "safe"
+    assert payload["runtime_settings"]["agent_warm_runner"] == "safe"
     assert payload["runtime_settings"]["tensor_residency_policy"]["tensor_cache_preset"] == "boosted"
     assert (tmp_path / "runtime-settings.json").exists()
+
+
+def test_agent_mode_can_use_opt_in_warm_runner(monkeypatch) -> None:
+    captured = {}
+
+    monkeypatch.setattr(web_main, "_local_runtime_context_answer", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_main, "_memory_guard_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        web_main,
+        "_load_saved_runtime_settings",
+        lambda: {"tensor_cache_preset": "standard", "agent_warm_runner": "safe"},
+    )
+    monkeypatch.setattr(web_main, "_apply_runtime_settings", lambda settings: None)
+    monkeypatch.setattr(web_main, "_runtime_settings_payload", lambda: {"agent_warm_runner": "safe"})
+    monkeypatch.setattr(web_main, "_speed_status_payload", lambda model_id: {"status": "Stable"})
+    monkeypatch.setattr(web_main, "_runtime_context_payload", lambda model_id, mode, profile: {"mode": mode})
+    monkeypatch.setattr(web_main, "_direct_model_guardrails", lambda model_id, max_new_tokens: {"blockers": []})
+
+    def fake_warm_runner(model_id, prompt, *, mode, session_id, max_new_tokens):
+        captured.update(
+            {
+                "model_id": model_id,
+                "prompt": prompt,
+                "mode": mode,
+                "session_id": session_id,
+                "max_new_tokens": max_new_tokens,
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            generated_token_ids=[111, 222],
+            steps_completed=2,
+            max_new_tokens=max_new_tokens,
+            blockers=[],
+            performance_summary={"bottleneck": "tensor loading"},
+            prefix_reuse={"enabled": True, "used": True, "reason": "warm-runner-state"},
+            runner_status={"state": "ready", "reusable_token_count": 6},
+        )
+
+    monkeypatch.setattr(web_main, "run_warm_agent_prompt", fake_warm_runner)
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-14b-instruct",
+            "mode": "Agent",
+            "prompt": "reply ok only",
+            "max_new_tokens": 16,
+            "session_id": "warm-agent-test",
+            "messages": [{"role": "user", "text": "hello"}],
+        }
+    )
+
+    assert captured["model_id"] == "qwen2.5-14b-instruct"
+    assert captured["mode"] == "Agent"
+    assert captured["session_id"] == "warm-agent-test"
+    assert captured["max_new_tokens"] == 2
+    assert "reply ok only" in captured["prompt"]
+    assert payload["strategy"] == "warm-agent-runner"
+    assert payload["generated_text"] == "OK"
+    assert payload["warm_runner"]["state"] == "ready"
+    assert payload["prefix_reuse"]["used"] is True
 
 
 def test_chat_job_cancel_marks_queued_job_canceled() -> None:

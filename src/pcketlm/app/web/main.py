@@ -32,6 +32,7 @@ from pcketlm.core.runtime import (
     load_layer_bridge_config,
     run_gguf_prompt,
     run_prompt_decode_loop,
+    run_warm_agent_prompt,
     runtime_math_dtype_name,
     runtime_torch_thread_count,
     select_runtime_engine,
@@ -65,6 +66,7 @@ QWEN_32B_RECOMMENDED_FREE_MEMORY_MB = 5 * 1024
 AGENT_MODE_MAX_NEW_TOKENS = 2
 RUNTIME_SETTINGS_FILE_NAME = "runtime-settings.json"
 VALID_TENSOR_CACHE_PRESETS = {"standard", "boosted"}
+VALID_AGENT_WARM_RUNNER_MODES = {"off", "safe", "experimental"}
 DOWNLOAD_STATUS_DIR_NAME = "downloads"
 
 DIRECT_RUNTIME_BASELINES = {
@@ -159,14 +161,23 @@ def _normalize_tensor_cache_preset(value: object) -> str:
     return "boosted" if preset in {"boost", "boosted", "high-ram", "high_ram"} else "standard"
 
 
+def _normalize_agent_warm_runner_mode(value: object) -> str:
+    mode = str(value or "off").strip().lower()
+    return mode if mode in VALID_AGENT_WARM_RUNNER_MODES else "off"
+
+
 def _load_saved_runtime_settings() -> dict:
     path = _runtime_settings_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        data = {"tensor_cache_preset": os.environ.get("PCKETLM_TENSOR_CACHE_PRESET", "standard")}
+        data = {
+            "tensor_cache_preset": os.environ.get("PCKETLM_TENSOR_CACHE_PRESET", "standard"),
+            "agent_warm_runner": "off",
+        }
     return {
         "tensor_cache_preset": _normalize_tensor_cache_preset(data.get("tensor_cache_preset")),
+        "agent_warm_runner": _normalize_agent_warm_runner_mode(data.get("agent_warm_runner")),
     }
 
 
@@ -189,6 +200,7 @@ def _apply_saved_runtime_settings() -> dict:
 def _update_runtime_settings(payload: dict) -> dict:
     settings = {
         "tensor_cache_preset": _normalize_tensor_cache_preset(payload.get("tensor_cache_preset")),
+        "agent_warm_runner": _normalize_agent_warm_runner_mode(payload.get("agent_warm_runner")),
     }
     _save_runtime_settings(settings)
     _apply_runtime_settings(settings)
@@ -941,6 +953,17 @@ def _is_gguf_mode(mode: str) -> bool:
     return mode.strip().lower().startswith("gguf")
 
 
+def _is_agent_mode(mode: str) -> bool:
+    return mode.strip().lower().startswith("agent")
+
+
+def _agent_warm_runner_enabled(mode: str) -> bool:
+    if not _is_agent_mode(mode):
+        return False
+    settings = _apply_saved_runtime_settings()
+    return _normalize_agent_warm_runner_mode(settings.get("agent_warm_runner")) in {"safe", "experimental"}
+
+
 def _chat_cache_key_for_runtime_defaults(
     payload: dict,
     *,
@@ -1118,6 +1141,52 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
         system_prompt=system_prompt,
     )
     layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
+    if _agent_warm_runner_enabled(mode):
+        started = time.perf_counter()
+        warm_result = run_warm_agent_prompt(
+            model_id,
+            effective_prompt,
+            mode=mode,
+            session_id=session_id,
+            max_new_tokens=max_new_tokens,
+        )
+        elapsed_seconds = round(time.perf_counter() - started, 2)
+        response = {
+            "ready": bool(warm_result.ready),
+            "generated_text": warm_result.generated_text,
+            "full_text": f"{prompt}\n{warm_result.generated_text}",
+            "generated_token_ids": list(warm_result.generated_token_ids),
+            "prompt_token_count": 0,
+            "steps_completed": warm_result.steps_completed,
+            "max_new_tokens": warm_result.max_new_tokens,
+            "stop_reason": "warm-agent-complete" if warm_result.ready else "warm-agent-blocked",
+            "strategy": "warm-agent-runner",
+            "cache_sequence_lengths": {},
+            "blockers": list(warm_result.blockers),
+            "elapsed_seconds": elapsed_seconds,
+            "timings": {},
+            "performance_summary": dict(warm_result.performance_summary),
+            "prefix_reuse": dict(warm_result.prefix_reuse),
+            "reusable_token_count": int(warm_result.runner_status.get("reusable_token_count", 0)),
+            "runtime_settings": _runtime_settings_payload(),
+            "conversation_turn_count": conversation_turn_count,
+            "preformatted_chat": preformatted_chat,
+            "profile_id": None if profile is None else profile.profile_id,
+            "profile_label": None if profile is None else profile.label,
+            "runtime_context": _runtime_context_payload(model_id, mode, profile),
+            "speed_status": _speed_status_payload(model_id),
+            "model_guardrails": _direct_model_guardrails(model_id, max_new_tokens),
+            "warm_runner": dict(warm_result.runner_status),
+            "conversation_state": _conversation_state_payload(
+                conversation_turn_count,
+                preformatted_chat,
+                session_id=session_id,
+                prefix_reuse=warm_result.prefix_reuse,
+            ),
+            "response_reuse": _cache_reuse_payload(False, cache_key=cache_key),
+        }
+        _store_chat_response(cache_key, response)
+        return response
     profile_id = "" if profile is None else profile.profile_id
     session_prefix = _get_session_prefix(
         session_id,
@@ -1235,11 +1304,13 @@ def _direct_runtime_state(status: Any, latest_benchmark: dict | None) -> dict:
 
 def _runtime_settings_payload() -> dict:
     saved_settings = _apply_saved_runtime_settings()
+    agent_warm_runner = _normalize_agent_warm_runner_mode(saved_settings.get("agent_warm_runner"))
     return {
         "math_dtype": runtime_math_dtype_name(),
         "torch_threads": runtime_torch_thread_count(),
         "lm_head_chunk_rows": DEFAULT_LM_HEAD_CHUNK_ROWS,
         "saved_runtime_settings": saved_settings,
+        "agent_warm_runner": agent_warm_runner,
         "tensor_residency_policy": tensor_residency_policy_snapshot(),
         "tensor_residency": tensor_residency_stats().to_dict(),
         "tensor_load": tensor_load_stats_snapshot().to_dict(),

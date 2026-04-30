@@ -430,3 +430,4 @@
 - Tested Qwen 32B at `12` tokens. It did not crash, but it fell to a `24`-layer automatic path and produced bad output, so it was not promoted.
 - Fixed the web runtime path so explicit longer-than-proven direct runs use the full model layer count instead of a hidden reduced-layer path.
 - Tested the existing persistent safetensor handle cache for Agent reuse and rejected it as a default after the second 14B Agent call failed despite `284` persistent handle reuses.
+- Added an opt-in warm Agent runner with lifecycle state, memory telemetry, CLI controls, and web Settings integration. Live 14B proof generated `Hello!` twice: first in `40.274s` with `1003 MB` working set after completion, second in `39.177s` with `1009 MB` working set after completion.
