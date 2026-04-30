@@ -766,11 +766,11 @@ def _second_decode_step_checkpoint(model_id: str, slice_name: str, started_at: f
     }
 
 
-def _full_forward(model_id: str, max_new_tokens: int = 1) -> dict:
+def _full_forward(model_id: str, max_new_tokens: int = 1, prompt: str = "hello world") -> dict:
     reset_tensor_load_stats()
     result = run_prompt_decode_loop(
         model_id,
-        prompt="hello world",
+        prompt=prompt,
         max_new_tokens=max_new_tokens,
         selection_policy="greedy",
     )
@@ -829,6 +829,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Model id, for example qwen2.5-32b-instruct")
     parser.add_argument("--slice", required=True, choices=sorted(VALID_SLICES), help="Progressive slice to run")
     parser.add_argument("--max-new-tokens", type=int, default=1, help="Token cap for the full prompt slice")
+    parser.add_argument("--prompt", default="hello world", help="Prompt for the full prompt slice")
     parser.add_argument("--repeat", type=int, default=1, help="Run the chosen slice repeatedly in one process")
     return parser.parse_args(argv)
 
@@ -920,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
             repeated: list[dict[str, Any]] = []
             for run_index in range(1, repeat + 1):
                 selected_callback = (
-                    (lambda _model_id: _full_forward(_model_id, max_new_tokens)) if slice_name == "full" else callback
+                    (lambda _model_id: _full_forward(_model_id, max_new_tokens, args.prompt)) if slice_name == "full" else callback
                 )
                 run_result = _run_checkpoint(
                     model_id=model_id,
@@ -946,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
                 "blockers": [],
             }
         else:
-            selected_callback = (lambda _model_id: _full_forward(_model_id, max_new_tokens)) if slice_name == "full" else callback
+            selected_callback = (lambda _model_id: _full_forward(_model_id, max_new_tokens, args.prompt)) if slice_name == "full" else callback
             result = _run_checkpoint(
                 model_id=model_id,
                 slice_name=slice_name,

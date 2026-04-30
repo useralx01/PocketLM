@@ -3060,4 +3060,7 @@ phase-moe-speed
 ```text
 python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reports_per_token_expert_telemetry -q
 1 passed in 1.68s
+
+python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_full_honors_max_new_tokens tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reports_per_token_expert_telemetry -q
+2 passed in 1.55s
 ```

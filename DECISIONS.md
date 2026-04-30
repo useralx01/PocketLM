@@ -556,3 +556,4 @@ Decision:
 Why:
 - The previous phase measured mostly one-token runs, which cannot prove whether expert residency pays off across continuation steps.
 - Per-token snapshots make the cache question measurable at token 1, 5, 10, 15, and 20 and allow last-15-token hit-rate deltas instead of relying on a single cumulative run total.
+- `runtime_diagnose_cli.py` now accepts `--prompt` for the full slice so the measurement prompt matches the phase protocol instead of the previous hardcoded `hello world`.

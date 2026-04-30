@@ -69,12 +69,22 @@ def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tm
     monkeypatch.setattr(runtime_diagnose_cli, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
 
     exit_code = runtime_diagnose_cli.main(
-        ["--model", "qwen-test", "--slice", "full", "--max-new-tokens", "4"]
+        [
+            "--model",
+            "qwen-test",
+            "--slice",
+            "full",
+            "--max-new-tokens",
+            "4",
+            "--prompt",
+            "Write a short paragraph about local AI.",
+        ]
     )
 
     assert exit_code == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert captured["max_new_tokens"] == 4
+    assert captured["prompt"] == "Write a short paragraph about local AI."
     assert lines[2]["result"]["generated_text"] == "Hello! How can"
     assert "tensor_load_stats" in lines[2]["result"]
 
