@@ -2807,3 +2807,10 @@ pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_moe_router_
 ```
 
 Added slices: `router-only`, `one-expert`, `top-k-experts`, `all-layers-moe`. They report memory checkpoints and expert residency snapshots.
+
+## Phase MoE / interim pytest
+
+```text
+pytest tests/ -q
+222 passed in 19.82s
+```
