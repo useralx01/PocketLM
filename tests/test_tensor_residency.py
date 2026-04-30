@@ -603,4 +603,9 @@ def test_clear_tensor_residency_cache_resets_counters(tmp_path: Path, monkeypatc
         "skips": 0,
         "resident_bytes": 0,
         "resident_count": 0,
+        "expert_hits": 0,
+        "expert_misses": 0,
+        "expert_evictions": 0,
+        "expert_resident_bytes": 0,
+        "expert_resident_count": 0,
     }
