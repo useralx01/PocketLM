@@ -2493,3 +2493,84 @@ exit=0
 python -m pytest tests/ -v
 211 passed in 5.87s
 ```
+
+## Phase Speed / Setup
+
+```text
+phase-speed-paged-runtime
+```
+
+## Phase Speed / Step 1 / Baseline
+
+GGUF state:
+
+```text
+state/llama-server.json missing
+build_gguf_server_status: running=false, ready=false, pid=null
+```
+
+Run command:
+
+```text
+PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0
+python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --max-new-tokens 1
+```
+
+Run 1:
+
+```text
+exit=0
+wall_seconds=23.753
+diagnostic_total_seconds=21.451
+seconds_per_token=21.451
+tokens_per_second=0.0466
+tensor_load_seconds=17.860
+layer_compute_plus_other_seconds=3.591
+free_ram_before_mb=4771
+free_ram_after_mb=4243
+working_set_after_mb=997
+generated_text="Hello"
+```
+
+Run 2:
+
+```text
+exit=0
+wall_seconds=21.337
+diagnostic_total_seconds=19.087
+seconds_per_token=19.087
+tokens_per_second=0.0524
+tensor_load_seconds=15.803
+layer_compute_plus_other_seconds=3.284
+free_ram_before_mb=5080
+free_ram_after_mb=4553
+working_set_after_mb=997
+generated_text="Hello"
+```
+
+Run 3:
+
+```text
+exit=0
+wall_seconds=19.896
+diagnostic_total_seconds=17.407
+seconds_per_token=17.407
+tokens_per_second=0.0574
+tensor_load_seconds=14.334
+layer_compute_plus_other_seconds=3.072
+free_ram_before_mb=5343
+free_ram_after_mb=4800
+working_set_after_mb=997
+generated_text="Hello"
+```
+
+Warm vs cold:
+
+```text
+cold_run_1=21.451s/token
+warm_run_2=19.087s/token
+warm_run_3=17.407s/token
+best_warm_gap_vs_cold=4.044s faster
+best_warm_tensor_load_gap_vs_cold=3.526s faster
+best_warm_still_spends_14.334s in tensor loading
+```
