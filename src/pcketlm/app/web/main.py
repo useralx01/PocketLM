@@ -237,7 +237,7 @@ def _warm_runner_control_payload(payload: dict) -> dict:
 
 
 def _chat_layer_count(mode: str) -> int | None:
-    normalized = mode.strip().lower()
+    normalized = _chat_mode_key(mode)
     if normalized.startswith("quick") or normalized.startswith("agent"):
         return None
     if normalized.startswith("fast"):
@@ -455,9 +455,10 @@ def _runtime_identity_system_prompt(
     base = (base_prompt or DEFAULT_WEB_SYSTEM_PROMPT).strip()
     profile_label = "Default" if profile is None else str(getattr(profile, "label", "") or getattr(profile, "profile_id", "Profile"))
     model_name = _display_model_name(model_id)
+    runtime_label = "local GGUF / llama.cpp" if _is_gguf_mode(mode) else "local direct"
     return (
         f"{base}\n\n"
-        f"Runtime: local direct. Model: {model_name} ({model_id}). "
+        f"Runtime: {runtime_label}. Model: {model_name} ({model_id}). "
         f"Mode: {mode or 'Quality'}. Profile: {profile_label}."
     )
 
@@ -793,6 +794,65 @@ def _memory_guard_response(prompt: str, model_id: str, mode: str, profile: Any |
     }
 
 
+def _gguf_load_required_response(
+    prompt: str,
+    model_id: str,
+    mode: str,
+    profile: Any | None,
+    *,
+    backend_status: dict,
+    session_id: str = "",
+) -> dict:
+    load_estimate = dict(backend_status.get("load_estimate") or {})
+    server = dict(backend_status.get("llama_server") or {})
+    expected_ram = load_estimate.get("expected_ram_mb")
+    cold_load = load_estimate.get("estimated_cold_load_seconds")
+    message = (
+        "Load the GGUF fast model before chatting. "
+        "That keeps normal Qwen 14B replies on the warmed speed path instead of starting a cold load inside chat."
+    )
+    if expected_ram:
+        message += f" Expected RAM: {expected_ram} MB."
+    if cold_load:
+        message += f" Estimated first load: {cold_load}s."
+    context = _runtime_context_payload(model_id, mode, profile)
+    return {
+        "ready": False,
+        "generated_text": "",
+        "full_text": f"{prompt}\n{message}",
+        "generated_token_ids": [],
+        "prompt_token_count": 0,
+        "steps_completed": 0,
+        "max_new_tokens": 0,
+        "stop_reason": "gguf-load-required",
+        "strategy": "gguf-load-required",
+        "cache_sequence_lengths": {},
+        "blockers": [message],
+        "elapsed_seconds": 0.0,
+        "timings": {"total": 0.0},
+        "runtime_settings": _runtime_settings_payload(),
+        "conversation_turn_count": 0,
+        "preformatted_chat": False,
+        "profile_id": context["profile_id"],
+        "profile_label": context["profile_label"],
+        "runtime_context": context,
+        "speed_status": _speed_status_payload(model_id),
+        "model_guardrails": _direct_model_guardrails(model_id),
+        "gguf_backend": {
+            **backend_status,
+            "llama_server": server,
+            "summary": message,
+        },
+        "conversation_state": _conversation_state_payload(
+            0,
+            False,
+            session_id=session_id,
+            prefix_reuse={"enabled": False, "used": False, "reason": "gguf-load-required"},
+        ),
+        "response_reuse": _cache_reuse_payload(False),
+    }
+
+
 @lru_cache(maxsize=16)
 def _supports_im_chat_tokens(model_id: str) -> bool:
     tokenizer_config_path = original_model_root(model_id) / "tokenizer_config.json"
@@ -975,9 +1035,10 @@ def _chat_request_runtime_defaults(payload: dict) -> tuple[str, str, Any | None,
         minimum=1,
         maximum=token_maximum,
     )
-    if mode.strip().lower().startswith("quick"):
+    mode_key = _chat_mode_key(mode)
+    if mode_key.startswith("quick"):
         max_new_tokens = 1
-    if mode.strip().lower().startswith("agent") and not _is_gguf_mode(mode):
+    if mode_key.startswith("agent") and not _is_gguf_mode(mode):
         max_new_tokens = min(max_new_tokens, AGENT_MODE_MAX_NEW_TOKENS)
     proven_max_tokens = _direct_runtime_proven_max_tokens(model_id)
     if (
@@ -993,12 +1054,19 @@ def _chat_request_runtime_defaults(payload: dict) -> tuple[str, str, Any | None,
     return model_id, prompt, profile, mode, max_new_tokens, min_new_tokens, repetition_penalty
 
 
+def _chat_mode_key(mode: str) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized.startswith("direct "):
+        return normalized.removeprefix("direct ").strip()
+    return normalized
+
+
 def _is_gguf_mode(mode: str) -> bool:
-    return mode.strip().lower().startswith("gguf")
+    return _chat_mode_key(mode).startswith("gguf")
 
 
 def _is_agent_mode(mode: str) -> bool:
-    return mode.strip().lower().startswith("agent")
+    return _chat_mode_key(mode).startswith("agent")
 
 
 def _agent_warm_runner_enabled(mode: str) -> bool:
@@ -1085,6 +1153,22 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
     if cached_response is not None:
         return cached_response
     if _is_gguf_mode(mode):
+        backend_status = build_gguf_backend_status(model_id).to_dict()
+        server = dict(backend_status.get("llama_server") or {})
+        if (
+            bool(backend_status.get("ready"))
+            and "llama_server" in backend_status
+            and not bool(server.get("ready"))
+            and not bool(payload.get("allow_cold_gguf_load"))
+        ):
+            return _gguf_load_required_response(
+                prompt,
+                model_id,
+                mode,
+                profile,
+                backend_status=backend_status,
+                session_id=session_id,
+            )
         started = time.perf_counter()
         system_prompt = _runtime_identity_system_prompt(
             model_id,
@@ -1155,6 +1239,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "speed_status": speed_status,
             "model_guardrails": _direct_model_guardrails(model_id, max_new_tokens),
             "gguf_backend": {
+                **backend_status,
                 "model_id": model_id,
                 "ready": bool(gguf_result.ready),
                 "llama_server_available": gguf_result.backend == "llama-cpp-gguf-server",
@@ -1405,6 +1490,46 @@ def _speed_status_payload(model_id: str) -> dict:
     }
 
 
+def _qwen14b_speed_target_payload(model_id: str) -> dict:
+    target = {"min_seconds_per_token": 2, "max_seconds_per_token": 4}
+    if not _is_qwen_14b_model(model_id):
+        return {
+            "applies": False,
+            "status": "not-qwen-14b",
+            "target": target,
+            "summary": "The current speed target is scoped to Qwen 14B only.",
+        }
+    direct_baseline = _direct_runtime_baseline(model_id, 1) or {}
+    gguf = build_gguf_backend_status(model_id).to_dict()
+    server = dict(gguf.get("llama_server") or {})
+    load_estimate = dict(gguf.get("load_estimate") or {})
+    if server.get("ready"):
+        status = "target-path-loaded"
+        summary = "Fast chat path is loaded. Use GGUF for normal Qwen 14B chat."
+    elif gguf.get("ready"):
+        status = "load-fast-path"
+        summary = "Fast chat path is available but not loaded. First GGUF prompt may cold-load, then normal chat should be much faster than direct runtime."
+    else:
+        status = "blocked"
+        summary = "Fast Qwen 14B path is not ready because the GGUF runtime or artifact is missing."
+    return {
+        "applies": True,
+        "status": status,
+        "target": target,
+        "default_chat_mode": "GGUF",
+        "slow_direct_seconds_per_token": (
+            None
+            if not direct_baseline
+            else round(float(direct_baseline["measured_seconds"]) / max(1, int(direct_baseline["measured_tokens"])), 2)
+        ),
+        "gguf_server_ready": bool(server.get("ready")),
+        "gguf_server_running": bool(server.get("running")),
+        "estimated_cold_load_seconds": load_estimate.get("estimated_cold_load_seconds"),
+        "expected_ram_mb": load_estimate.get("expected_ram_mb"),
+        "summary": summary,
+    }
+
+
 def _status_payload() -> dict:
     options = list_status_screen_options()
     selected = options[0] if options else None
@@ -1463,6 +1588,7 @@ def _status_payload() -> dict:
         "profile_compare": build_profile_compare_summary(model_id, latest_benchmark),
         "optimized_artifact": None if latest_artifact is None else latest_artifact.to_dict(),
         "speed_status": _speed_status_payload(model_id),
+        "qwen14b_speed_target": _qwen14b_speed_target_payload(model_id),
         "model_guardrails": _direct_model_guardrails(model_id),
         "downloads": _download_status_payload(),
         "benchmark": latest_benchmark,

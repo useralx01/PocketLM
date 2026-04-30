@@ -45,6 +45,11 @@ def clear_chat_response_cache():
 def test_chat_layer_count_maps_web_modes() -> None:
     assert _chat_layer_count("Quick") is None
     assert _chat_layer_count("Agent") is None
+    assert _chat_layer_count("Direct Quick") is None
+    assert _chat_layer_count("Direct Agent") is None
+    assert _chat_layer_count("Direct Quality") is None
+    assert _chat_layer_count("Direct Balanced") == 32
+    assert _chat_layer_count("Direct Fast") == 8
     assert _chat_layer_count("Fast") == 8
     assert _chat_layer_count("Balanced") == 32
     assert _chat_layer_count("Quality") is None
@@ -139,6 +144,13 @@ def test_runtime_identity_system_prompt_names_current_model_and_profile() -> Non
     assert "qwen2.5-14b-instruct" in prompt
     assert "Mode: Quality" in prompt
     assert "Profile: Low Memory" in prompt
+
+
+def test_runtime_identity_system_prompt_names_gguf_runtime() -> None:
+    prompt = _runtime_identity_system_prompt("qwen2.5-14b-instruct", "GGUF")
+
+    assert "Runtime: local GGUF / llama.cpp" in prompt
+    assert "Mode: GGUF" in prompt
 
 
 def test_local_runtime_context_answer_handles_model_identity_without_generation() -> None:
@@ -1045,6 +1057,34 @@ def test_run_chat_payload_gguf_allows_longer_replies_than_direct_modes(monkeypat
     assert payload["ready"] is True
     assert captured["max_tokens"] == 48
     assert payload["max_new_tokens"] == 48
+
+
+def test_run_chat_payload_gguf_requires_loaded_server_before_chat(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    def fake_run_gguf_prompt(*args, **kwargs):
+        raise AssertionError("chat should not cold-load GGUF inside the prompt request")
+
+    monkeypatch.setattr(web.main, "run_gguf_prompt", fake_run_gguf_prompt)
+    monkeypatch.setattr(
+        web.main,
+        "build_gguf_backend_status",
+        lambda model_id: SimpleNamespace(
+            to_dict=lambda: {
+                "ready": True,
+                "llama_server": {"ready": False, "running": False},
+                "load_estimate": {"expected_ram_mb": 9001, "estimated_cold_load_seconds": 51.9},
+                "blockers": [],
+            }
+        ),
+    )
+
+    payload = _run_chat_payload({"model_id": "qwen-test", "prompt": "Reply with OK only.", "mode": "GGUF", "max_new_tokens": 1})
+
+    assert payload["ready"] is False
+    assert payload["stop_reason"] == "gguf-load-required"
+    assert payload["strategy"] == "gguf-load-required"
+    assert "Load the GGUF fast model" in payload["blockers"][0]
 
 
 def test_run_chat_payload_blocks_before_generation_when_free_ram_is_too_low(monkeypatch) -> None:

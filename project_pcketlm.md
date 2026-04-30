@@ -55,12 +55,27 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 
 ## Current Best Next Work
 
-Favor Phase 4 agent product foundation:
+Phase 4 is Qwen 14B speed only. Do not prioritize agents, Qwen 32B, MoE, conference chat, or new model families until Qwen 14B normal chat is usable.
 
-1. Define the first real agent workflow path: goal, plan, inspect, act, verify, summarize.
-2. Add job state, cancel/stop, logs, and bounded tool permissions for local agent work.
-3. Use GGUF as the practical default backend for short agent reasoning when loaded, with Direct CPU kept as the dense/runtime research fallback.
-4. Keep model/artifact management improving in parallel, but do not keep expanding direct safetensors speed tweaks without a measured architecture change.
+Current target:
+- Move normal Qwen 14B chat from about `19-22s/token` direct runtime to `2-4s/token` or better.
+- Use the warmed GGUF/llama.cpp path as the practical speed path.
+- Keep direct safetensors runtime as the research/foundation path, not the default chat path.
+
+Current Phase 4A state:
+- Chat defaults to GGUF.
+- Direct modes are explicitly labeled Direct.
+- GGUF Send no longer hides a cold model load; it returns `gguf-load-required` until the fast model is loaded.
+- Status exposes `qwen14b_speed_target`, expected RAM, cold-load estimate, and server state.
+- Full suite passed with 210 tests.
+- Warm speed proof still needs enough free RAM to load the GGUF server.
+
+Next actions:
+1. Free enough RAM to load the Qwen 14B GGUF server safely.
+2. Load fast model through the product path.
+3. Run warm chat prompts and record seconds/token.
+4. Make the loaded GGUF path persist cleanly across app refresh/restart where practical.
+5. Only after warm Qwen 14B chat is reliably in the target range should the project resume agent work.
 
 ## Orchestration Checklist After Another Session
 

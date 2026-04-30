@@ -39,17 +39,19 @@
         <header class="topbar">
           <div>
             <h1>Chat</h1>
-            <p id="chat-subtitle">Quality mode uses the full current stack.</p>
+            <p id="chat-subtitle">GGUF is the fast Qwen 14B chat path.</p>
+            <p id="speed-target-note" class="muted">Speed target: 2-4 seconds per token.</p>
           </div>
           <div class="top-actions">
             <span id="model-pill" class="pill">Qwen</span>
+            <button id="chat-load-gguf" class="secondary compact" type="button">Load fast model</button>
             <div class="segmented" id="mode-picker">
-              <button class="selected" data-mode="Quality">Quality</button>
-              <button data-mode="Quick">Quick</button>
-              <button data-mode="Agent">Agent</button>
-              <button data-mode="GGUF">GGUF</button>
-              <button data-mode="Balanced">Balanced</button>
-              <button data-mode="Fast">Fast</button>
+              <button class="selected" data-mode="GGUF">GGUF</button>
+              <button data-mode="Direct Quality">Direct Quality</button>
+              <button data-mode="Direct Quick">Direct Quick</button>
+              <button data-mode="Direct Agent">Direct Agent</button>
+              <button data-mode="Direct Balanced">Direct Balanced</button>
+              <button data-mode="Direct Fast">Direct Fast</button>
             </div>
           </div>
         </header>
@@ -58,7 +60,7 @@
             <div class="empty-state">
               <div class="logo large">P</div>
               <h2>What can I help with?</h2>
-              <p>Running locally through Pocket LLM. Quality is default; Agent is for short repeated local work.</p>
+              <p>Running locally through Pocket LLM. GGUF is default for usable Qwen 14B speed.</p>
               <div class="prompt-grid">
                 <button data-prompt="Say hello in one short sentence.">Quick hello</button>
                 <button data-prompt="Explain what Pocket LLM can do in plain English.">Explain Pocket LLM</button>

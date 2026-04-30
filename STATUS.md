@@ -519,3 +519,13 @@ Latest Phase 3 completion update:
 - Load Model / GGUF status now includes a disk summary for complete GGUF artifacts and split shards.
 - Full suite passed with `208` tests, frontend syntax check is clean, and compile verification is clean.
 - Phase 3 speed/reliability productization is complete for the current branch. The next big phase should move to agent product foundation and workflow reliability, not more blind direct-runtime speed tweaking.
+
+Latest Phase 4 speed reset:
+- Phase 4 is now Qwen 14B speed only. Agents, 32B, MoE, conference chat, and broad model support are paused until normal Qwen 14B chat is usable.
+- Chat now defaults to GGUF, because the direct dense runtime is measured around `19.49s/token` and is not a normal-user chat path on this machine.
+- Direct runtime choices remain available but are labeled as Direct paths so users do not enter the slow runtime by accident.
+- GGUF chat no longer hides a cold llama-server load inside Send. If the server is not loaded, the app returns `gguf-load-required` and points the user to Load fast model.
+- Status now exposes the Qwen 14B speed target, GGUF server state, expected RAM, and cold-load estimate.
+- Live status proof showed `status=load-fast-path`, `default_chat_mode=GGUF`, `expected_ram_mb=9001`, and `estimated_cold_load_seconds=51.9`.
+- Live warm speed proof was skipped in this slice because free RAM was about `4.5 GB`, below the expected GGUF load footprint.
+- Full suite passed with `210` tests. Current Phase 4 speed estimate: about `20%` complete. The path is corrected; next work must load GGUF under enough RAM and prove warmed chat stays inside the 2-4s/token target.

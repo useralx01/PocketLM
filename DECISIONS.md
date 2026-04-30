@@ -391,3 +391,17 @@ Decision:
 Why:
 - Power users need to see whether disk space is being spent on merged artifacts, split shards, or both.
 - The product direction is agent-first, so a GGUF backend that only answers `OK` is not enough evidence.
+
+## Phase 4A / Qwen 14B speed-first reset
+
+Decision:
+- Phase 4 is Qwen 14B speed only.
+- Normal chat defaults to GGUF, not Direct Quality.
+- Direct runtime modes stay available but are explicitly labeled `Direct`.
+- GGUF chat must not hide a cold server load inside the Send action. The user should load the fast model first, then chat on the warmed path.
+
+Why:
+- The measured direct Qwen 14B path is about `19.49s/token` on this machine, which is not usable for normal chat.
+- The prior loaded GGUF proof reached about `2.30 tokens/sec`, which is already better than the 2-4s/token target when the server is loaded.
+- The bottleneck is not "agent design"; it is the default runtime path. Agents, conference chat, and broader model support should wait until the 14B chat path is usable.
+- Hiding a 50s cold load behind Send makes the app feel broken. A visible Load fast model action is more honest and easier to debug.

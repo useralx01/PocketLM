@@ -2346,3 +2346,76 @@ exit=0
 python -m pytest tests/ -v
 208 passed in 14.77s
 ```
+
+## Phase 4A / Qwen 14B speed-first reset
+
+Direction:
+
+```text
+Phase 4 is now speed-only for Qwen 14B.
+Do not prioritize agents, 32B, MoE, conference chat, or new model families until Qwen 14B normal chat is usable.
+The target is 2-4 seconds per generated token for the normal product chat path.
+```
+
+Change:
+
+```text
+The web app now defaults Chat to GGUF instead of Direct Quality.
+Direct paths are explicitly labeled Direct Quality, Direct Quick, Direct Agent, Direct Balanced, and Direct Fast.
+Status now exposes qwen14b_speed_target with the 2-4s/token target, current direct baseline, GGUF load state, expected RAM, and estimated cold-load time.
+GGUF chat no longer hides a cold llama-server load inside the Send action. If the server is not loaded, chat returns gguf-load-required and tells the user to load the fast model first.
+The chat header has a Load fast model action wired to the GGUF server load endpoint.
+GGUF runtime identity now says local GGUF / llama.cpp instead of local direct.
+```
+
+Live status proof:
+
+```text
+qwen14b_speed_target={
+  applies: true,
+  status: load-fast-path,
+  target: {min_seconds_per_token: 2, max_seconds_per_token: 4},
+  default_chat_mode: GGUF,
+  slow_direct_seconds_per_token: 19.49,
+  gguf_server_ready: false,
+  gguf_server_running: false,
+  estimated_cold_load_seconds: 51.9,
+  expected_ram_mb: 9001
+}
+```
+
+Live chat preflight proof:
+
+```text
+prompt="Reply with OK only."
+mode=GGUF
+ready=false
+stop_reason=gguf-load-required
+strategy=gguf-load-required
+blocker="Load the GGUF fast model before chatting. That keeps normal Qwen 14B replies on the warmed speed path instead of starting a cold load inside chat. Expected RAM: 9001 MB. Estimated first load: 51.9s."
+```
+
+RAM note:
+
+```text
+free_ram_before_live_load_mb=4802
+free_ram_after_tests_mb=4598
+expected_gguf_ram_mb=9001
+Live warm speed smoke was not run in this slice because free RAM was below the expected GGUF load footprint.
+```
+
+Verification:
+
+```text
+python -m pytest tests/test_web_main.py -v
+45 passed in 7.03s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+python -m compileall -q src tests
+exit=0
+
+python -m pytest tests/ -v
+210 passed in 18.42s
+```

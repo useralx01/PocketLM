@@ -1,6 +1,6 @@
 const state = {
   activeScreen: "chat",
-  mode: "Quality",
+  mode: "GGUF",
   status: null,
   messages: [],
   activeJobId: null,
@@ -49,21 +49,21 @@ function setMode(mode) {
   state.mode = mode;
   $$("#mode-picker button").forEach((button) => button.classList.toggle("selected", button.dataset.mode === mode));
   const hints = {
-    Quality: "Quality mode uses the full current stack and gives the best current output.",
-    Quick: "Quick uses the full current stack but caps the reply to one token for fast checks.",
-    Agent: "Agent uses the full current stack but caps replies to two tokens for repeated local work.",
-    GGUF: "GGUF uses the optional llama.cpp power-user backend when the GGUF Queen artifact is ready.",
-    Balanced: "Balanced is a speed preview. It is faster, but it can drift or answer oddly.",
-    Fast: "Fast is only for quick smoke tests. Output quality can be rough.",
+    GGUF: "GGUF is the fast Qwen 14B chat path. First use may load the model; loaded replies are the speed target.",
+    "Direct Quality": "Direct Quality uses Pocket's dense runtime and is currently slow.",
+    "Direct Quick": "Direct Quick uses the dense runtime for one-token checks.",
+    "Direct Agent": "Direct Agent caps dense-runtime replies to two tokens for short local work.",
+    "Direct Balanced": "Direct Balanced is a dense-runtime speed preview. It can drift or answer oddly.",
+    "Direct Fast": "Direct Fast is only for direct-runtime smoke tests. Output quality can be rough.",
   };
   const tokenInput = $("#max-new-tokens");
   if (tokenInput) {
     tokenInput.max = mode === "GGUF" ? 64 : 16;
-    if (mode === "Quick") tokenInput.value = 1;
-    if (mode === "Agent") tokenInput.value = Math.min(Number(tokenInput.value || 2), 2);
+    if (mode === "Direct Quick") tokenInput.value = 1;
+    if (mode === "Direct Agent") tokenInput.value = Math.min(Number(tokenInput.value || 2), 2);
     if (Number(tokenInput.value || 4) > Number(tokenInput.max)) tokenInput.value = tokenInput.max;
   }
-  $("#chat-subtitle").textContent = hints[mode] || hints.Quality;
+  $("#chat-subtitle").textContent = hints[mode] || hints.GGUF;
 }
 
 function renderStatus(payload) {
@@ -72,6 +72,7 @@ function renderStatus(payload) {
   $("#sidebar-model").textContent = model.label || model.model_id;
   $("#sidebar-runtime").textContent = `${model.effective_runtime_status || model.runtime_status} - ${model.streaming_status}`;
   $("#model-pill").textContent = model.label || model.model_id;
+  renderSpeedTarget(payload.qwen14b_speed_target || {});
   $("#settings-runtime").textContent = `${model.effective_runtime_status || model.runtime_status}. ${model.effective_summary || model.summary || ""}`;
   $("#settings-storage").textContent = payload.project_root;
   renderRuntimeGrid("#settings-runtime-grid", {
@@ -108,6 +109,30 @@ function renderStatus(payload) {
 
   renderBenchmark(payload.benchmark, payload.benchmark_history);
   renderBackendComparison(payload.backend_comparison);
+}
+
+function renderSpeedTarget(target) {
+  const note = $("#speed-target-note");
+  const loadButton = $("#chat-load-gguf");
+  if (!note) return;
+  if (!target.applies) {
+    note.textContent = target.summary || "";
+    if (loadButton) loadButton.hidden = true;
+    return;
+  }
+  const server = target.gguf_server_ready ? "loaded" : target.gguf_server_running ? "loading" : "not loaded";
+  const direct = target.slow_direct_seconds_per_token
+    ? `Direct is about ${formatSeconds(target.slow_direct_seconds_per_token)}/token.`
+    : "Direct is slow.";
+  const load = target.estimated_cold_load_seconds
+    ? `Cold load about ${formatSeconds(target.estimated_cold_load_seconds)}.`
+    : "";
+  note.textContent = `Speed target 2-4s/token. GGUF server ${server}. ${direct} ${load}`.trim();
+  if (loadButton) {
+    loadButton.hidden = target.gguf_server_ready;
+    loadButton.disabled = target.gguf_server_running;
+    loadButton.textContent = target.gguf_server_running ? "Loading fast model..." : "Load fast model";
+  }
 }
 
 function renderProfileSelect(profiles) {
@@ -853,6 +878,7 @@ async function boot() {
   $$("#mode-picker button").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
   $("#chat-form").addEventListener("submit", sendPrompt);
   $("#cancel-button").addEventListener("click", cancelChat);
+  $("#chat-load-gguf").addEventListener("click", () => controlGgufServer("start"));
   $("#retry-button").addEventListener("click", retryLastPrompt);
   $("#run-benchmark").addEventListener("click", runBenchmark);
   $("#run-comparison-benchmark").addEventListener("click", runComparisonBenchmark);
@@ -871,7 +897,7 @@ async function boot() {
   });
   setChatControlsRunning(false);
   bindPromptButtons();
-  setMode("Quality");
+  setMode("GGUF");
   try {
     renderStatus(await api("/api/status"));
     state.statusRefreshTimer = window.setInterval(async () => {

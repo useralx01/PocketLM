@@ -7,6 +7,11 @@
 
 ## Next
 
+- Phase 4 speed target: prove Qwen 14B normal chat at `2-4s/token` or better through the warmed GGUF path.
+- Free enough RAM to load the Qwen 14B GGUF server, then record warm chat timings from the web/API path.
+- Add a visible loaded-speed proof in the UI after GGUF server is ready: seconds/token, server RAM, and last warm prompt latency.
+- Make sure app refresh/restart preserves the fact that GGUF is the default fast chat path without silently starting a cold load.
+- Keep direct dense runtime available as an advanced/research path, but do not let normal users enter it accidentally.
 - Extend the new GGUF file list into a selectable artifact manager if multiple complete GGUF files exist for the same model.
 - Add cleanup actions for redundant GGUF split shards or old merged artifacts after the user explicitly approves deletion.
 - Next speed target: design a real reduction in repeated large tensor movement. Bigger resident-cache tweaks are now low-return; the next useful step should be a better derived weight layout/backend path that avoids reloading the same projection weights so often.

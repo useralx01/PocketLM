@@ -42,6 +42,11 @@ Codex should operate autonomously by default on Pocket LLM:
 - Latest live comparison measured Direct Standard at `21.03s`, Direct Boosted at `19.81s`, and GGUF Compare at `26.05s` on the same one-token prompt; GGUF remains the recommended practical backend because loaded-server use is faster for real chat/agent work.
 - GGUF benchmarks now include stronger agent-plan and follow-up checks, and GGUF status includes disk summaries for complete and split artifacts.
 - Phase 3 speed/reliability productization is complete for the current branch. Next valuable work should move to Phase 4 agent product foundation and workflow reliability.
+- User corrected direction: Phase 4 is not agents. Phase 4 is Qwen 14B speed only.
+- Success target: normal Qwen 14B chat must move from about `19-22s/token` direct runtime to `2-4s/token` or better.
+- First Phase 4A slice changed the product default to GGUF, labeled direct modes as Direct, added qwen14b_speed_target status, and blocked hidden cold GGUF loads behind Send.
+- Current status: GGUF fast path is available but not loaded; expected RAM is about `9001 MB`, cold load estimate about `51.9s`, current free RAM after tests was about `4.5 GB`.
+- Next work should free enough RAM or ask Issa to free RAM, load the GGUF server through the product path, and record warm token speed with normal chat prompts.
 - High effort is best for architecture, native crash debugging, large runtime changes, and phase planning. Medium is enough for docs, UI polish, focused tests, and small productization slices.
 
 ## Verification Habit
