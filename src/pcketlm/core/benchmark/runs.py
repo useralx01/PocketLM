@@ -201,6 +201,148 @@ def _timing_summary(timings: dict) -> dict:
     }
 
 
+def _benchmark_cases_payload(run: dict | MeasuredBenchmarkRun | None) -> list[dict]:
+    if run is None:
+        return []
+    if isinstance(run, MeasuredBenchmarkRun):
+        return [case.to_dict() for case in run.cases]
+    return [case for case in list(run.get("cases") or []) if isinstance(case, dict)]
+
+
+def _case_seconds_per_token(case: dict) -> float | None:
+    elapsed = _round_seconds(case.get("elapsed_seconds"))
+    if elapsed is None or elapsed <= 0:
+        return None
+    try:
+        token_count = max(1, int(case.get("max_new_tokens") or 1))
+    except (TypeError, ValueError):
+        token_count = 1
+    return round(elapsed / token_count, 3)
+
+
+def _case_memory_mb(case: dict) -> tuple[float, str] | tuple[None, None]:
+    for key in ["peak_working_set_mb", "working_set_mb"]:
+        value = _round_seconds(case.get(key))
+        if value is not None:
+            return value, "working set"
+    residency = dict(case.get("tensor_residency") or {})
+    resident_bytes = residency.get("resident_bytes")
+    try:
+        resident_mb = round(float(resident_bytes or 0) / (1024**2), 2)
+    except (TypeError, ValueError):
+        resident_mb = 0.0
+    if resident_mb > 0:
+        return resident_mb, "resident cache"
+    return None, None
+
+
+def _comparison_row(backend_id: str, label: str, cases: list[dict], missing_summary: str) -> dict:
+    ready_cases = [case for case in cases if case.get("ready") and _case_seconds_per_token(case) is not None]
+    if not ready_cases:
+        return {
+            "backend_id": backend_id,
+            "label": label,
+            "ready": False,
+            "status": "needs-benchmark",
+            "elapsed_seconds": None,
+            "max_new_tokens": None,
+            "seconds_per_token": None,
+            "memory_mb": None,
+            "memory_kind": None,
+            "generated_text": "",
+            "tags": [],
+            "summary": missing_summary,
+        }
+    selected = min(ready_cases, key=lambda case: _case_seconds_per_token(case) or float("inf"))
+    memory_mb, memory_kind = _case_memory_mb(selected)
+    seconds_per_token = _case_seconds_per_token(selected)
+    return {
+        "backend_id": backend_id,
+        "label": label,
+        "ready": True,
+        "status": "measured",
+        "elapsed_seconds": _round_seconds(selected.get("elapsed_seconds")),
+        "max_new_tokens": selected.get("max_new_tokens"),
+        "seconds_per_token": seconds_per_token,
+        "memory_mb": memory_mb,
+        "memory_kind": memory_kind,
+        "generated_text": str(selected.get("generated_text") or ""),
+        "tags": [],
+        "summary": f"{label} measured at {seconds_per_token}s/token.",
+    }
+
+
+def build_backend_comparison_record(
+    run: dict | MeasuredBenchmarkRun | None,
+    *,
+    recommended_backend_id: str = "direct-cpu",
+) -> dict:
+    """Build a customer-readable backend comparison from measured cases."""
+    cases = _benchmark_cases_payload(run)
+    gguf_cases = [case for case in cases if "gguf" in str(case.get("backend") or "").lower() or str(case.get("label") or "").lower().startswith("gguf")]
+    direct_standard_cases = [
+        case
+        for case in cases
+        if "gguf" not in str(case.get("backend") or "").lower()
+        and str(case.get("label") or "").strip().lower() in {"quality", "direct standard", "standard"}
+    ]
+    direct_boosted_cases = [
+        case
+        for case in cases
+        if "gguf" not in str(case.get("backend") or "").lower()
+        and "boost" in str(case.get("label") or "").strip().lower()
+    ]
+    rows = [
+        _comparison_row("gguf", "GGUF / llama.cpp", gguf_cases, "Run the GGUF benchmark after loading the GGUF artifact."),
+        _comparison_row("direct_standard", "Direct Standard", direct_standard_cases, "Run the full benchmark with the Standard tensor cache preset."),
+        _comparison_row("direct_boosted", "Direct Boosted", direct_boosted_cases, "Run the full benchmark with the Boosted tensor cache preset."),
+    ]
+    rows_by_id = {row["backend_id"]: row for row in rows}
+
+    tags: list[dict] = []
+    ready_rows = [row for row in rows if row["ready"]]
+    if ready_rows:
+        fastest = min(ready_rows, key=lambda row: row["seconds_per_token"] if row["seconds_per_token"] is not None else float("inf"))
+        fastest["tags"].append("fastest")
+        tags.append({"tag": "fastest", "backend_id": fastest["backend_id"], "label": fastest["label"], "reason": "Lowest measured seconds per token."})
+
+        quality = rows_by_id["direct_boosted"] if rows_by_id["direct_boosted"]["ready"] else rows_by_id["direct_standard"]
+        if quality["ready"]:
+            quality["tags"].append("best quality")
+            tags.append({"tag": "best quality", "backend_id": quality["backend_id"], "label": quality["label"], "reason": "Full direct dense path is treated as the quality reference."})
+
+        memory_rows = [row for row in ready_rows if row["memory_mb"] is not None]
+        if memory_rows:
+            lowest_ram = min(memory_rows, key=lambda row: row["memory_mb"])
+            lowest_ram["tags"].append("lowest RAM")
+            tags.append({"tag": "lowest RAM", "backend_id": lowest_ram["backend_id"], "label": lowest_ram["label"], "reason": f"Lowest measured {lowest_ram['memory_kind']}."})
+
+    recommended_map = {
+        "llama-cpp-gguf": "gguf",
+        "direct-cpu": "direct_standard",
+        "torch-cpu": "direct_standard",
+    }
+    recommended_row = rows_by_id.get(recommended_map.get(recommended_backend_id, "direct_standard"))
+    if recommended_row is not None:
+        recommended_row["tags"].append("recommended")
+        tags.append(
+            {
+                "tag": "recommended",
+                "backend_id": recommended_row["backend_id"],
+                "label": recommended_row["label"],
+                "reason": f"Current engine selector recommends {recommended_backend_id}.",
+            }
+        )
+
+    return {
+        "ready": bool(tags),
+        "recommended_backend_id": recommended_backend_id,
+        "rows": rows,
+        "tags": tags,
+        "summary": "Backend comparison uses measured benchmark rows and marks missing paths honestly.",
+    }
+
+
 def _gguf_instruct_prompt(user_prompt: str) -> str:
     return (
         "<|im_start|>system\n"

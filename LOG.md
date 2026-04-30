@@ -2239,3 +2239,31 @@ Full verification:
 python -m pytest tests/ -v
 202 passed in 17.24s
 ```
+
+## Phase 3E / Backend comparison product surface
+
+Change:
+
+```text
+Added build_backend_comparison_record() for a customer-readable comparison across GGUF / llama.cpp, Direct Standard, and Direct Boosted.
+The comparison tags fastest, best quality, lowest RAM, and recommended from measured rows only.
+Missing rows are marked needs-benchmark instead of inventing numbers.
+/api/status now includes backend_comparison.
+Benchmarks screen now shows Backend Comparison above the raw latest benchmark cards.
+```
+
+Verification:
+
+```text
+python -m pytest tests/test_benchmark_runs.py tests/test_web_main.py -v
+50 passed in 3.15s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+python -m compileall -q src tests
+exit=0
+
+python -m pytest tests/ -v
+204 passed in 15.36s
+```

@@ -3,11 +3,79 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pcketlm.core.benchmark.runs import (
+    build_backend_comparison_record,
     build_measured_benchmark_history,
     run_lightweight_benchmark,
     run_gguf_measured_benchmark,
     run_measured_benchmark,
 )
+
+
+def test_build_backend_comparison_record_tags_measured_winners() -> None:
+    run = {
+        "cases": [
+            {
+                "label": "GGUF 4",
+                "backend": "llama-cpp-gguf-server",
+                "ready": True,
+                "elapsed_seconds": 2.0,
+                "max_new_tokens": 4,
+                "generated_text": "fast",
+                "peak_working_set_mb": 8600,
+            },
+            {
+                "label": "Quality",
+                "backend": "direct-cpu",
+                "ready": True,
+                "elapsed_seconds": 80.0,
+                "max_new_tokens": 4,
+                "generated_text": "quality",
+                "peak_working_set_mb": 1200,
+            },
+            {
+                "label": "Direct Boosted",
+                "backend": "direct-cpu",
+                "ready": True,
+                "elapsed_seconds": 70.0,
+                "max_new_tokens": 4,
+                "generated_text": "boosted",
+                "peak_working_set_mb": 1500,
+            },
+        ]
+    }
+
+    comparison = build_backend_comparison_record(run, recommended_backend_id="llama-cpp-gguf")
+
+    tags = {item["tag"]: item["backend_id"] for item in comparison["tags"]}
+    assert tags["fastest"] == "gguf"
+    assert tags["best quality"] == "direct_boosted"
+    assert tags["lowest RAM"] == "direct_standard"
+    assert tags["recommended"] == "gguf"
+    gguf = next(row for row in comparison["rows"] if row["backend_id"] == "gguf")
+    assert gguf["seconds_per_token"] == 0.5
+
+
+def test_build_backend_comparison_record_marks_missing_boosted_honestly() -> None:
+    run = {
+        "cases": [
+            {
+                "label": "Quality",
+                "backend": "direct-cpu",
+                "ready": True,
+                "elapsed_seconds": 80.0,
+                "max_new_tokens": 4,
+                "generated_text": "quality",
+            }
+        ]
+    }
+
+    comparison = build_backend_comparison_record(run, recommended_backend_id="direct-cpu")
+
+    boosted = next(row for row in comparison["rows"] if row["backend_id"] == "direct_boosted")
+    tags = {item["tag"]: item["backend_id"] for item in comparison["tags"]}
+    assert boosted["ready"] is False
+    assert boosted["status"] == "needs-benchmark"
+    assert tags["recommended"] == "direct_standard"
 
 
 def test_run_lightweight_benchmark_persists_run_and_latest(tmp_path: Path, monkeypatch) -> None:

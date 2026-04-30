@@ -21,7 +21,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from pcketlm.app.desktop.status_screen import build_status_screen_model, list_status_screen_options
-from pcketlm.core.benchmark import build_measured_benchmark_history, run_gguf_measured_benchmark, run_measured_benchmark
+from pcketlm.core.benchmark import (
+    build_backend_comparison_record,
+    build_measured_benchmark_history,
+    run_gguf_measured_benchmark,
+    run_measured_benchmark,
+)
 from pcketlm.core.optimize import latest_optimized_artifact_manifest
 from pcketlm.core.profiles import build_profile_compare_summary, get_saved_profile, list_saved_profiles
 from pcketlm.core.runtime import (
@@ -1390,6 +1395,13 @@ def _status_payload() -> dict:
     latest_benchmark = _latest_json(benchmarks_root(model_id) / "latest.measured-benchmark.json")
     latest_artifact = latest_optimized_artifact_manifest(model_id)
     direct_runtime = _direct_runtime_state(status, latest_benchmark)
+    backend_report = build_runtime_backend_report(model_id)
+    backend_report_payload = backend_report.to_dict()
+    recommended_backend_id = str(
+        getattr(backend_report, "recommended_backend_id", None)
+        or backend_report_payload.get("recommended_backend_id")
+        or "direct-cpu"
+    )
     return {
         "project_root": str(project_root()),
         "active_model": {
@@ -1407,7 +1419,11 @@ def _status_payload() -> dict:
         },
         "direct_runtime": direct_runtime,
         "engine_decision": select_runtime_engine(model_id).to_dict(),
-        "backend_report": build_runtime_backend_report(model_id).to_dict(),
+        "backend_report": backend_report_payload,
+        "backend_comparison": build_backend_comparison_record(
+            latest_benchmark,
+            recommended_backend_id=recommended_backend_id,
+        ),
         "gguf_backend": build_gguf_backend_status(model_id).to_dict(),
         "warm_runner": warm_runner_status(model_id),
         "runtime_settings": _runtime_settings_payload(),

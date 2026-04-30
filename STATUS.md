@@ -503,3 +503,10 @@ Latest GGUF Load Model productization update:
 - expected RAM is estimated as GGUF file size times `1.05`, and cold-load time uses the latest local measurement of about `6.2s/GB`
 - focused GGUF/web tests passed with `60` tests, frontend syntax check is clean, and Python compile verification is clean
 - current Phase 3 estimate: about `82%` complete. GGUF is now easier to understand and safer to load, but the next work is side-by-side backend comparison and stronger agent-style GGUF checks.
+
+Latest backend comparison update:
+- Benchmarks now include a customer-readable backend comparison for GGUF / llama.cpp, Direct Standard, and Direct Boosted
+- the comparison tags fastest, best quality, lowest RAM, and recommended on this PC using measured rows only
+- missing paths, especially Direct Boosted when it was not measured in the latest run, are marked `needs-benchmark` instead of being filled with fake numbers
+- `/api/status` now includes `backend_comparison`, and the Benchmarks screen renders it above raw benchmark cards
+- full suite passed with `204` tests; current Phase 3 estimate: about `85%` complete. The next useful work is a stronger real GGUF agent benchmark and a clean way to produce a measured Boosted comparison row.

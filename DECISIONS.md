@@ -354,3 +354,16 @@ Why:
 - A user needs to know the RAM and cold-load cost before starting a persistent local server.
 - The latest measured cold load was `52.26s` for an about `8.37 GB` artifact, so Pocket uses `LLAMA_COLD_LOAD_SECONDS_PER_GB=6.2` as the current local estimate basis.
 - Expected RAM is estimated as `file_size * 1.05` and rounded up to MB so the UI stays conservative.
+
+## Phase 3E / Backend comparison honesty
+
+Decision:
+- Backend comparison rows must be built from measured benchmark cases.
+- If Direct Boosted, GGUF, or Direct Standard was not measured in the latest benchmark data, the row should say `needs-benchmark`.
+- The four customer tags are fastest, best quality, lowest RAM, and recommended.
+
+Why:
+- The product must not fake benchmark numbers to make the comparison table look complete.
+- GGUF is the practical speed recommendation when ready, but Direct Standard/Boosted still matter as the dense custom-runtime path.
+- Best quality is treated as the full direct dense path, preferring Direct Boosted if it has real measured data and falling back to Direct Standard if Boosted is missing.
+- Lowest RAM is tagged only when a measured memory value exists.

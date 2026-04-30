@@ -33,6 +33,7 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - GGUF prompts use Qwen instruct chat formatting and stop markers.
 - Fast GGUF benchmark flow exists and saves short-answer, logic, and agent-style checks.
 - Backend recommendation now prefers the ready GGUF path while keeping Direct CPU as the dense custom-runtime foundation and fallback.
+- Benchmarks now include an honest backend comparison table for GGUF, Direct Standard, and Direct Boosted, tagging fastest, best quality, lowest RAM, and recommended from measured rows.
 
 ## Latest Known Proof Points
 
@@ -40,6 +41,7 @@ The active first model family is Qwen. Future family priority is Qwen, then Kimi
 - Loaded GGUF server uses roughly 8.6 GB to 10 GB RAM.
 - Latest Phase 3C GGUF proof: cold GGUF call took 52.26s because it included model load; warm server call with 4-token cap took 2.36s at about 2.30 tokens/sec with server working set around 8.64 GB.
 - Latest Phase 3D GGUF Load Model productization: expected RAM is file size times 1.05, cold-load estimate uses 6.2s/GB from local proof, and focused GGUF/web tests passed with 60 tests.
+- Latest Phase 3E backend comparison: `/api/status` includes `backend_comparison`, Benchmarks renders it, missing Direct Boosted data stays `needs-benchmark`, and the full suite passed with 204 tests.
 - GGUF server was unloaded after the proof and state reported `running=false`.
 - Latest Warm Agent proof reused 64 prompt tokens, batch-appended 14 tokens, returned `Ok<|im_end|>` in 47.06s with roughly 1069 MB process working set.
 - Latest short GGUF checks returned `OK`, `YES`, and `SUN` in roughly sub-second to low-second app-reported times after the server was loaded.
@@ -56,7 +58,7 @@ Favor work that makes the real GGUF path safer and more product-grade while pres
 2. Add stronger agent-style GGUF checks for tool-planning wording, task decomposition, and follow-up consistency.
 3. Extend the new GGUF file list into selectable artifact management when multiple complete artifacts exist.
 4. Add stronger disk-usage cleanup/status for merged GGUF artifacts versus downloaded split shards.
-5. Add a backend comparison runner for GGUF versus Direct CPU Standard/Boosted, gated by available RAM and safe server lifecycle behavior.
+5. Add a measured Direct Boosted comparison row and stronger GGUF agent checks, gated by available RAM and safe server lifecycle behavior.
 
 ## Orchestration Checklist After Another Session
 

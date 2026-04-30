@@ -107,6 +107,7 @@ function renderStatus(payload) {
   renderCompare(payload.profile_compare);
 
   renderBenchmark(payload.benchmark, payload.benchmark_history);
+  renderBackendComparison(payload.backend_comparison);
 }
 
 function renderProfileSelect(profiles) {
@@ -449,6 +450,51 @@ function renderBenchmark(run, history) {
     `);
   }
   renderBenchmarkHistory(history);
+}
+
+function renderBackendComparison(comparison) {
+  const element = $("#backend-comparison-table");
+  if (!element) return;
+  if (!comparison || !Array.isArray(comparison.rows)) {
+    element.innerHTML = `<p class="muted">Run a benchmark to compare backends.</p>`;
+    return;
+  }
+  const tags = comparison.tags || [];
+  const rowsById = Object.fromEntries((comparison.rows || []).map((row) => [row.backend_id, row]));
+  const orderedTags = ["fastest", "best quality", "lowest RAM", "recommended"];
+  const tagCards = orderedTags.map((tag) => {
+    const tagInfo = tags.find((item) => item.tag === tag);
+    const row = tagInfo ? rowsById[tagInfo.backend_id] : null;
+    if (!row) {
+      return `
+        <div class="benchmark-card">
+          <div class="benchmark-head"><strong>${escapeText(tag)}</strong><span class="pill">needed</span></div>
+          <p>Run both GGUF and full benchmarks to fill this row.</p>
+        </div>
+      `;
+    }
+    return `
+      <div class="benchmark-card">
+        <div class="benchmark-head"><strong>${escapeText(tag)}</strong><span class="pill">${escapeText(row.label)}</span></div>
+        <p>${escapeText(tagInfo.reason || row.summary || "")}</p>
+        <div class="mini-metrics">
+          <span>${escapeText(row.ready ? "measured" : row.status || "needed")}</span>
+          <span>${escapeText(row.seconds_per_token ? `${row.seconds_per_token}s/token` : "speed n/a")}</span>
+          <span>${escapeText(row.elapsed_seconds ? formatSeconds(row.elapsed_seconds) : "time n/a")}</span>
+          <span>${escapeText(row.memory_mb ? `${row.memory_mb} MB ${row.memory_kind || "memory"}` : "RAM n/a")}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+  const missingRows = (comparison.rows || [])
+    .filter((row) => !row.ready)
+    .map((row) => `
+      <div class="benchmark-card">
+        <div class="benchmark-head"><strong>${escapeText(row.label)}</strong><span class="pill">${escapeText(row.status || "needed")}</span></div>
+        <p>${escapeText(row.summary || "Benchmark needed.")}</p>
+      </div>
+    `).join("");
+  element.innerHTML = tagCards + missingRows;
 }
 
 function renderBenchmarkHistory(history) {

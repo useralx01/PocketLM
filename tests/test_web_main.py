@@ -1147,6 +1147,7 @@ def test_status_payload_includes_engine_decision(monkeypatch) -> None:
 
     assert payload["engine_decision"]["selected_engine"] == "direct-cpu"
     assert payload["backend_report"]["recommended_backend_id"] == "llama-cpp-gguf"
+    assert payload["backend_comparison"]["recommended_backend_id"] == "llama-cpp-gguf"
     assert payload["gguf_backend"]["load_estimate"]["expected_ram_mb"] == 9000
     assert payload["gguf_backend"]["model_files"][0]["name"] == "queen-q4.gguf"
     assert payload["warm_runner"]["state"] == "ready"

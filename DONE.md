@@ -438,3 +438,4 @@
 - Updated backend recommendation logic so ready GGUF is recommended for faster chat while Direct CPU remains the dense fallback/research path.
 - Added the recommended backend to Load Model / Active Runtime so the faster GGUF path is visible outside the deeper Settings backend report.
 - Productized the GGUF Load Model surface: status now reports all GGUF files, selected file, expected RAM, estimated cold-load time, ready/loading/loaded/missing state, and the UI shows one clear Load/Unload action. Focused GGUF/web tests passed with `60` tests.
+- Added an honest backend comparison surface for GGUF, Direct Standard, and Direct Boosted. It tags fastest, best quality, lowest RAM, and recommended from measured rows and marks missing rows as `needs-benchmark`. Full suite passed with `204` tests.
