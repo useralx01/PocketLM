@@ -2940,3 +2940,23 @@ pytest tests/ -q
 ```text
 phase-moe-speed
 ```
+
+## Phase MoE Speed / Stage 1 / baseline
+
+```text
+qwen2.5-14b-instruct full max_new_tokens=4:
+elapsed_seconds=84.335
+generated_text=Hello! How can
+generated_token_ids=[9707, 0, 2585, 646]
+peak_working_set_mb=2393
+free_ram_start_mb=2393
+free_ram_end_mb=3236
+ready=true
+
+qwen3-30b-a3b full max_new_tokens=1 repeat=3:
+run=1 elapsed_seconds=58.084 generated_text=<think> peak_working_set_mb=1981 free_ram_before_mb=3581 free_ram_after_mb=3494 tensor_load_seconds=42.9957
+run=2 elapsed_seconds=55.328 generated_text=<think> peak_working_set_mb=2117 free_ram_before_mb=3494 free_ram_after_mb=3597 tensor_load_seconds=41.0613
+run=3 elapsed_seconds=53.685 generated_text=<think> peak_working_set_mb=2134 free_ram_before_mb=3597 free_ram_after_mb=4039 tensor_load_seconds=39.9686
+locked_warm_seconds_per_token=53.685
+locked_warm_tokens_per_second=0.01863
+```
