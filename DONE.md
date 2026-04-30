@@ -434,3 +434,4 @@
 - Fixed the opt-in web Agent warm path so prepared Qwen chat prompts are not double-wrapped. Live two-turn proof reused `64` prompt tokens, batch-appended `14`, and returned `Ok<|im_end|>` in `47.06s` with `1069 MB` process working set.
 - Surfaced warm Agent runner state through `/api/status` and the Settings runtime grid, including state, request count, last latency, prefix readiness, and process working set.
 - Added `/api/warm-runner` plus Settings Start/Stop controls so the warm Agent runner can be loaded or freed without using the CLI.
+- Proved the practical GGUF speed path: cold load took `52.26s`, then the loaded llama.cpp server answered a 4-token prompt in `2.36s` at about `2.30 tokens/sec`; server RAM was about `8.64 GB` and was unloaded afterward.

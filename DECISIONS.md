@@ -329,3 +329,15 @@ Follow-up:
 Why:
 - Without this, the runtime double-wraps the prompt and follow-up prefix reuse cannot safely match.
 - After the fix, a live web-style 14B Agent follow-up reused `64` prompt tokens and batch-appended `14` new prompt tokens.
+
+## Phase 3C / Speed direction after GGUF proof
+
+Decision:
+- Treat a loaded GGUF server as the practical speed path for customer chat and short Agent work when a GGUF artifact is ready and RAM is available.
+- Keep the direct dense page runtime as the research/compatibility path for proving dense-model paging and future architectures.
+
+Why:
+- A cold GGUF call took `52.26s` because the model loaded first.
+- The warm GGUF server call returned `4` tokens in `2.36s`, with llama.cpp reporting about `2.30 tokens/sec`.
+- The same class of direct CPU work takes tens of seconds because tensor movement dominates.
+- The GGUF server used about `8.64 GB` working set, so it must stay explicit and unloadable on 16 GB machines.

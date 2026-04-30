@@ -1559,6 +1559,77 @@ py -3.14 -m compileall -q src tests
 exit=0
 ```
 
+## Phase 3C / GGUF speed proof
+
+Discovery:
+
+```text
+GGUF artifact exists:
+models/qwen2.5-14b-instruct/artifacts/qwen2.5-14b-instruct-q4_k_m.gguf
+size=8.37 GB
+
+llama.cpp binaries exist:
+state/backend-runtimes/llama.cpp/llama-cli.exe
+state/backend-runtimes/llama.cpp/llama-server.exe
+```
+
+Backend readiness:
+
+```text
+ready=true
+main_package_available=false
+sidecar_package_available=false
+llama_cli_available=true
+llama_server_available=false before load
+blockers=[]
+```
+
+Cold GGUF call:
+
+```text
+prompt=Reply OK only.
+max_tokens=4
+ready=true
+backend=llama-cpp-gguf-server
+generated_text=No need to explain
+elapsed_seconds=52.26
+server predicted_n=4
+server predicted_per_second=2.4543
+```
+
+Warm GGUF server call:
+
+```text
+server before call:
+running=true
+pid=11312
+working_set_gb=8.64
+
+prompt=Reply OK only.
+max_tokens=4
+ready=true
+backend=llama-cpp-gguf-server
+generated_text=No need to say
+elapsed_seconds=2.36
+server predicted_n=4
+server predicted_per_second=2.2966
+```
+
+Cleanup:
+
+```text
+stop_gguf_server('qwen2.5-14b-instruct')
+running=false
+pid=null
+working_set_gb=null
+```
+
+Verdict:
+
+```text
+This is the first real speed jump. Direct CPU page runtime remains important for the dense-model research path, but customer-speed chat/agent work should route through loaded GGUF when the artifact is available and enough RAM exists.
+```
+
 ## Phase 3B / Warm Agent controls
 
 Change:

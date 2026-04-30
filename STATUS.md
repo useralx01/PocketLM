@@ -482,3 +482,8 @@ Latest warm Agent control update:
 - added `/api/warm-runner` and Settings controls to start or stop the Agent runner
 - live control smoke returned `ready` on start and `stopped` on stop
 - current Phase 3 estimate: about `66%` complete. The warm Agent path is now inspectable and controllable, not just hidden runtime state.
+
+Latest GGUF speed update:
+- found the Qwen 14B Q4_K_M GGUF artifact and llama.cpp binaries on disk
+- cold GGUF call took `52.26s`, then the loaded server answered a 4-token prompt in `2.36s` at about `2.30 tokens/sec`
+- unloaded the GGUF server after the proof; current Phase 3 estimate: about `72%` complete because the first practical speed path is proven, but routing/policy still needs to make GGUF the recommended customer path when available.
