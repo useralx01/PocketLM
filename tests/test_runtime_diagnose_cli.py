@@ -123,3 +123,53 @@ def test_runtime_diagnose_cli_summarizes_kv_cache_bytes() -> None:
     assert summary["kv_cache_layers"] == 2
     assert summary["kv_cache_total_bytes"] == key.nelement() * key.element_size() * 4
     assert summary["kv_cache_by_layer"]["0"]["key_shape"] == [1, 8, 3, 128]
+
+
+def test_runtime_diagnose_cli_moe_router_slice_reports_selected_experts(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    hidden = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32)
+    router = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_load_hello_hidden_checkpoint",
+        lambda *_args, **_kwargs: (1, hidden),
+    )
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "load_layer_bridge_config",
+        lambda _model_id: SimpleNamespace(
+            ready=True,
+            blockers=[],
+            num_experts=4,
+            num_experts_per_tok=2,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "load_tensor_by_name",
+        lambda *_args, **_kwargs: SimpleNamespace(tensor=router, blockers=[]),
+    )
+
+    exit_code = runtime_diagnose_cli.main(["--model", "qwen-moe-test", "--slice", "router-only"])
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    result = lines[2]["result"]
+    assert result["selected_experts"] == [1, 0]
+    assert result["router_logits_shape"] == [1, 1, 4]

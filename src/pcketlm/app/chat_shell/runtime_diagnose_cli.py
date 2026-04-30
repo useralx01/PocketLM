@@ -25,8 +25,14 @@ from pcketlm.core.runtime import (
     run_prompt_decode_loop,
     run_token_entry_layer_bridge,
 )
-from pcketlm.core.runtime.layer_bridge import _can_select_from_topk, select_next_token, select_next_token_from_topk
+from pcketlm.core.runtime.layer_bridge import _can_select_from_topk, _run_moe_mlp, select_next_token, select_next_token_from_topk
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
+from pcketlm.core.runtime.tensor_residency import (
+    TensorResidencyPolicy,
+    expert_residency_snapshot,
+    load_resident_tensors,
+    record_expert_activation,
+)
 from pcketlm.core.runtime.tensor_loader import reset_tensor_load_stats, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tokenizer_runtime import (
     decode_token_ids_to_text,
@@ -52,6 +58,10 @@ VALID_SLICES = {
     "prompt-prefill",
     "decode-step-1",
     "decode-step-2",
+    "router-only",
+    "one-expert",
+    "top-k-experts",
+    "all-layers-moe",
     "full",
 }
 
@@ -189,6 +199,11 @@ def _load_config(model_id: str) -> dict:
         "num_attention_heads": config.num_attention_heads,
         "num_key_value_heads": config.num_key_value_heads,
         "intermediate_size": config.intermediate_size,
+        "moe_intermediate_size": getattr(config, "moe_intermediate_size", 0),
+        "num_experts": getattr(config, "num_experts", 0),
+        "num_experts_per_tok": getattr(config, "num_experts_per_tok", 0),
+        "norm_topk_prob": getattr(config, "norm_topk_prob", False),
+        "model_type": getattr(config, "model_type", "unknown"),
         "vocab_size": config.vocab_size,
         "source_dtype": config.source_dtype,
     }
@@ -218,6 +233,122 @@ def _layer_forward(model_id: str, layer_count: int) -> dict:
     payload["token_id"] = token_id
     payload.pop("output_tensor", None)
     return payload
+
+
+def _first_hidden_for_moe(model_id: str, slice_name: str, started_at: float) -> torch.Tensor:
+    _token_id, hidden_state = _load_hello_hidden_checkpoint(model_id, slice_name, started_at)
+    return hidden_state
+
+
+def _moe_router_only(model_id: str, slice_name: str, started_at: float) -> dict:
+    hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
+    config = load_layer_bridge_config(model_id)
+    loaded = load_tensor_by_name(model_id, "model.layers.0.mlp.gate.weight")
+    blockers = list(config.blockers) + list(loaded.blockers)
+    if loaded.tensor is None:
+        blockers.append("Router tensor model.layers.0.mlp.gate.weight did not load.")
+        return {"ready": False, "blockers": blockers}
+    logits = torch.nn.functional.linear(hidden_state.float(), loaded.tensor.float())
+    probs = torch.softmax(logits, dim=-1)
+    top_values, top_indices = torch.topk(probs, max(1, min(config.num_experts_per_tok, probs.shape[-1])), dim=-1)
+    return {
+        "ready": not blockers,
+        "blockers": blockers,
+        "router_logits_shape": [int(value) for value in logits.shape],
+        "selected_experts": [int(value) for value in top_indices.detach().cpu().flatten().tolist()],
+        "router_weights": [float(value) for value in top_values.detach().cpu().flatten().tolist()],
+        **expert_residency_snapshot(),
+    }
+
+
+def _moe_one_expert(model_id: str, slice_name: str, started_at: float, expert_index: int = 0) -> dict:
+    hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
+    policy = TensorResidencyPolicy.from_environment(model_id)
+    tensor_names = [
+        f"model.layers.0.mlp.experts.{expert_index}.gate_proj.weight",
+        f"model.layers.0.mlp.experts.{expert_index}.up_proj.weight",
+        f"model.layers.0.mlp.experts.{expert_index}.down_proj.weight",
+    ]
+    record_expert_activation(0, expert_index)
+    loaded = load_resident_tensors(model_id, tensor_names, dtype=hidden_state.dtype, policy=policy)
+    blockers = [blocker for item in loaded.values() for blocker in item.blockers]
+    if blockers or any(item.tensor is None for item in loaded.values()):
+        return {"ready": False, "blockers": blockers or [f"Expert {expert_index} did not load."]}
+    gate = loaded[tensor_names[0]].tensor
+    up = loaded[tensor_names[1]].tensor
+    down = loaded[tensor_names[2]].tensor
+    output = torch.nn.functional.linear(
+        torch.nn.functional.silu(torch.nn.functional.linear(hidden_state, gate))
+        * torch.nn.functional.linear(hidden_state, up),
+        down,
+    )
+    return {
+        "ready": True,
+        "blockers": [],
+        "expert_index": expert_index,
+        "output_shape": [int(value) for value in output.shape],
+        "output_dtype": str(output.dtype),
+        **expert_residency_snapshot(),
+    }
+
+
+def _moe_top_k_experts(model_id: str, slice_name: str, started_at: float) -> dict:
+    hidden_state = _first_hidden_for_moe(model_id, slice_name, started_at)
+    config = load_layer_bridge_config(model_id)
+    router = load_tensor_by_name(model_id, "model.layers.0.mlp.gate.weight")
+    blockers = list(config.blockers) + list(router.blockers)
+    if router.tensor is None:
+        blockers.append("Router tensor model.layers.0.mlp.gate.weight did not load.")
+        return {"ready": False, "blockers": blockers}
+    with torch.no_grad():
+        probs = torch.softmax(torch.nn.functional.linear(hidden_state.float(), router.tensor.float()), dim=-1)
+        selected = torch.topk(probs, max(1, min(config.num_experts_per_tok, probs.shape[-1])), dim=-1).indices
+        selected_experts = sorted({int(value) for value in selected.detach().cpu().flatten().tolist()})
+    tensor_names: list[str] = []
+    for expert_index in selected_experts:
+        record_expert_activation(0, expert_index)
+        tensor_names.extend(
+            [
+                f"model.layers.0.mlp.experts.{expert_index}.gate_proj.weight",
+                f"model.layers.0.mlp.experts.{expert_index}.up_proj.weight",
+                f"model.layers.0.mlp.experts.{expert_index}.down_proj.weight",
+            ]
+        )
+    loaded = load_resident_tensors(
+        model_id,
+        tensor_names,
+        dtype=hidden_state.dtype,
+        policy=TensorResidencyPolicy.from_environment(model_id),
+    )
+    blockers.extend(blocker for item in loaded.values() for blocker in item.blockers)
+    expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
+    for expert_index in selected_experts:
+        prefix = f"model.layers.0.mlp.experts.{expert_index}"
+        gate = loaded[f"{prefix}.gate_proj.weight"].tensor
+        up = loaded[f"{prefix}.up_proj.weight"].tensor
+        down = loaded[f"{prefix}.down_proj.weight"].tensor
+        if gate is None or up is None or down is None:
+            blockers.append(f"Expert {expert_index} did not load all tensors.")
+            continue
+        expert_tensors[expert_index] = {"gate_proj": gate, "up_proj": up, "down_proj": down}
+    if blockers or not expert_tensors:
+        return {"ready": False, "blockers": blockers}
+    output, touched, selected_tensor = _run_moe_mlp(
+        hidden_states=hidden_state,
+        router_weight=router.tensor,
+        expert_tensors=expert_tensors,
+        top_k=config.num_experts_per_tok,
+        norm_topk_prob=config.norm_topk_prob,
+    )
+    return {
+        "ready": True,
+        "blockers": [],
+        "selected_experts": [int(value) for value in selected_tensor.detach().cpu().flatten().tolist()],
+        "touched_experts": touched,
+        "output_shape": [int(value) for value in output.shape],
+        "output_dtype": str(output.dtype),
+        **expert_residency_snapshot(),
+    }
 
 
 def _load_hello_hidden_checkpoint(model_id: str, slice_name: str, started_at: float) -> tuple[int, torch.Tensor]:
@@ -680,6 +811,14 @@ def _operation_for_slice(slice_name: str) -> tuple[str, Callable[[str], dict]]:
         return "decode-step-1", lambda model_id: {}
     if slice_name == "decode-step-2":
         return "decode-step-2", lambda model_id: {}
+    if slice_name == "router-only":
+        return "router-only", lambda model_id: {}
+    if slice_name == "one-expert":
+        return "one-expert", lambda model_id: {}
+    if slice_name == "top-k-experts":
+        return "top-k-experts", lambda model_id: {}
+    if slice_name == "all-layers-moe":
+        return "all-layers-moe", lambda model_id: {}
     if slice_name == "full":
         return "full-prompt-decode", _full_forward
     raise ValueError(f"Unknown slice {slice_name!r}.")
@@ -733,6 +872,50 @@ def main(argv: list[str] | None = None) -> int:
             result.pop("decode_state", None)
         elif slice_name == "decode-step-2":
             result = _second_decode_step_checkpoint(model_id, slice_name, started_at)
+        elif slice_name == "router-only":
+            result = _run_checkpoint(
+                model_id=model_id,
+                slice_name=slice_name,
+                operation="moe-router-layer-0",
+                started_at=started_at,
+                callback=lambda: _moe_router_only(model_id, slice_name, started_at),
+            )
+        elif slice_name == "one-expert":
+            result = _run_checkpoint(
+                model_id=model_id,
+                slice_name=slice_name,
+                operation="moe-one-expert-layer-0",
+                started_at=started_at,
+                callback=lambda: _moe_one_expert(model_id, slice_name, started_at),
+            )
+        elif slice_name == "top-k-experts":
+            result = _run_checkpoint(
+                model_id=model_id,
+                slice_name=slice_name,
+                operation="moe-top-k-experts-layer-0",
+                started_at=started_at,
+                callback=lambda: _moe_top_k_experts(model_id, slice_name, started_at),
+            )
+        elif slice_name == "all-layers-moe":
+            config = load_layer_bridge_config(model_id)
+            token_id, hidden_state = _load_hello_hidden_checkpoint(model_id, slice_name, started_at)
+            stack = _run_layer_stack_checkpoint(
+                model_id,
+                slice_name,
+                started_at,
+                hidden_state,
+                layer_count=int(config.num_hidden_layers),
+            )
+            result = {
+                "ready": bool(stack.ready),
+                "token_id": token_id,
+                "layer_count": int(config.num_hidden_layers),
+                "executed_layers": list(stack.executed_layers),
+                "output_shape": list(stack.output_shape),
+                "output_dtype": stack.output_dtype,
+                "blockers": list(stack.blockers),
+                **expert_residency_snapshot(),
+            }
         elif repeat > 1:
             repeated: list[dict[str, Any]] = []
             for run_index in range(1, repeat + 1):

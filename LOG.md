@@ -2798,3 +2798,12 @@ pytest tests/test_model_families.py tests/test_registry_repository.py -v
 ```
 
 Added registry entry `qwen3-30b-a3b` -> `models/qwen3-30b-a3b/original/`, repo `Qwen/Qwen3-30B-A3B`, family `qwen-moe`, model_type `moe`.
+
+## Phase MoE / Step 8 / diagnostic slices
+
+```text
+pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_moe_router_slice_reports_selected_experts tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_load_config_outputs_checkpoints -v
+2 passed in 2.47s
+```
+
+Added slices: `router-only`, `one-expert`, `top-k-experts`, `all-layers-moe`. They report memory checkpoints and expert residency snapshots.
