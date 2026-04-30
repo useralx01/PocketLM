@@ -412,8 +412,8 @@ def test_expert_residency_decay_lets_new_hot_expert_replace_old_one(tmp_path: Pa
         record_expert_activation(0, 12)
     load_resident_tensor(model_id, names[12], policy=policy)
 
-    old = load_resident_tensor(model_id, names[5], policy=policy)
     new = load_resident_tensor(model_id, names[12], policy=policy)
+    old = load_resident_tensor(model_id, names[5], policy=policy)
 
     assert old.tensor is not None
     assert new.tensor is not None
@@ -463,6 +463,49 @@ def test_expert_residency_per_layer_cap_evicts_lower_score_expert(tmp_path: Path
 
     assert tensor_residency_stats().expert_evictions >= 1
     assert tensor_residency_stats().expert_hits >= 1
+
+
+def test_expert_residency_hard_budget_can_evict_current_step_experts(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-hard-budget-test"
+    names = {
+        5: "model.layers.0.mlp.experts.5.gate_proj.weight",
+        12: "model.layers.0.mlp.experts.12.gate_proj.weight",
+    }
+    entries = {}
+    for expert_index, tensor_name in names.items():
+        entry = _entry(tmp_path, tensor_name)
+        entry.component_group = "expert_mlp"
+        entry.expert_index = expert_index
+        entries[tensor_name] = entry
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        return _loaded_tensor(model_id_arg, entries[tensor_name])
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=1024,
+        max_tensor_bytes=1024,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=1,
+        expert_max_resident_bytes=16,
+        max_resident_experts_per_layer=8,
+    )
+    record_expert_activation(0, 5)
+    record_expert_activation(0, 12)
+    load_resident_tensor(model_id, names[5], policy=policy)
+    load_resident_tensor(model_id, names[12], policy=policy)
+
+    snapshot = expert_residency_snapshot()
+
+    assert snapshot["expert_resident_bytes"] <= 16
+    assert snapshot["expert_resident_count"] == 1
+    assert tensor_residency_stats().expert_evictions == 1
 
 
 def test_default_tensor_residency_policy_stays_standard_when_memory_has_headroom(monkeypatch) -> None:

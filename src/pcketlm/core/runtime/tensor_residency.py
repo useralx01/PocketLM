@@ -470,7 +470,9 @@ def _store_resident_tensor(
 
         if expert_key is not None:
             while _resident_tensors and _resident_expert_bytes + nbytes > policy.expert_max_resident_bytes:
-                evict_key = _select_expert_eviction_key()
+                evict_key = _select_expert_eviction_key(allow_current_step=False)
+                if evict_key is None:
+                    evict_key = _select_expert_eviction_key(allow_current_step=True)
                 if evict_key is None:
                     break
                 old = _resident_tensors.pop(evict_key)
@@ -534,10 +536,12 @@ def _select_non_expert_eviction_key(policy: TensorResidencyPolicy) -> _CacheKey 
     return None
 
 
-def _select_expert_eviction_key() -> _CacheKey | None:
+def _select_expert_eviction_key(*, allow_current_step: bool = False) -> _CacheKey | None:
     candidates: list[tuple[float, int, _CacheKey]] = []
     for key, resident in _resident_tensors.items():
-        if resident.expert_key is None or resident.expert_key in _current_step_experts:
+        if resident.expert_key is None:
+            continue
+        if not allow_current_step and resident.expert_key in _current_step_experts:
             continue
         activation_score = _expert_activation_scores.get(resident.expert_key, 0.0)
         candidates.append((activation_score, resident.loaded_step, key))
@@ -578,6 +582,19 @@ def _enforce_expert_layer_cap(policy: TensorResidencyPolicy, layer_index: int) -
 
     while resident_expert_count_for_layer() > policy.max_resident_experts_per_layer:
         evict_key = _select_expert_eviction_key_for_layer(layer_index)
+        if evict_key is None:
+            candidates: list[tuple[float, int, _CacheKey]] = []
+            for key, resident in _resident_tensors.items():
+                if resident.expert_key is None or resident.expert_key[0] != layer_index:
+                    continue
+                candidates.append((
+                    _expert_activation_scores.get(resident.expert_key, 0.0),
+                    resident.loaded_step,
+                    key,
+                ))
+            if candidates:
+                candidates.sort(key=lambda item: (item[0], item[1]))
+                evict_key = candidates[0][2]
         if evict_key is None:
             break
         old = _resident_tensors.pop(evict_key)
