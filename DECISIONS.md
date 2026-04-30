@@ -321,3 +321,11 @@ Why:
 - Tensor loading still dominated both runs: `33.503s` on the first call and `32.875s` on the second.
 - This is useful product plumbing for future agents because it gives Pocket LLM a clear runner lifecycle, state file, telemetry, Load/Run/Stop CLI, and a web setting.
 - It is not yet the final speed breakthrough; that still needs deeper execution reuse or a different backend.
+
+Follow-up:
+- The opt-in web Agent path must pass `apply_chat_format=false` to the warm runner after the web layer has already built the Qwen chat prompt.
+- The first warm Agent turn should use Qwen chat framing even with no prior messages.
+
+Why:
+- Without this, the runtime double-wraps the prompt and follow-up prefix reuse cannot safely match.
+- After the fix, a live web-style 14B Agent follow-up reused `64` prompt tokens and batch-appended `14` new prompt tokens.

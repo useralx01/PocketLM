@@ -302,6 +302,7 @@ def run_warm_agent_prompt(
     max_new_tokens: int = WARM_RUNNER_AGENT_MAX_NEW_TOKENS,
     mode: str = "Agent",
     min_free_memory_mb: int = WARM_RUNNER_MIN_FREE_MEMORY_MB,
+    apply_chat_format: bool = True,
     run_prompt_decode_loop_fn=None,
 ) -> WarmRunnerRequestResult:
     """Run one short Agent prompt through the conservative in-process warm runner."""
@@ -340,6 +341,7 @@ def run_warm_agent_prompt(
                 max_new_tokens=max(1, min(int(max_new_tokens), WARM_RUNNER_AGENT_MAX_NEW_TOKENS)),
                 min_new_tokens=1,
                 selection_policy="greedy",
+                apply_chat_format=apply_chat_format,
                 initial_decode_state=runner.decode_state,
                 initial_token_ids=runner.reusable_token_ids,
             )

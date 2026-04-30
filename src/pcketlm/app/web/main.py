@@ -1142,6 +1142,13 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
     )
     layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
     if _agent_warm_runner_enabled(mode):
+        if not preformatted_chat and _supports_im_chat_tokens(model_id):
+            effective_prompt, conversation_turn_count, preformatted_chat = _formatted_chat_prompt(
+                model_id,
+                [{"role": "system", "text": system_prompt}],
+                prompt,
+                system_prompt=system_prompt,
+            )
         started = time.perf_counter()
         warm_result = run_warm_agent_prompt(
             model_id,
@@ -1149,6 +1156,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             mode=mode,
             session_id=session_id,
             max_new_tokens=max_new_tokens,
+            apply_chat_format=not preformatted_chat,
         )
         elapsed_seconds = round(time.perf_counter() - started, 2)
         response = {

@@ -73,6 +73,7 @@ def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatc
     assert calls[0]["initial_decode_state"] is None
     assert calls[1]["initial_decode_state"] is first_state
     assert calls[1]["initial_token_ids"] == [1, 2, 1]
+    assert calls[1]["apply_chat_format"] is True
     assert second.prefix_reuse["used"] is True
     assert second.performance_summary["bottleneck"] == "tensor loading"
 

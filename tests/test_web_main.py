@@ -461,6 +461,12 @@ def test_run_chat_payload_includes_qwen_32b_guardrails(monkeypatch) -> None:
     monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
     monkeypatch.setattr(
         web.main,
+        "_load_saved_runtime_settings",
+        lambda: {"tensor_cache_preset": "standard", "agent_warm_runner": "off"},
+    )
+    monkeypatch.setattr(web.main, "_apply_runtime_settings", lambda settings: None)
+    monkeypatch.setattr(
+        web.main,
         "tensor_residency_policy_snapshot",
         lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
     )
@@ -632,6 +638,12 @@ def test_run_chat_payload_agent_mode_caps_direct_runtime_to_short_work(monkeypat
         )
 
     monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "_load_saved_runtime_settings",
+        lambda: {"tensor_cache_preset": "standard", "agent_warm_runner": "off"},
+    )
+    monkeypatch.setattr(web.main, "_apply_runtime_settings", lambda settings: None)
     monkeypatch.setattr(
         web.main,
         "tensor_residency_policy_snapshot",
@@ -1182,8 +1194,9 @@ def test_agent_mode_can_use_opt_in_warm_runner(monkeypatch) -> None:
     monkeypatch.setattr(web_main, "_speed_status_payload", lambda model_id: {"status": "Stable"})
     monkeypatch.setattr(web_main, "_runtime_context_payload", lambda model_id, mode, profile: {"mode": mode})
     monkeypatch.setattr(web_main, "_direct_model_guardrails", lambda model_id, max_new_tokens: {"blockers": []})
+    monkeypatch.setattr(web_main, "_supports_im_chat_tokens", lambda model_id: True)
 
-    def fake_warm_runner(model_id, prompt, *, mode, session_id, max_new_tokens):
+    def fake_warm_runner(model_id, prompt, *, mode, session_id, max_new_tokens, apply_chat_format):
         captured.update(
             {
                 "model_id": model_id,
@@ -1191,6 +1204,7 @@ def test_agent_mode_can_use_opt_in_warm_runner(monkeypatch) -> None:
                 "mode": mode,
                 "session_id": session_id,
                 "max_new_tokens": max_new_tokens,
+                "apply_chat_format": apply_chat_format,
             }
         )
         return SimpleNamespace(
@@ -1222,11 +1236,64 @@ def test_agent_mode_can_use_opt_in_warm_runner(monkeypatch) -> None:
     assert captured["mode"] == "Agent"
     assert captured["session_id"] == "warm-agent-test"
     assert captured["max_new_tokens"] == 2
+    assert captured["apply_chat_format"] is False
     assert "reply ok only" in captured["prompt"]
     assert payload["strategy"] == "warm-agent-runner"
     assert payload["generated_text"] == "OK"
     assert payload["warm_runner"]["state"] == "ready"
     assert payload["prefix_reuse"]["used"] is True
+
+
+def test_agent_warm_runner_formats_first_qwen_turn(monkeypatch) -> None:
+    captured = {}
+
+    monkeypatch.setattr(web_main, "_local_runtime_context_answer", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_main, "_memory_guard_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        web_main,
+        "_load_saved_runtime_settings",
+        lambda: {"tensor_cache_preset": "standard", "agent_warm_runner": "safe"},
+    )
+    monkeypatch.setattr(web_main, "_apply_runtime_settings", lambda settings: None)
+    monkeypatch.setattr(web_main, "_runtime_settings_payload", lambda: {"agent_warm_runner": "safe"})
+    monkeypatch.setattr(web_main, "_speed_status_payload", lambda model_id: {"status": "Stable"})
+    monkeypatch.setattr(web_main, "_runtime_context_payload", lambda model_id, mode, profile: {"mode": mode})
+    monkeypatch.setattr(web_main, "_direct_model_guardrails", lambda model_id, max_new_tokens: {"blockers": []})
+    monkeypatch.setattr(web_main, "_supports_im_chat_tokens", lambda model_id: True)
+
+    def fake_warm_runner(model_id, prompt, *, mode, session_id, max_new_tokens, apply_chat_format):
+        captured["prompt"] = prompt
+        captured["apply_chat_format"] = apply_chat_format
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            generated_token_ids=[111],
+            steps_completed=1,
+            max_new_tokens=max_new_tokens,
+            blockers=[],
+            performance_summary={},
+            prefix_reuse={"enabled": False, "used": False},
+            runner_status={"state": "ready", "reusable_token_count": 1},
+        )
+
+    monkeypatch.setattr(web_main, "run_warm_agent_prompt", fake_warm_runner)
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-14b-instruct",
+            "mode": "Agent",
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "session_id": "warm-agent-format-test",
+            "messages": [],
+        }
+    )
+
+    assert payload["strategy"] == "warm-agent-runner"
+    assert "<|im_start|>system" in captured["prompt"]
+    assert "<|im_start|>user\nhello<|im_end|>" in captured["prompt"]
+    assert captured["prompt"].endswith("<|im_start|>assistant\n")
+    assert captured["apply_chat_format"] is False
 
 
 def test_chat_job_cancel_marks_queued_job_canceled() -> None:

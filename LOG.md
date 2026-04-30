@@ -1916,3 +1916,66 @@ py -3.14 -m pytest tests/ -v
 py -3.14 -m compileall -q src tests
 exit=0
 ```
+
+## Phase 3B / Warm Agent web prefix reuse fix
+
+Problem found:
+
+```text
+The first opt-in web Agent prompt was formatted for Qwen, but the warm runner still let the runtime apply chat formatting again.
+That double-wrapping prevented safe prefix reuse on the second web-style turn.
+```
+
+Fix:
+
+```text
+Warm runner accepts apply_chat_format.
+Web Agent warm path sends apply_chat_format=false after it prepares the Qwen chat prompt.
+First warm Agent turn now uses the Qwen chat frame even when there is no prior message history.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py tests/test_warm_runner.py -v
+44 passed in 8.61s
+
+py -3.14 -m compileall -q src\pcketlm\core\runtime\warm_runner.py src\pcketlm\app\web\main.py tests\test_web_main.py tests\test_warm_runner.py
+exit=0
+```
+
+Live web-style two-turn proof:
+
+```text
+first:
+ready=true
+generated_text=Hello!
+elapsed_seconds=51.69
+preformatted_chat=true
+reusable_token_count=64
+free_ram_after_mb=6790
+process_working_set_after_mb=1051
+
+second:
+ready=true
+generated_text=Ok<|im_end|>
+elapsed_seconds=47.06
+prefix_reuse.enabled=true
+prefix_reuse.used=true
+prefix_reuse.matched_token_count=64
+prefix_reuse.appended_token_count=14
+prefix_reuse.summary=Reused 64 prompt tokens and batch-appended 14 new prompt tokens.
+reusable_token_count=79
+free_ram_after_mb=6779
+process_working_set_after_mb=1069
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+195 passed in 21.39s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
