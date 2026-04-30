@@ -93,6 +93,7 @@ class LayerBridgeModelConfig:
     num_hidden_layers: int
     num_attention_heads: int
     num_key_value_heads: int
+    head_dim: int
     intermediate_size: int
     moe_intermediate_size: int
     num_experts: int
@@ -119,6 +120,7 @@ class LayerBridgeModelConfig:
             "num_hidden_layers": self.num_hidden_layers,
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
+            "head_dim": self.head_dim,
             "intermediate_size": self.intermediate_size,
             "moe_intermediate_size": self.moe_intermediate_size,
             "num_experts": self.num_experts,
@@ -685,6 +687,7 @@ def _load_layer_bridge_config_cached(
             num_hidden_layers=0,
             num_attention_heads=0,
             num_key_value_heads=0,
+            head_dim=0,
             intermediate_size=0,
             moe_intermediate_size=0,
             num_experts=0,
@@ -731,9 +734,13 @@ def _load_layer_bridge_config_cached(
     hidden_size = int(payload.get("hidden_size", 0))
     num_attention_heads = int(payload.get("num_attention_heads", 0))
     num_key_value_heads = int(payload.get("num_key_value_heads", 0))
+    configured_head_dim = int(payload.get("head_dim", 0) or 0)
+    effective_head_dim = configured_head_dim or (hidden_size // num_attention_heads if num_attention_heads > 0 else 0)
     if num_attention_heads <= 0 or num_key_value_heads <= 0:
         blockers.append("Attention head counts must be positive.")
-    elif hidden_size % num_attention_heads != 0:
+    elif effective_head_dim <= 0:
+        blockers.append("Attention head dimension must be positive.")
+    elif configured_head_dim <= 0 and hidden_size % num_attention_heads != 0:
         blockers.append(
             f"Hidden size {hidden_size} must be divisible by attention heads {num_attention_heads}."
         )
@@ -758,6 +765,7 @@ def _load_layer_bridge_config_cached(
         num_hidden_layers=int(payload.get("num_hidden_layers", 0)),
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
+        head_dim=effective_head_dim,
         intermediate_size=int(payload.get("intermediate_size", 0)),
         moe_intermediate_size=int(payload.get("moe_intermediate_size", 0)),
         num_experts=int(payload.get("num_experts", 0) or 0),
@@ -1382,7 +1390,7 @@ def run_minimal_layer_forward_bridge(
         )
 
     batch_size, sequence_length, _hidden_size = hidden_states.shape
-    head_dim = config.hidden_size // config.num_attention_heads
+    head_dim = config.head_dim
     kv_repeat = config.num_attention_heads // config.num_key_value_heads
 
     norm_tensor_names = [

@@ -55,6 +55,14 @@ Follow-up:
 - Updated fix direction: keep scoped safetensor handle caching disabled for the 32B/full path and audit the scoped handle lifecycle before re-enabling it.
 
 ## Error
+- date: 2026-04-30
+- area: Phase MoE / Step 9 / Qwen3 all-layers-moe
+- what went wrong: `qwen3-30b-a3b --slice=all-layers-moe` failed at layer 0 with `RuntimeError("shape '[1, 1, 32, 64]' is invalid for input of size 4096")`.
+- why it happened: the dense Qwen2 path derived attention head dimension as `hidden_size / num_attention_heads`. Qwen3 MoE stores `head_dim=128` in config, so q_proj output is `32 * 128 = 4096` even though hidden size is 2048.
+- fix: teach the layer bridge config to read `head_dim` from config.json and use it for Q/K/V reshaping, falling back to the dense derivation only when the field is absent.
+- lesson: MoE support must respect explicit config dimensions instead of deriving every attention shape from hidden size.
+
+## Error
 - date: 2026-04-23
 - area: model download / Hugging Face import
 - what went wrong: the initial `Qwen/Qwen2.5-14B-Instruct` download stalled and never progressed beyond lock files or tiny metadata files
