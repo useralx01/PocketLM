@@ -1752,3 +1752,55 @@ py -3.14 -m pytest tests/test_web_main.py tests/test_benchmark_runs.py -v
 node --check src/pcketlm/app/web/static/app.js
 exit=0
 ```
+
+## Phase 3 / 32B twelve-token ladder
+
+Self-prompt:
+
+```text
+Try the next 32B proof-ladder step, but do not promote it if quality or layer coverage is not release-grade.
+```
+
+Preflight:
+
+```text
+requested_max_new_tokens=12
+free_ram_mb=8943
+estimated_seconds=519.7
+warning=Qwen2.5-32B-Instruct is proven to 8 new tokens on this machine; longer runs are experimental.
+```
+
+Live diagnostic evidence:
+
+```text
+py -3.14 -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --max-new-tokens 12
+exit=0
+operation_seconds=202.704
+free_ram_start_mb=8907
+free_ram_end_mb=7996
+working_set_mb=1415
+generated_text=您好战росл无论是其ПетерLLU SQETCHing查看全文长长长长
+generated_token_ids=[111308, 119921, 137360, 117918, 135873, 45110, 51618, 15836, 287, 118214, 117012, 117012]
+prefill_stack_layer_count=24
+continuation_stack_layer_count=264
+```
+
+Verdict:
+
+```text
+This is not promoted. The process did not crash, but the auto layer budget dropped to 24 layers above 8 tokens and output quality degraded badly.
+```
+
+Fix:
+
+```text
+Explicit experimental direct web runs above the proven token range now force the model's full layer count instead of silently using the rough reduced-layer path.
+Normal web chat still caps Qwen 14B and 32B to 8 new tokens.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py -v
+39 passed in 7.77s
+```

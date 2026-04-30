@@ -286,3 +286,14 @@ Why:
 - The second live Agent call reused session prefix successfully, but still took `38.72s`.
 - The reused call spent about `32.64s` loading tensors across prefix append and continuation.
 - A live Boosted check did not prove a meaningful speed win, so changing defaults would add risk without enough benefit.
+
+## Phase 3 / Longer direct replies
+
+Decision:
+- Keep the normal direct web cap at `8` new tokens for Qwen 14B and Qwen 32B.
+- If a user explicitly opts into longer direct output with `allow_experimental_direct_tokens=true`, force the full model layer count in the web runtime path.
+
+Why:
+- A Qwen 32B 12-token diagnostic completed without crashing, but it automatically reduced to `24` layers and produced bad mixed-language text: `您好战росл无论是其ПетерLLU SQETCHing查看全文长长长长`.
+- That result proves the process can survive a longer run, but it is not release-quality output and should not be promoted.
+- Experimental longer direct runs must prefer honest full-stack slowness over hidden partial-stack slop.

@@ -29,6 +29,7 @@ from pcketlm.core.runtime import (
     build_gguf_backend_status,
     build_gguf_server_status,
     build_runtime_backend_report,
+    load_layer_bridge_config,
     run_gguf_prompt,
     run_prompt_decode_loop,
     runtime_math_dtype_name,
@@ -206,6 +207,17 @@ def _chat_layer_count(mode: str) -> int | None:
     if normalized.startswith("balanced"):
         return 32
     return None
+
+
+def _chat_layer_count_for_request(model_id: str, mode: str, max_new_tokens: int) -> int | None:
+    layer_count = _chat_layer_count(mode)
+    proven_max_tokens = _direct_runtime_proven_max_tokens(model_id)
+    if _is_gguf_mode(mode) or proven_max_tokens is None or max_new_tokens <= proven_max_tokens:
+        return layer_count
+    config = load_layer_bridge_config(model_id)
+    if config.blockers:
+        return layer_count
+    return int(config.num_hidden_layers)
 
 
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -1105,7 +1117,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
         prompt,
         system_prompt=system_prompt,
     )
-    layer_count = _chat_layer_count(mode)
+    layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
     profile_id = "" if profile is None else profile.profile_id
     session_prefix = _get_session_prefix(
         session_id,

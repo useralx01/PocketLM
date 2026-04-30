@@ -427,3 +427,5 @@
 - Added Agent to measured benchmark runs so speed comparisons cover the repeated-short-work path.
 - Proved repeated Agent session reuse: the second 14B Agent call reused `64` prompt tokens and batch-appended `14`, but still took `38.72s` because tensor loading remained dominant.
 - Added `performance_summary` to chat responses so each run reports total, stack, tensor-load, decode-tail, tensor-load share, and bottleneck.
+- Tested Qwen 32B at `12` tokens. It did not crash, but it fell to a `24`-layer automatic path and produced bad output, so it was not promoted.
+- Fixed the web runtime path so explicit longer-than-proven direct runs use the full model layer count instead of a hidden reduced-layer path.

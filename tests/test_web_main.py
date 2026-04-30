@@ -11,6 +11,7 @@ from pcketlm.app.web.main import (
     _release_single_instance_lock,
     _cancel_chat_job,
     _chat_layer_count,
+    _chat_layer_count_for_request,
     _chat_job_payload,
     _clear_chat_response_cache,
     _clear_session_prefix_cache,
@@ -46,6 +47,17 @@ def test_chat_layer_count_maps_web_modes() -> None:
     assert _chat_layer_count("Balanced") == 32
     assert _chat_layer_count("Quality") is None
     assert _chat_layer_count("unknown") is None
+
+
+def test_chat_layer_count_for_experimental_direct_uses_full_stack(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_main,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(num_hidden_layers=48, blockers=[]),
+    )
+
+    assert _chat_layer_count_for_request("qwen2.5-14b-instruct", "Quality", 12) == 48
+    assert _chat_layer_count_for_request("qwen2.5-14b-instruct", "Quality", 8) is None
 
 
 def test_existing_server_check_returns_false_for_closed_port() -> None:
@@ -552,6 +564,50 @@ def test_run_chat_payload_caps_qwen_14b_to_proven_token_range(monkeypatch) -> No
     assert payload["max_new_tokens"] == 8
     assert payload["model_guardrails"]["proven_max_new_tokens"] == 8
     assert payload["model_guardrails"]["warnings"] == []
+
+
+def test_run_chat_payload_experimental_qwen_14b_uses_full_stack(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="longer",
+            full_text="longer",
+            generated_token_ids=[1] * kwargs["max_new_tokens"],
+            prompt_token_ids=[1, 2, 3],
+            steps_completed=kwargs["max_new_tokens"],
+            max_new_tokens=kwargs["max_new_tokens"],
+            stop_reason="step-limit",
+            strategy="fake",
+            cache_sequence_lengths={"0": 42},
+            blockers=[],
+        )
+
+    monkeypatch.setattr(web.main, "run_prompt_decode_loop", fake_run_prompt_decode_loop)
+    monkeypatch.setattr(web.main, "load_layer_bridge_config", lambda model_id: SimpleNamespace(num_hidden_layers=48, blockers=[]))
+    monkeypatch.setattr(
+        web.main,
+        "tensor_residency_policy_snapshot",
+        lambda: {"free_memory_bytes": 6 * 1024**3, "free_memory_gb": 6.0, "memory_guard_active": False},
+    )
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "qwen2.5-14b-instruct",
+            "prompt": "hello world",
+            "mode": "Quality",
+            "max_new_tokens": 12,
+            "allow_experimental_direct_tokens": True,
+        }
+    )
+
+    assert captured["max_new_tokens"] == 12
+    assert captured["layer_count"] == 48
+    assert payload["model_guardrails"]["warnings"]
 
 
 def test_run_chat_payload_agent_mode_caps_direct_runtime_to_short_work(monkeypatch) -> None:

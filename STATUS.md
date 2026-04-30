@@ -452,3 +452,8 @@ Latest Agent reuse update:
 - speed did not materially improve because tensor loading still dominated: the second call took about `38.7s`
 - chat responses now include a `performance_summary` field so future runs expose the bottleneck without manually reading raw timing keys
 - current Phase 3 estimate: about `42%` complete. Reliability and measurement are much better; the next real speed work needs a warm runner or backend change.
+
+Latest 32B proof-ladder update:
+- Qwen 32B `12` tokens completed without a crash, but it used only `24` layers and produced bad mixed-language output, so it is not promoted
+- explicit longer-than-proven direct web runs now force full-stack layer count; normal web chat still caps Qwen 14B and 32B at the proven `8` token range
+- current Phase 3 estimate: about `48%` complete. Longer-run policy is safer, but true longer 32B quality still needs a slow full-stack proof or a better backend.
