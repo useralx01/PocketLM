@@ -472,3 +472,8 @@ Latest warm Agent prefix update:
 - fixed warm Agent web calls so the Qwen chat prompt is formatted once, not double-wrapped by the runtime
 - live two-turn 14B proof reused `64` prompt tokens, batch-appended `14`, and returned `Ok<|im_end|>` in `47.06s`
 - current Phase 3 estimate: about `62%` complete. Agent continuation state now works through the product path, but speed is still limited by large tensor movement.
+
+Latest warm Agent visibility update:
+- `/api/status` now exposes the warm runner, and Settings shows Agent runner state, request count, last run, prefix readiness, and working set
+- live status smoke returned `warm_state=ready`, `requests=2`, and `agent_setting=safe`
+- current Phase 3 estimate: about `64%` complete. The Agent path is now easier to inspect during real local use.

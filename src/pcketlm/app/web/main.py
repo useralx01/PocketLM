@@ -38,6 +38,7 @@ from pcketlm.core.runtime import (
     select_runtime_engine,
     start_gguf_server,
     stop_gguf_server,
+    warm_runner_status,
 )
 from pcketlm.core.runtime.tensor_loader import runtime_pack_selection_snapshot, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tensor_residency import (
@@ -1389,6 +1390,7 @@ def _status_payload() -> dict:
         "engine_decision": select_runtime_engine(model_id).to_dict(),
         "backend_report": build_runtime_backend_report(model_id).to_dict(),
         "gguf_backend": build_gguf_backend_status(model_id).to_dict(),
+        "warm_runner": warm_runner_status(model_id),
         "runtime_settings": _runtime_settings_payload(),
         "models": [
             {

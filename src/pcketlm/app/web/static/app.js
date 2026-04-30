@@ -78,6 +78,7 @@ function renderStatus(payload) {
     elapsed_seconds: null,
     timings: {},
     runtime_settings: payload.runtime_settings || {},
+    warm_runner: payload.warm_runner || {},
   });
   renderBackendReport(payload.backend_report);
   renderLoadRuntime(payload);
@@ -298,6 +299,8 @@ function formatClockTime(value) {
 function runtimeRows(details) {
   const timings = details?.timings || {};
   const settings = details?.runtime_settings || {};
+  const warmRunner = details?.warm_runner || {};
+  const warmMemory = warmRunner.memory || {};
   const cache = settings.tensor_residency || {};
   const policy = settings.tensor_residency_policy || {};
   return [
@@ -314,6 +317,11 @@ function runtimeRows(details) {
     ["Cache preset", policy.tensor_cache_preset || "standard"],
     ["Cache policy", policy.memory_guard_active ? "low RAM" : `${policy.front_layer_count ?? "n/a"} front`],
     ["Cache cap", formatBytes(policy.max_resident_bytes)],
+    ["Agent runner", warmRunner.state || "stopped"],
+    ["Agent requests", warmRunner.request_count ?? 0],
+    ["Agent last run", formatSeconds(warmRunner.last_latency_seconds)],
+    ["Agent prefix", warmRunner.prefix_reuse_available ? `${warmRunner.reusable_token_count ?? 0} tokens` : "not ready"],
+    ["Agent memory", warmMemory.process_working_set_mb ? `${warmMemory.process_working_set_mb} MB` : "n/a"],
   ];
 }
 

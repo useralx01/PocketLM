@@ -1559,6 +1559,45 @@ py -3.14 -m compileall -q src tests
 exit=0
 ```
 
+## Phase 3B / Warm Agent status surface
+
+Change:
+
+```text
+/api/status now includes warm_runner.
+Settings runtime grid shows Agent runner state, request count, last run, prefix readiness, and process working set.
+```
+
+Focused verification:
+
+```text
+py -3.14 -m pytest tests/test_web_main.py tests/test_warm_runner.py -v
+44 passed in 8.57s
+
+node --check src\pcketlm\app\web\static\app.js
+exit=0
+
+py -3.14 -m compileall -q src\pcketlm\app\web\main.py tests\test_web_main.py
+exit=0
+```
+
+Live status smoke:
+
+```text
+py -3.14 -c "from pcketlm.app.web.main import _status_payload; p=_status_payload(); print({'warm_state': p['warm_runner']['state'], 'requests': p['warm_runner'].get('request_count'), 'agent_setting': p['runtime_settings'].get('agent_warm_runner')})"
+{'warm_state': 'ready', 'requests': 2, 'agent_setting': 'safe'}
+```
+
+Full verification:
+
+```text
+py -3.14 -m pytest tests/ -v
+195 passed in 21.42s
+
+py -3.14 -m compileall -q src tests
+exit=0
+```
+
 Qwen 14B regression:
 
 ```text

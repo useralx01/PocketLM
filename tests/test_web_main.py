@@ -1108,10 +1108,17 @@ def test_status_payload_includes_engine_decision(monkeypatch) -> None:
         "select_runtime_engine",
         lambda model_id: SimpleNamespace(to_dict=lambda: {"selected_engine": "direct-cpu"}),
     )
+    monkeypatch.setattr(
+        web.main,
+        "warm_runner_status",
+        lambda model_id: {"model_id": model_id, "state": "ready", "request_count": 2},
+    )
 
     payload = web.main._status_payload()
 
     assert payload["engine_decision"]["selected_engine"] == "direct-cpu"
+    assert payload["warm_runner"]["state"] == "ready"
+    assert payload["warm_runner"]["request_count"] == 2
 
 
 def test_status_payload_includes_live_download_meter(monkeypatch, tmp_path) -> None:
