@@ -551,3 +551,9 @@ Latest direct paged speed v2 outcome:
 - Layer prefetch regressed warm runs to `21.295s` and `24.999s`, with free RAM falling near `1.9 GB`, so it is disabled by default.
 - Final default best warm was `17.686s/token` by process time, `16.5091s/token` by runtime result timing, with tensor-load still `13.2415s`.
 - Outcome: direct paged runtime speed target not met; full suite passed with `217` tests. The next speed path must be architectural: quantized direct execution, native fused backend, GPU path, or redesigned packed execution.
+
+Latest MoE foundation outcome:
+- Qwen3-30B-A3B now runs through the direct paged MoE path end-to-end on this machine.
+- Real full decode generated `<think>` in `54.149s` for `1` token and `<think>\nOkay,` in `134.700s` for `4` tokens, with about `1981 MB` peak working set.
+- Best warm run was `68.129s/token` / `0.01468 tokens/sec`, so the MoE speed target was not met.
+- Qwen 14B regression passed with `Hello! How can`, and the full test suite passed with `223` tests.

@@ -7,6 +7,7 @@
 
 ## Next
 
+- MoE follow-up: make Qwen3 full decode report expert hit/miss telemetry in the final full slice, then attack the `~51s` warm tensor-load wall with an expert-aware packed/runtime path instead of dense-style safetensors reloads.
 - Re-scope direct paged runtime speed around first-pass tensor IO/copy reduction. Sticky residency did not improve Qwen 14B `--slice=full` at one generated token.
 - Investigate architecture-level direct runtime levers: persistent per-layer weight service, memory-mapped packed weights, larger contiguous derived packs, or a backend execution change that avoids reopening/copying large projection tensors per prompt.
 - Phase 4 hardening: make the loaded GGUF path smooth across app refresh/restart where practical.

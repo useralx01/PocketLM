@@ -2867,3 +2867,70 @@ free_ram_start_mb=5215
 free_ram_end_mb=4659
 ready=true
 ```
+
+## Phase MoE / Step 9 / first run
+
+```text
+qwen3-30b-a3b full max_new_tokens=1:
+elapsed_seconds=54.149
+operation_seconds=54.148
+generated_text=<think>
+generated_token_ids=[151667]
+prefill_stack_seconds=53.0756
+prefill_stack_tensor_load_seconds=37.8689
+peak_working_set_mb=1980
+free_ram_start_mb=5176
+free_ram_end_mb=4417
+ready=true
+
+qwen3-30b-a3b full max_new_tokens=4:
+elapsed_seconds=134.700
+operation_seconds=134.691
+generated_text=<think>
+Okay,
+generated_token_ids=[151667, 198, 32313, 11]
+prefill_stack_seconds=57.3154
+continuation_stack_seconds=74.2811
+prefill_stack_tensor_load_seconds=41.6642
+continuation_stack_tensor_load_seconds=67.8973
+peak_working_set_mb=1981
+free_ram_start_mb=5483
+free_ram_end_mb=4401
+ready=true
+```
+
+## Phase MoE / Step 9 / warm runs
+
+```text
+qwen3-30b-a3b full max_new_tokens=1 repeat=3:
+run=1 elapsed_seconds=69.456 generated_text=<think> peak_working_set_mb=1980 free_ram_before_mb=5406 free_ram_after_mb=4330 tensor_load_seconds=51.4527
+run=2 elapsed_seconds=68.129 generated_text=<think> peak_working_set_mb=2116 free_ram_before_mb=4330 free_ram_after_mb=4339 tensor_load_seconds=51.0514
+run=3 elapsed_seconds=68.317 generated_text=<think> peak_working_set_mb=2129 free_ram_before_mb=4339 free_ram_after_mb=4434 tensor_load_seconds=51.1167
+warm_best_seconds_per_token=68.129
+warm_tokens_per_second=0.01468
+expert_hit_rate_warm=not_measured_by_full_slice
+```
+
+## Phase MoE / Step 10 / Qwen 14B regression
+
+```text
+qwen2.5-14b-instruct full max_new_tokens=4:
+elapsed_seconds=91.691
+operation_seconds=91.672
+generated_text=Hello! How can
+generated_token_ids=[9707, 0, 2585, 646]
+prefill_stack_seconds=22.7492
+continuation_stack_seconds=63.5583
+peak_working_set_mb=2509
+free_ram_start_mb=7507
+free_ram_end_mb=6741
+ready=true
+regression=pass
+```
+
+## Phase MoE / Step 10 / pytest
+
+```text
+pytest tests/ -q
+223 passed in 22.50s
+```

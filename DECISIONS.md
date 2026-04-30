@@ -486,3 +486,37 @@ No shared expert tensors were present in the inspected index (`shared_expert`, `
 pytest tests/test_runtime_tensor_catalog.py::test_build_tensor_catalog_classifies_moe_router_and_experts tests/test_runtime_tensor_execution_plan.py::test_build_tensor_execution_plan_groups_moe_experts_separately -v
 2 passed in 2.04s
 ```
+
+## Phase MoE / Step 4 / expert residency
+
+Decision:
+- Track expert activations by `(layer_index, expert_index)` and prefer keeping experts touched in the current step plus the most frequently activated experts.
+- Keep always-loaded tensors such as attention, routers, norms, and shared non-expert weights ahead of cold expert tensors under pressure.
+- Expose a separate expert cache cap through `PCKETLM_EXPERT_TENSOR_CACHE_MB`.
+
+Why:
+- MoE only needs top-k experts per token, so treating every expert tensor like dense layer weights wastes RAM.
+- A frequency-aware policy is general enough for later MoE models while still letting low-RAM machines evict cold experts aggressively.
+
+## Phase MoE / Step 9 / Qwen3 runtime fixes
+
+Decision:
+- Respect explicit `head_dim` from config.json when present.
+- Treat attention projection width as `num_attention_heads * head_dim`, then let `o_proj` return to hidden size.
+- Disable scoped safetensor handle caching by default for `qwen3-30b-a3b`, while preserving the env override.
+
+Why:
+- Qwen3 MoE has `hidden_size=2048`, `num_attention_heads=32`, and `head_dim=128`, so q_proj is 4096 wide. Deriving head_dim from hidden size breaks the real model.
+- The real Qwen3 full decode path succeeds when scoped handle reuse is off and exits immediately after the `before full-prompt-decode` checkpoint when the default one-token scoped handle path is used.
+- Correctness is the product default; handle reuse can remain an explicit diagnostic until the handle lifecycle is redesigned.
+
+## Phase MoE / Final outcome
+
+Decision:
+- Mark MoE foundation as functionally proven but speed-target not met.
+- Do not claim the `<=10s/token` warm target for direct paged Qwen3 on this hardware.
+
+Why:
+- Real Qwen3-30B-A3B produced `<think>` for `max_new_tokens=1` and `<think>\nOkay,` for `max_new_tokens=4`.
+- Best warm measured run was `68.129s/token` / `0.01468 tokens/sec`, with tensor loading still about `51.0514s`.
+- Qwen 14B regression stayed intact, generating `Hello! How can`, and the full test suite passed with `223` tests.
