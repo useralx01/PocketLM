@@ -572,3 +572,40 @@ Decision:
 Why:
 - Mixtral uses a different MoE tensor naming layout than Qwen3, but the math roles are the same: `w1` is gate projection, `w3` is up projection, and `w2` is down projection.
 - Resolving from the actual safetensors catalog keeps the forward path architecture-driven instead of adding a model-id branch.
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral architecture reference
+
+Source:
+- Hugging Face repo: `mistralai/Mixtral-8x7B-Instruct-v0.1`
+- Repo SHA seen by `HfApi().model_info`: `eba92302a2861cdc0098cc54bc9f17cb2c47eb61`
+- Expected import payload: `26` allowed files, `86.99 GB`.
+
+Config values:
+- architecture: `MixtralForCausalLM`
+- model_type: `mixtral`
+- hidden_size: `4096`
+- num_hidden_layers: `32`
+- num_attention_heads: `32`
+- num_key_value_heads: `8`
+- intermediate_size: `14336`
+- num_local_experts: `8`
+- num_experts_per_tok: `2`
+- vocab_size: `32000`
+- rope_theta: `1000000.0`
+- sliding_window: `null`
+- hidden_act: `silu`
+- torch_dtype: `bfloat16`
+
+Tensor name patterns:
+- attention: `model.layers.<L>.self_attn.{q_proj,k_proj,v_proj,o_proj}.weight`
+- router: `model.layers.<L>.block_sparse_moe.gate.weight`
+- experts: `model.layers.<L>.block_sparse_moe.experts.<E>.{w1,w2,w3}.weight`
+- layer norms: `model.layers.<L>.{input_layernorm,post_attention_layernorm}.weight`
+- final norm: `model.norm.weight`
+- head: `lm_head.weight`
+
+Difference from Qwen3-A3B:
+- Mixtral has `8` experts/layer and top-2 routing; Qwen3-A3B has `128` experts/layer and top-8 routing.
+- Mixtral has no shared expert field in config and uses `block_sparse_moe` tensor names.
+- Mixtral uses `num_local_experts` instead of `num_experts`; the runtime normalizes this into `num_experts`.
+- Mixtral does not set `head_dim`; the runtime derives `4096 / 32 = 128`.

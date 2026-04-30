@@ -3164,3 +3164,20 @@ python -m pytest tests/test_model_import_inspect.py::test_inspect_qwen_source_re
 python -m pytest tests/test_runtime_diagnose_cli.py tests/test_runtime_layer_bridge.py tests/test_runtime_tensor_catalog.py tests/test_model_import_inspect.py tests/test_model_families.py -q
 50 passed in 2.36s
 ```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral repo check
+
+```text
+repo=mistralai/Mixtral-8x7B-Instruct-v0.1
+sha=eba92302a2861cdc0098cc54bc9f17cb2c47eb61
+allowed_files=26
+expected_total_gb=86.99
+first_files:
+config.json 720
+generation_config.json 116
+model-00001-of-00019.safetensors 4892809584
+model-00002-of-00019.safetensors 4983004016
+model-00003-of-00019.safetensors 4983004016
+download_started_background=true
+download_status_file=state/downloads/mixtral-8x7b-instruct-v01.json
+```
