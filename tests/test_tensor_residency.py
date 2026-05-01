@@ -373,6 +373,52 @@ def test_expert_residency_uses_separate_budget_from_dense_cache(tmp_path: Path, 
     assert snapshot["expert_resident_count"] == 1
 
 
+def test_expert_residency_allows_large_expert_tensors_with_expert_budget(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-large-budget-test"
+    expert_name = "model.layers.0.block_sparse_moe.experts.5.w1.weight"
+    entry = _entry(tmp_path, expert_name)
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 5
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        tensor = torch.ones((8, 8), dtype=torch.bfloat16)
+        return LoadedTensorSlice(
+            model_id=model_id_arg,
+            tensor_name=tensor_name,
+            shard_name=entry.shard_name,
+            dtype=str(tensor.dtype),
+            shape=[8, 8],
+            tensor=tensor,
+            layer_index=entry.layer_index,
+            component_group=entry.component_group,
+            loaded_nbytes=tensor.element_size() * tensor.nelement(),
+            blockers=[],
+            ready=True,
+        )
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(
+        max_resident_bytes=0,
+        max_tensor_bytes=4,
+        all_layer_small_tensor_bytes=0,
+        front_layer_count=0,
+        expert_max_resident_bytes=1024,
+    )
+    record_expert_activation(0, 5)
+    first = load_resident_tensor(model_id, expert_name, policy=policy)
+    second = load_resident_tensor(model_id, expert_name, policy=policy)
+    snapshot = expert_residency_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert snapshot["expert_hits"] == 1
+    assert snapshot["expert_misses"] == 1
+    assert snapshot["expert_resident_count"] == 1
+
+
 def test_expert_residency_decay_lets_new_hot_expert_replace_old_one(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.setenv("PCKETLM_EXPERT_CACHE_DECAY", "0.5")

@@ -3224,3 +3224,45 @@ execution_plan_unit_count=355
 execution_plan_phases=["prefill", "layer-entry", "layer-attention", "layer-router", "layer-expert", "decode-head"]
 execution_plan_blockers=[]
 ```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral diagnostic slices
+
+```text
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=8
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+
+load-config ready=true operation_seconds=0.001 free_ram_start_mb=3144 free_ram_end_mb=3143 peak_working_set_mb=204
+embedding-only ready=true operation_seconds=0.039 free_ram_start_mb=3158 free_ram_end_mb=3158 peak_working_set_mb=208
+embed-forward ready=true operation_seconds=5.711 token_id=6312 output_shape=[1,1,4096] free_ram_start_mb=3187 free_ram_end_mb=3067 peak_working_set_mb=344
+router-only ready=true selected_experts=[1,5] router_logits_shape=[1,1,8] operation_seconds=2.330 peak_working_set_mb=345
+one-expert ready=true expert_index=0 output_shape=[1,1,4096] operation_seconds=2.566 peak_working_set_mb=1017 expert_misses=3
+top-k-experts ready=true selected_experts=[1,5] output_shape=[1,1,4096] operation_seconds=3.056 peak_working_set_mb=1914 expert_misses=6
+all-layers-moe ready=true layers=32 operation_seconds=28.791 peak_working_set_mb=3584 free_ram_start_mb=3597 free_ram_end_mb=2009 expert_activation_total=64 expert_misses=192
+```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral final
+
+```text
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=8
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+prompt=Write a short paragraph about local AI.
+max_new_tokens=20
+
+before_large_expert_cache_fix:
+run=1 elapsed_seconds=186.021 avg_seconds_per_token=9.3011 peak_working_set_mb=6618 free_ram_before_mb=4722 free_ram_after_mb=2723 expert_hit_rate=0.0 expert_resident_count=0 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+run=2 elapsed_seconds=189.472 avg_seconds_per_token=9.4736 peak_working_set_mb=7275 free_ram_before_mb=2723 free_ram_after_mb=3018 expert_hit_rate=0.0 expert_resident_count=0 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+run=3 elapsed_seconds=191.010 avg_seconds_per_token=9.5505 peak_working_set_mb=7275 free_ram_before_mb=3022 free_ram_after_mb=3078 expert_hit_rate=0.0 expert_resident_count=0 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+
+after_large_expert_cache_fix:
+run=1 elapsed_seconds=317.202 avg_seconds_per_token=15.8601 peak_working_set_mb=8796 free_ram_before_mb=6490 free_ram_after_mb=990 expert_hit_rate=0.1171 expert_resident_count=36 expert_resident_bytes=4227858432 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+run=2 elapsed_seconds=223.818 avg_seconds_per_token=11.1909 peak_working_set_mb=8796 free_ram_before_mb=989 free_ram_after_mb=1306 expert_hit_rate=0.1839 expert_resident_count=36 expert_resident_bytes=4227858432 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+run=3 elapsed_seconds=182.633 avg_seconds_per_token=9.1317 peak_working_set_mb=8908 free_ram_before_mb=1306 free_ram_after_mb=2309 expert_hit_rate=0.2140 expert_resident_count=36 expert_resident_bytes=4227858432 generated_text="XamarinpfnINCLUDINGINCLUDING /******/ listade /******/ /******/ /******/ listade /***/ listade /***/ listadepfn /******/TDM /******/ listade /***/"
+
+invalid_tuning_attempt:
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=6144
+result=timed_out_after_18693s
+action=stopped_orphaned_python_pid_29684
+reason=unsafe/invalid measurement, did not produce complete raw rows
+```

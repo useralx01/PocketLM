@@ -582,6 +582,19 @@ Why:
 - Mixtral ships `tokenizer.model` and `tokenizer.json`, not the Qwen-style `vocab.json` + `merges.txt` pair.
 - The previous catalog path incorrectly turned the tokenizer-pair warning into a hard blocker even though the model source was complete and the tokenizer can be loaded from the shipped files.
 
+## Phase MoE Speed v2 / Stage 4 / large expert cacheability
+
+Decision:
+- Expert tensors now bypass the dense `max_tensor_bytes` gate and are governed by `expert_max_resident_bytes` plus expert-specific total/layer budgets.
+
+Why:
+- Mixtral expert tensors are about `117 MB` each, far larger than the dense-path `32 MB` max tensor gate.
+- The old generic gate caused Mixtral expert residency to stay at `0` even with `PCKETLM_EXPERT_TENSOR_CACHE_MB=4096`.
+- After the fix, Mixtral holds `36` expert tensors (`4227858432` bytes) and reaches `21.40%` cumulative expert hit rate by token 20. This proves cross-family expert residency works, but the hit rate is still not comparable to Qwen3 on this RAM budget.
+
+Follow-up:
+- The 6 GB expert-cache attempt did not complete cleanly and was killed as an invalid measurement. Further Mixtral hit-rate gains likely need compressed expert residency or a scheduler that keeps only the 12-layer continuation path's hottest experts.
+
 ## Phase MoE Speed v2 / Stage 4 / Mixtral architecture reference
 
 Source:

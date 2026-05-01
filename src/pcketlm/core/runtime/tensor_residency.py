@@ -427,6 +427,8 @@ def _is_cacheable(tensor: torch.Tensor, entry: TensorCatalogEntry, policy: Tenso
     nbytes = tensor.element_size() * tensor.nelement()
     if not policy.enabled:
         return False
+    if _expert_key(entry) is not None:
+        return nbytes <= policy.expert_max_resident_bytes
     if policy.min_tensor_bytes <= nbytes <= policy.all_layer_small_tensor_bytes:
         return True
     if entry.layer_index is not None and entry.layer_index >= policy.front_layer_count:
