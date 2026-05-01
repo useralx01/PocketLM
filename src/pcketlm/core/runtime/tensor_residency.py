@@ -26,6 +26,7 @@ DEFAULT_STICKY_RESIDENCY_STEPS = 1
 DEFAULT_EXPERT_CACHE_MB = 256
 DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER = 4
 DEFAULT_EXPERT_DECAY_RATE = 0.98
+DEFAULT_ALWAYS_RESIDENT_TENSOR_MB = 16
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -360,11 +361,17 @@ def _expert_key(entry: TensorCatalogEntry) -> tuple[int, int] | None:
 def _is_always_resident_entry(entry: TensorCatalogEntry) -> bool:
     if entry.expert_index is not None:
         return False
+    max_always_resident_bytes = max(
+        0,
+        _env_int("PCKETLM_ALWAYS_RESIDENT_TENSOR_MB", DEFAULT_ALWAYS_RESIDENT_TENSOR_MB),
+    ) * 1024 * 1024
+    if int(entry.data_nbytes) > max_always_resident_bytes:
+        return False
     component_group = (entry.component_group or "").lower()
-    if component_group in {"attention", "router", "shared_expert", "final_norm", "lm_head", "embeddings"}:
+    if component_group in {"router", "final_norm", "layer_norm", "rotary"}:
         return True
     tensor_name = entry.tensor_name
-    return tensor_name in {"model.norm.weight", "lm_head.weight", "model.embed_tokens.weight"}
+    return tensor_name == "model.norm.weight"
 
 
 def _loaded_slice_from_resident(model_id: str, resident: _ResidentTensor) -> LoadedTensorSlice:

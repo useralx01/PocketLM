@@ -708,3 +708,17 @@ Why:
 - The previous max_abs < 1e-4 gate rejected a 0.0002344 float drift that does not affect token output.
 - The product risk is wrong tokens or incoherent text, not harmless CPU accumulation-order noise below 1e-3 with token-exact output.
 ```
+
+## Phase MoE Honest Speed / always-resident tensor cap
+
+```text
+Decision:
+- Add PCKETLM_ALWAYS_RESIDENT_TENSOR_MB, default 16 MB.
+- Only small router/final-norm/layer-norm/rotary tensors remain protected from eviction.
+- Large attention, embedding, and lm_head-class tensors are no longer always-resident by component name.
+
+Why:
+- Mixtral full-stack baseline dropped system free RAM to 976 MB with default policy and 277 MB even after shrinking expert cache.
+- The expert budget was not the only issue: large non-expert tensors were marked always-resident and could not be evicted.
+- This made the residency manager unsafe on this 16 GB machine and would hide memory bugs behind "cache tuning" numbers.
+```

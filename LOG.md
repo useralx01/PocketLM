@@ -3531,3 +3531,52 @@ layer0_combined_hidden_cosine=0.9999985647013078
 layer0_combined_hidden_max_abs=0.00023440271615982056
 layers_executed=2/2
 ```
+
+## Phase MoE Honest Speed / Stage 4 / honest baseline / Qwen3-30B-A3B
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-qwen3-stage4.jsonl 2>&1
+
+run=1 elapsed=493.693s avg=24.685s/token peak_ws=3209MB free_after=3236MB layers_executed=960/960 anti_cheat=true hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=31278 tensor_load_time=411.219s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=2 elapsed=592.563s avg=29.628s/token peak_ws=3501MB free_after=2556MB layers_executed=960/960 anti_cheat=true hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=62556 tensor_load_time=501.744s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=3 elapsed=450.367s avg=22.518s/token peak_ws=3501MB free_after=3775MB layers_executed=960/960 anti_cheat=true hit_rate_token20=0.0128 expert_hits_token20=1202 expert_misses_token20=92632 tensor_load_time=382.440s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+verdict=correct/coherent full-stack output; baseline speed far above target; expert cache hit rate far below target.
+```
+
+## Phase MoE Honest Speed / Stage 4 / honest baseline / Mixtral attempt 1
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model mixtral-8x7b-instruct-v01 --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-mixtral-stage4.jsonl 2>&1
+started_free_ram_mb=6045
+observed_after_30s_free_ram_mb=976
+process_working_set_mb=5450.4
+action=terminated run before first result because free RAM was below a safe operating margin for a multi-run baseline.
+verdict=invalid measurement; rerun with explicit smaller expert residency budget.
+
+second_attempt:
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='512'; $env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER='1'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model mixtral-8x7b-instruct-v01 --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-mixtral-stage4-safe.jsonl 2>&1
+started_free_ram_mb=8068
+observed_after_30s_free_ram_mb=277
+process_working_set_mb=6601.6
+action=terminated run before first result; lowering expert cache alone did not solve memory pressure.
+root_cause=large non-expert tensors were marked always-resident and could not be evicted under pressure.
+
+fix:
+- cap always-resident status to small tensors only, default PCKETLM_ALWAYS_RESIDENT_TENSOR_MB=16
+- keep router/final/layer norm tensors sticky when small
+- allow large attention, embedding, and lm_head-class tensors to evict
+
+python -m pytest tests/test_tensor_residency.py::test_large_attention_tensor_is_evictable_under_memory_pressure -q
+.                                                                        [100%]
+1 passed in 1.43s
+
+python -m pytest tests/test_tensor_residency.py -q
+............................                                             [100%]
+28 passed in 1.54s
+```

@@ -83,6 +83,56 @@ def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_pat
     assert stats.resident_count == 1
 
 
+def test_large_attention_tensor_is_evictable_under_memory_pressure(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "resident-large-attention-test"
+    entries = {
+        "a": _entry(tmp_path, tensor_name="model.layers.0.self_attn.q_proj.weight"),
+        "b": _entry(tmp_path, tensor_name="model.layers.1.self_attn.q_proj.weight"),
+    }
+    for entry in entries.values():
+        entry.component_group = "attention"
+        entry.data_nbytes = 1024
+    calls: list[str] = []
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        calls.append(tensor_name)
+        entry = entries[tensor_name]
+        tensor = torch.ones((512,), dtype=torch.bfloat16)
+        return LoadedTensorSlice(
+            model_id=model_id_arg,
+            tensor_name=entry.tensor_name,
+            shard_name=entry.shard_name,
+            dtype=str(tensor.dtype),
+            shape=[512],
+            tensor=tensor,
+            layer_index=entry.layer_index,
+            component_group=entry.component_group,
+            loaded_nbytes=tensor.element_size() * tensor.nelement(),
+            blockers=[],
+            ready=True,
+        )
+
+    monkeypatch.setenv("PCKETLM_ALWAYS_RESIDENT_TENSOR_MB", "0")
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(max_resident_bytes=2048, max_tensor_bytes=2048, sticky_residency_steps=0)
+    first = load_resident_tensor(model_id, "a", policy=policy)
+    second = load_resident_tensor(model_id, "b", policy=policy)
+    stats = tensor_residency_stats()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert calls == ["a", "b"]
+    assert stats.evictions == 1
+    assert stats.resident_bytes <= 2048
+    assert stats.resident_count == 1
+
+
 def test_sticky_residency_prefers_evicting_stale_tensor_over_recent_tensor(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-sticky-test"
