@@ -69,6 +69,7 @@ VALID_SLICES = {
     "one-expert",
     "top-k-experts",
     "all-layers-moe",
+    "compare-with-reference",
     "full",
 }
 
@@ -783,6 +784,60 @@ def _full_forward(model_id: str, max_new_tokens: int = 1, prompt: str = "hello w
     return payload
 
 
+def _safe_reference_name(model_id: str) -> str:
+    return model_id.replace(".", "_").replace("-", "_").replace("/", "_")
+
+
+def _compare_with_reference(
+    model_id: str,
+    *,
+    prompt: str,
+    max_new_tokens: int,
+    reference_root: Path,
+) -> dict:
+    reference_path = reference_root / f"{_safe_reference_name(model_id)}_moe_reference" / "reference.json"
+    if not reference_path.exists():
+        return {
+            "ready": False,
+            "reference_path": str(reference_path),
+            "blockers": [f"Reference fixture missing: {reference_path}"],
+        }
+    reference = json.loads(reference_path.read_text(encoding="utf-8"))
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        min_new_tokens=max_new_tokens,
+        selection_policy="greedy",
+        top_k=1,
+        top_p=1.0,
+        temperature=0.0,
+    )
+    payload = result.to_dict()
+    payload.pop("final_decode_state", None)
+    expected_ids = [int(value) for value in reference.get("generated_token_ids", [])]
+    actual_ids = [int(value) for value in result.generated_token_ids]
+    overlap = sum(1 for expected, actual in zip(expected_ids, actual_ids) if expected == actual)
+    blockers = list(result.blockers)
+    required_overlap = min(7, len(expected_ids), len(actual_ids))
+    if required_overlap and overlap < required_overlap:
+        blockers.append(f"Generated token overlap {overlap}/{required_overlap} is below the correctness gate.")
+    payload.update(
+        {
+            "ready": result.ready and not blockers,
+            "reference_path": str(reference_path),
+            "expected_token_ids": expected_ids,
+            "actual_token_ids": actual_ids,
+            "shared_prefix_positions": overlap,
+            "expected_text": str(reference.get("decoded_generated_text", "")),
+            "generated_text": result.generated_text,
+            "expert_telemetry": expert_residency_snapshot(),
+            "blockers": blockers,
+        }
+    )
+    return payload
+
+
 def _operation_for_slice(slice_name: str) -> tuple[str, Callable[[str], dict]]:
     if slice_name == "load-config":
         return "load-config", _load_config
@@ -822,6 +877,8 @@ def _operation_for_slice(slice_name: str) -> tuple[str, Callable[[str], dict]]:
         return "top-k-experts", lambda model_id: {}
     if slice_name == "all-layers-moe":
         return "all-layers-moe", lambda model_id: {}
+    if slice_name == "compare-with-reference":
+        return "compare-with-reference", lambda model_id: {}
     if slice_name == "full":
         return "full-prompt-decode", _full_forward
     raise ValueError(f"Unknown slice {slice_name!r}.")
@@ -834,6 +891,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=1, help="Token cap for the full prompt slice")
     parser.add_argument("--prompt", default="hello world", help="Prompt for the full prompt slice")
     parser.add_argument("--repeat", type=int, default=1, help="Run the chosen slice repeatedly in one process")
+    parser.add_argument("--reference-root", default="tests/fixtures", help="Fixture root for compare-with-reference")
     return parser.parse_args(argv)
 
 
@@ -920,6 +978,19 @@ def main(argv: list[str] | None = None) -> int:
                 "blockers": list(stack.blockers),
                 **expert_residency_snapshot(),
             }
+        elif slice_name == "compare-with-reference":
+            result = _run_checkpoint(
+                model_id=model_id,
+                slice_name=slice_name,
+                operation="compare-with-reference",
+                started_at=started_at,
+                callback=lambda: _compare_with_reference(
+                    model_id,
+                    prompt=args.prompt,
+                    max_new_tokens=max_new_tokens,
+                    reference_root=Path(args.reference_root),
+                ),
+            )
         elif repeat > 1:
             repeated: list[dict[str, Any]] = []
             for run_index in range(1, repeat + 1):

@@ -3293,3 +3293,28 @@ python -m pytest tests/ -q
 phase_outcome=partial
 reason=Qwen3 20-token gate passed and Mixtral runs end-to-end, but Mixtral expert hit rate reached only 21.40%, not comparable to Qwen3.
 ```
+
+## Phase MoE Correctness / Setup
+
+```text
+git checkout phase-moe-speed
+git checkout -b phase-moe-correctness
+git branch --show-current
+phase-moe-correctness
+```
+
+## Phase MoE Correctness / Stage 2 / divergence localization
+
+```text
+static localization before full reference capture:
+qwen3-30b-a3b: run_prompt_decode_loop used _recommended_prompt_layer_count; for max_new_tokens=20 and MoE it returned 12 layers instead of config.num_hidden_layers=48. This is the first correctness divergence: the generated tokens came from a truncated model, not the real Qwen3 stack.
+mixtral-8x7b-instruct-v01: same truncated-layer path for max_new_tokens=20, and config.json lacks norm_topk_prob while Transformers MixtralTopKRouter always normalizes top-k router weights. Pcketlm therefore combined expert outputs with unnormalized top-k probabilities.
+
+python -m pytest tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_moe_at_full_stack_for_correctness tests/test_runtime_layer_bridge.py::test_moe_config_defaults_topk_normalization_when_field_is_absent tests/test_runtime_layer_bridge.py::test_run_moe_mlp_routes_top_k_experts_with_real_math -q
+...                                                                      [100%]
+3 passed in 1.72s
+
+python -m pytest tests/test_runtime_layer_bridge.py tests/test_runtime_diagnose_cli.py -q
+..........................................                               [100%]
+42 passed in 2.76s
+```

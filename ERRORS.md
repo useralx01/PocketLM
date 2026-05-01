@@ -93,3 +93,11 @@ Follow-up:
 - why it happened: the process stayed open, but the local folder remained stuck at metadata-only state and never progressed into a full source model
 - fix: stop the detached download and switch to a different acquisition path
 - lesson: if disabling Xet still leaves the folder frozen at tiny metadata size, stop early and use another model source instead of retrying blindly
+
+## Error
+- date: 2026-05-01
+- area: Phase MoE Correctness / gibberish MoE output
+- what went wrong: Qwen3 generated text like `exion particular,...` and Mixtral generated text like `XamarinpfnINCLUDINGINCLUDING...` during speed validation, despite green tests and good timing metrics.
+- why it happened: the MoE long-generation path used only 12 transformer layers for max_new_tokens > 8, so output came from a truncated model. Mixtral also combined expert outputs with unnormalized top-k router weights when config.json omitted `norm_topk_prob`, unlike Transformers' Mixtral router.
+- fix: use the full configured MoE layer count for prompt decoding and default missing MoE `norm_topk_prob` to true while honoring explicit config values.
+- lesson: generated text is a correctness signal. Speed measurements on a truncated or mathematically mismatched model are not product evidence.

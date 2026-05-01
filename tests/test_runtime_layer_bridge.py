@@ -58,9 +58,41 @@ def test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack() -> None
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=260, max_new_tokens=4) == 32
 
 
-def test_recommended_prompt_layer_count_caps_moe_long_generations() -> None:
-    assert _recommended_prompt_layer_count(_MoePromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 12
+def test_recommended_prompt_layer_count_keeps_moe_at_full_stack_for_correctness() -> None:
+    assert _recommended_prompt_layer_count(_MoePromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 48
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 24
+
+
+def test_moe_config_defaults_topk_normalization_when_field_is_absent(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_dir = tmp_path / "models" / "mixtral-style-test" / "original"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "mixtral",
+                "hidden_size": 16,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "intermediate_size": 32,
+                "num_local_experts": 8,
+                "num_experts_per_tok": 2,
+                "vocab_size": 128,
+                "rms_norm_eps": 1e-5,
+                "hidden_act": "silu",
+            }
+        ),
+        encoding="utf-8",
+    )
+    layer_bridge_module._load_layer_bridge_config_cached.cache_clear()
+
+    config = load_layer_bridge_config("mixtral-style-test")
+
+    assert config.ready is True
+    assert config.norm_topk_prob is True
 
 
 def test_moe_tensor_name_helpers_select_mixtral_layout(monkeypatch) -> None:

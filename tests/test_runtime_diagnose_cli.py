@@ -124,6 +124,67 @@ def test_runtime_diagnose_cli_full_repeat_runs_in_one_process(monkeypatch, capsy
     assert calls["count"] == 3
 
 
+def test_runtime_diagnose_cli_compare_with_reference_reports_token_overlap(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    fixture_dir = tmp_path / "fixtures" / "qwen_moe_test_moe_reference"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "reference.json").write_text(
+        json.dumps(
+            {
+                "generated_token_ids": [10, 11, 12],
+                "decoded_generated_text": " Paris.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeResult:
+        ready = True
+        generated_token_ids = [10, 11, 99]
+        generated_text = " Paris?"
+        blockers = []
+        timings = {}
+
+        def to_dict(self) -> dict:
+            return {
+                "ready": True,
+                "generated_token_ids": list(self.generated_token_ids),
+                "generated_text": self.generated_text,
+                "blockers": [],
+            }
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+    monkeypatch.setattr(runtime_diagnose_cli, "run_prompt_decode_loop", lambda *_args, **_kwargs: _FakeResult())
+
+    exit_code = runtime_diagnose_cli.main(
+        [
+            "--model",
+            "qwen-moe-test",
+            "--slice",
+            "compare-with-reference",
+            "--max-new-tokens",
+            "3",
+            "--prompt",
+            "The capital of France is",
+            "--reference-root",
+            str(tmp_path / "fixtures"),
+        ]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    result = lines[2]["result"]
+    assert result["shared_prefix_positions"] == 2
+    assert result["actual_token_ids"] == [10, 11, 99]
+    assert result["expected_token_ids"] == [10, 11, 12]
+
+
 def test_runtime_diagnose_cli_summarizes_kv_cache_bytes() -> None:
     key = torch.zeros((1, 8, 3, 128), dtype=torch.float16)
     value = torch.zeros((1, 8, 3, 128), dtype=torch.float16)

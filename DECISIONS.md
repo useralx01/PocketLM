@@ -631,3 +631,17 @@ Difference from Qwen3-A3B:
 - Mixtral has no shared expert field in config and uses `block_sparse_moe` tensor names.
 - Mixtral uses `num_local_experts` instead of `num_experts`; the runtime normalizes this into `num_experts`.
 - Mixtral does not set `head_dim`; the runtime derives `4096 / 32 = 128`.
+
+## Phase MoE Correctness / math fixes
+
+```text
+router_normalization:
+- Qwen3-30B-A3B config explicitly sets norm_topk_prob=true, matching Transformers Qwen3MoeTopKRouter.
+- Mixtral-8x7B-Instruct-v0.1 config does not include norm_topk_prob, but Transformers MixtralTopKRouter always renormalizes selected top-k weights.
+- Pcketlm now defaults top-k normalization to true for MoE configs when the config field is absent, while still honoring an explicit norm_topk_prob value.
+
+moe_layer_count:
+- The prior speed phase capped MoE long generations to 12 layers for max_new_tokens > 8.
+- That is not a valid product/runtime result: it runs a partial transformer stack and produces meaningless tokens.
+- MoE prompt decoding now uses config.num_hidden_layers for the full stack. Speed work must not trade away model correctness.
+```

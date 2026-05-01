@@ -766,6 +766,11 @@ def _load_layer_bridge_config_cached(
     if moe_intermediate_size <= 0 and num_experts > 0:
         moe_intermediate_size = int(payload.get("intermediate_size", 0) or 0)
 
+    norm_topk_payload = payload.get("norm_topk_prob")
+    norm_topk_prob = bool(norm_topk_payload) if norm_topk_payload is not None else bool(
+        num_experts > 0 and int(payload.get("num_experts_per_tok", 0) or 0) > 1
+    )
+
     return LayerBridgeModelConfig(
         model_id=model_id,
         config_path=config_path,
@@ -778,7 +783,7 @@ def _load_layer_bridge_config_cached(
         moe_intermediate_size=moe_intermediate_size,
         num_experts=num_experts,
         num_experts_per_tok=int(payload.get("num_experts_per_tok", 0) or 0),
-        norm_topk_prob=bool(payload.get("norm_topk_prob", False)),
+        norm_topk_prob=norm_topk_prob,
         model_type=str(payload.get("model_type", "unknown")),
         vocab_size=int(payload.get("vocab_size", 0)),
         rms_norm_eps=float(payload.get("rms_norm_eps", 0.0)),
@@ -1031,9 +1036,10 @@ def _recommended_prompt_layer_count(
     if config.num_hidden_layers <= 2:
         return config.num_hidden_layers
 
-    if getattr(config, "num_experts", 0) and getattr(config, "num_experts_per_tok", 0) and max_new_tokens > 8:
-        target = min(config.num_hidden_layers, 12)
-    elif max_new_tokens <= 8:
+    if getattr(config, "num_experts", 0) and getattr(config, "num_experts_per_tok", 0):
+        return config.num_hidden_layers
+
+    if max_new_tokens <= 8:
         target = config.num_hidden_layers
     elif max_new_tokens <= 24:
         target = min(config.num_hidden_layers, 24)
