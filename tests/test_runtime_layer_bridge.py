@@ -55,12 +55,12 @@ class _MoePromptBudgetConfig(_PromptBudgetConfig):
 
 def test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack() -> None:
     assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=4) == 48
-    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=260, max_new_tokens=4) == 32
+    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=260, max_new_tokens=4) == 48
 
 
 def test_recommended_prompt_layer_count_keeps_moe_at_full_stack_for_correctness() -> None:
     assert _recommended_prompt_layer_count(_MoePromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 48
-    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 24
+    assert _recommended_prompt_layer_count(_PromptBudgetConfig(), prompt_token_count=80, max_new_tokens=20) == 48
 
 
 def test_moe_config_defaults_topk_normalization_when_field_is_absent(tmp_path, monkeypatch) -> None:
@@ -851,6 +851,11 @@ def test_run_prompt_decode_loop_uses_real_prompt_tokenization(tmp_path: Path, mo
     assert isinstance(result.full_text, str)
     assert result.timings["total"] >= 0
     assert "prefill_decode_tail" in result.timings
+    assert result.configured_layer_count == 2
+    assert result.prompt_layer_count == 2
+    assert result.layers_executed == 4
+    assert result.expected_layers_executed == 4
+    assert result.anti_cheat_passed is True
 
 
 def test_run_prompt_decode_loop_reports_per_token_expert_telemetry(tmp_path: Path, monkeypatch) -> None:

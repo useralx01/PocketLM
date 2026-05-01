@@ -604,6 +604,11 @@ class PromptDecodeLoopResult:
     token_summaries: list[dict] = field(default_factory=list)
     prefix_reuse: dict = field(default_factory=dict)
     reusable_token_ids: list[int] = field(default_factory=list)
+    configured_layer_count: int = 0
+    prompt_layer_count: int = 0
+    layers_executed: int = 0
+    expected_layers_executed: int = 0
+    anti_cheat_passed: bool = False
     final_decode_state: KVDecodeState | None = None
 
     def to_dict(self) -> dict:
@@ -629,6 +634,11 @@ class PromptDecodeLoopResult:
             "token_summaries": [dict(summary) for summary in self.token_summaries],
             "prefix_reuse": dict(self.prefix_reuse),
             "reusable_token_count": len(self.reusable_token_ids),
+            "configured_layer_count": int(self.configured_layer_count),
+            "prompt_layer_count": int(self.prompt_layer_count),
+            "layers_executed": int(self.layers_executed),
+            "expected_layers_executed": int(self.expected_layers_executed),
+            "anti_cheat_passed": bool(self.anti_cheat_passed),
         }
 
 
@@ -1029,32 +1039,12 @@ def _recommended_prompt_layer_count(
     prompt_token_count: int,
     max_new_tokens: int,
 ) -> int:
-    """Choose a deeper but still bounded automatic layer budget for prompt runs."""
+    """Use the full configured layer stack for default prompt runs."""
+    del prompt_token_count, max_new_tokens
     if not config.ready or config.num_hidden_layers <= 0:
         return 2
 
-    if config.num_hidden_layers <= 2:
-        return config.num_hidden_layers
-
-    if getattr(config, "num_experts", 0) and getattr(config, "num_experts_per_tok", 0):
-        return config.num_hidden_layers
-
-    if max_new_tokens <= 8:
-        target = config.num_hidden_layers
-    elif max_new_tokens <= 24:
-        target = min(config.num_hidden_layers, 24)
-    else:
-        target = min(config.num_hidden_layers, 12)
-
-    if max_new_tokens <= 8 and prompt_token_count < 256:
-        return max(2, min(config.num_hidden_layers, target))
-
-    if prompt_token_count >= 256:
-        target -= 16
-    elif prompt_token_count >= 128:
-        target -= 8
-
-    return max(2, min(config.num_hidden_layers, target))
+    return config.num_hidden_layers
 
 
 def initialize_kv_decode_state(model_id: str, seed_token_id: int) -> KVDecodeState:
@@ -3208,6 +3198,14 @@ def _run_prompt_decode_loop(
             len(prompt_token_ids),
             effective_max_new_tokens,
         )
+    configured_layer_count = int(config.num_hidden_layers if config.ready else effective_layer_count)
+    is_default_full_stack_run = layer_count is None and start_layer == 0 and configured_layer_count > 0
+    if is_default_full_stack_run and effective_layer_count < configured_layer_count:
+        raise RuntimeError(
+            f"Anti-cheat guard refused a default full prompt run with {effective_layer_count} "
+            f"layers for a {configured_layer_count}-layer model."
+        )
+    layers_executed_total = 0
 
     if generation_settings.ready:
         if top_k == 5:
@@ -3389,6 +3387,7 @@ def _run_prompt_decode_loop(
         )
         record_phase("prefill_stack", phase_started)
         add_nested_timings("prefill_stack", prefill_stack.timings)
+        layers_executed_total += len(prefill_stack.executed_layers)
     if not prefill_stack.ready or prefill_stack.output_tensor is None:
         return PromptDecodeLoopResult(
             model_id=model_id,
@@ -3540,6 +3539,11 @@ def _run_prompt_decode_loop(
             token_summaries=token_summaries,
             prefix_reuse=prefix_reuse,
             reusable_token_ids=list(prompt_token_ids),
+            configured_layer_count=configured_layer_count,
+            prompt_layer_count=effective_layer_count,
+            layers_executed=layers_executed_total,
+            expected_layers_executed=effective_layer_count,
+            anti_cheat_passed=layers_executed_total >= effective_layer_count,
             final_decode_state=decode_state,
         )
     generated_token_ids = [first_generated_token_id]
@@ -3591,6 +3595,7 @@ def _run_prompt_decode_loop(
         if not step_result.ready or step_result.chosen_token_id is None or step_result.next_decode_state is None:
             continuation_blockers.extend(step_result.blockers or [f"Prompt continuation step {step_index} failed."])
             break
+        layers_executed_total += len(step_result.executed_layers)
 
         decode_state = step_result.next_decode_state
         latest_chain = list(decode_state.generated_token_ids)
@@ -3621,7 +3626,21 @@ def _run_prompt_decode_loop(
     generated_text, _triggered_stop_string = _trim_generated_text_at_stop_string(generated_text, effective_stop_strings)
     if stop_reason is None:
         stop_reason = decode_state.stop_reason if decode_state.finished else ("step-limit" if steps_completed >= effective_max_new_tokens else None)
-    blockers = list(prefill_stack.blockers) + list(prefill_tail.blockers) + continuation_blockers + list(decode_generated_blockers) + list(decode_full_blockers)
+    expected_layers_executed = effective_layer_count * max(1, steps_completed)
+    anti_cheat_blockers: list[str] = []
+    if is_default_full_stack_run and layers_executed_total < expected_layers_executed:
+        anti_cheat_blockers.append(
+            f"Anti-cheat guard: executed {layers_executed_total} layer forwards, "
+            f"expected {expected_layers_executed} for {steps_completed} generated token(s)."
+        )
+    blockers = (
+        list(prefill_stack.blockers)
+        + list(prefill_tail.blockers)
+        + continuation_blockers
+        + list(decode_generated_blockers)
+        + list(decode_full_blockers)
+        + anti_cheat_blockers
+    )
     return PromptDecodeLoopResult(
         model_id=model_id,
         prompt=prepared_prompt_result.prepared_prompt,
@@ -3639,10 +3658,15 @@ def _run_prompt_decode_loop(
         stop_strings=list(effective_stop_strings),
         cache_sequence_lengths=latest_cache_lengths,
         blockers=blockers,
-        ready=not continuation_blockers,
+        ready=not continuation_blockers and not anti_cheat_blockers,
         timings=finish_timings(),
         token_summaries=token_summaries,
         prefix_reuse=prefix_reuse,
         reusable_token_ids=list(latest_chain[:-1]) if len(latest_chain) > len(prompt_token_ids) else list(prompt_token_ids),
+        configured_layer_count=configured_layer_count,
+        prompt_layer_count=effective_layer_count,
+        layers_executed=layers_executed_total,
+        expected_layers_executed=expected_layers_executed,
+        anti_cheat_passed=not anti_cheat_blockers,
         final_decode_state=decode_state,
     )

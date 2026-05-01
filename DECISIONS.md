@@ -650,3 +650,21 @@ reference_capture:
 - No smaller same-family local MoE fixture exists under models/, and this correctness phase is not allowed to add new models.
 - For this pass, the oracle for the math fix is the installed Transformers implementation source for Qwen3MoeTopKRouter/Qwen3MoeExperts and MixtralTopKRouter/MixtralExperts, plus end-to-end coherent generated text.
 ```
+## Phase MoE Honest Speed / Anti-cheat audit
+
+```text
+Audited files:
+- src/pcketlm/core/runtime/layer_bridge.py
+- src/pcketlm/app/chat_shell/runtime_diagnose_cli.py
+
+Findings:
+- _recommended_prompt_layer_count previously contained silent dense shortcuts for long prompts: max_new_tokens <= 24 capped to 24 layers, longer runs capped to 12 layers, and long prompts subtracted 8 or 16 more layers.
+- The MoE-specific 12-layer cap was removed in the correctness phase, but dense default prompt runs could still silently execute fewer than config.num_hidden_layers.
+- runtime_diagnose_cli full delegates to run_prompt_decode_loop without passing layer_count, so the correct anti-cheat location is the runtime result object, not only the CLI.
+
+Decision:
+- Default prompt runs now use config.num_hidden_layers for every model family.
+- Explicit partial debugging remains possible only by passing layer_count directly or by named diagnostic slices such as layer-0-15; the default full path no longer silently budgets layers.
+- PromptDecodeLoopResult now reports configured_layer_count, prompt_layer_count, layers_executed, expected_layers_executed, and anti_cheat_passed.
+- A default full run raises before execution if it would use fewer than the configured full stack.
+```

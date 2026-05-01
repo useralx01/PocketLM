@@ -3411,3 +3411,22 @@ generated_token_ids=[151667, 198, 32313, 11, 279, 1196, 4588, 752, 311, 3270, 26
 generated_text="<think>\nOkay, the user asked me to write a short paragraph about local AI. Let me start"
 verdict=correctness pass, speed gate fail. Previous 4.3s/token number came from the invalid 12-layer MoE shortcut and is not comparable.
 ```
+## Phase MoE Honest Speed / Setup
+
+```text
+git checkout phase-moe-correctness
+git checkout -b phase-moe-honest-speed
+git branch --show-current
+phase-moe-honest-speed
+```
+
+## Phase MoE Honest Speed / Stage 2 / anti-cheat
+
+```text
+audit=see DECISIONS.md "Phase MoE Honest Speed / Anti-cheat audit"
+change=default prompt runs now use config.num_hidden_layers; result payload exposes configured_layer_count, prompt_layer_count, layers_executed, expected_layers_executed, anti_cheat_passed.
+
+python -m pytest tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_short_chat_at_full_stack tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_moe_at_full_stack_for_correctness tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_uses_real_prompt_tokenization -q
+...                                                                      [100%]
+3 passed in 3.46s
+```
