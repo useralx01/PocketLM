@@ -572,3 +572,4 @@ Latest MoE speed v2 outcome:
 ## Phase MoE Correctness
 
 Partial: MoE output correctness restored for Qwen3-30B-A3B and Mixtral with coherent full-stack text; dense 14B regression passes and `237 passed`, but the valid full-stack Qwen3 20-token run is `27.923s/token` with `1.25%` expert hit rate, so the prior speed claim is invalid.
+Phase MoE Honest Speed: stopped at Stage 3. Tiny Qwen3 oracle passes exactly; tiny Mixtral generated ids match 10/10 but layer0_combined_hidden strict max_abs gate remains 0.0002344 after three attempts, so no real-model speed claims were made.

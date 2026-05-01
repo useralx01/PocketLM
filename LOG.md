@@ -3483,6 +3483,16 @@ layer0_combined_hidden_max_abs=0.00023440271615982056
 layers_executed=2/2
 verdict=token-exact and coherent path, but strict max_abs<1e-4 checkpoint gate not met for Mixtral layer0 hidden; documented as numeric drift before real-model speed work.
 
+attempt_2=regenerated HF tiny references with attn_implementation="eager"; Mixtral layer0_combined_hidden still max_abs=0.00023440271615982056, cosine=0.9999985647013078, generated_token_ids exact 10/10.
+attempt_3=reran Mixtral compare with PCKETLM_TORCH_THREADS=1, OMP_NUM_THREADS=1, MKL_NUM_THREADS=1; same layer0_combined_hidden max_abs=0.00023440271615982056, generated_token_ids exact 10/10.
+
+STOP-2:
+Tiny Mixtral oracle checkpoint divergence could not be brought under the strict max_abs<1e-4 gate after three distinct attempts:
+1. Force pcketlm compare math to float32.
+2. Regenerate the HF oracle with eager attention.
+3. Force single-thread CPU math.
+The divergence is small and token-exact, but the phase rules say not to continue to Stage 4+ speed work until both tiny fixtures pass the checkpoint gate.
+
 python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_compare_with_tiny_qwen3_oracle -q
 .                                                                        [100%]
 1 passed in 2.31s
@@ -3494,4 +3504,8 @@ python -m pytest tests/test_runtime_diagnose_cli.py tests/test_tiny_moe_oracle.p
 python -m pytest tests/test_runtime_tensor_catalog.py -q
 .....                                                                    [100%]
 5 passed in 2.03s
+
+python -m pytest tests/test_runtime_diagnose_cli.py tests/test_tiny_moe_oracle.py tests/test_runtime_tensor_catalog.py -q
+..............                                                           [100%]
+14 passed in 2.48s
 ```

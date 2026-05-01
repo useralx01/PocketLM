@@ -118,6 +118,7 @@ def capture_reference(
         trust_remote_code=True,
         torch_dtype="auto",
         low_cpu_mem_usage=True,
+        attn_implementation="eager",
     )
     model.eval()
 

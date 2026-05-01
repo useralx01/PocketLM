@@ -101,3 +101,36 @@ Follow-up:
 - why it happened: the MoE long-generation path used only 12 transformer layers for max_new_tokens > 8, so output came from a truncated model. Mixtral also combined expert outputs with unnormalized top-k router weights when config.json omitted `norm_topk_prob`, unlike Transformers' Mixtral router.
 - fix: use the full configured MoE layer count for prompt decoding and default missing MoE `norm_topk_prob` to true while honoring explicit config values.
 - lesson: generated text is a correctness signal. Speed measurements on a truncated or mathematically mismatched model are not product evidence.
+## Phase MoE Honest Speed / STOP-2 / Tiny Mixtral strict checkpoint drift
+
+```text
+slice=compare-with-reference
+model=tiny_moe_mixtral
+checkpoint=layer0_combined_hidden
+strict_gate=max_abs_diff < 1e-4 and cosine >= 0.999
+
+attempt_1:
+- PCKETLM_RUNTIME_MATH_DTYPE=float32
+- generated_token_ids exact 10/10
+- cosine=0.9999986952
+- max_abs_diff=0.00023440271615982056
+
+attempt_2:
+- Regenerated HF oracle with attn_implementation="eager"
+- generated_token_ids exact 10/10
+- cosine=0.9999985647
+- max_abs_diff=0.00023440271615982056
+
+attempt_3:
+- PCKETLM_RUNTIME_MATH_DTYPE=float32
+- PCKETLM_TORCH_THREADS=1
+- OMP_NUM_THREADS=1
+- MKL_NUM_THREADS=1
+- generated_token_ids exact 10/10
+- cosine=0.9999985647
+- max_abs_diff=0.00023440271615982056
+
+classification:
+- Not a semantic MoE routing failure: generated ids match the HF oracle exactly.
+- Still a STOP under the phase rules because the strict checkpoint max_abs gate remains red after three attempts.
+```
