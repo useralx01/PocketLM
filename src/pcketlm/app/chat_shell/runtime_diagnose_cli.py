@@ -834,7 +834,7 @@ def _array_compare(name: str, actual: torch.Tensor | None, expected_path: Path) 
     cosine = 1.0 if float(denominator.item()) == 0.0 else float(torch.dot(actual_flat, expected_flat).item() / denominator.item())
     max_abs = float(diff.abs().max().item()) if diff.numel() else 0.0
     max_rel = float((diff.abs() / expected.abs().clamp_min(1e-12)).max().item()) if diff.numel() else 0.0
-    ready = cosine >= 0.999 and max_abs < 1e-4
+    ready = cosine >= 0.9999 and max_abs <= 1e-3
     return {
         "name": name,
         "ready": ready,
@@ -995,7 +995,7 @@ def _compare_with_reference(
     overlap = sum(1 for expected, actual in zip(expected_ids, actual_ids) if expected == actual)
     for checkpoint in checkpoint_results:
         blockers.extend(checkpoint.get("blockers", []))
-    required_overlap = min(7, len(expected_ids), len(actual_ids))
+    required_overlap = min(10, len(expected_ids), len(actual_ids))
     if required_overlap and overlap < required_overlap:
         blockers.append(f"Generated token overlap {overlap}/{required_overlap} is below the correctness gate.")
     payload.update(

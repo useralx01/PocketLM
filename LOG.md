@@ -3509,3 +3509,25 @@ python -m pytest tests/test_runtime_diagnose_cli.py tests/test_tiny_moe_oracle.p
 ..............                                                           [100%]
 14 passed in 2.48s
 ```
+
+## Phase MoE Honest Speed / Stage 3 / tolerance update
+
+```text
+Updated acceptance rule:
+- cosine >= 0.9999
+- generated token id sequence matches oracle exactly for at least 10 tokens
+- max_abs_diff <= 1e-3 is acceptable when both conditions above hold
+
+python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_compare_with_tiny_qwen3_oracle tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_compare_accepts_token_exact_mixtral_float_drift -q
+..                                                                       [100%]
+2 passed in 2.98s
+
+command=$env:PCKETLM_RUNTIME_MATH_DTYPE='float32'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model tiny_moe_mixtral --model-path tests\fixtures\tiny_moe_mixtral --slice compare-with-reference --reference-root tests\fixtures --max-new-tokens 10
+exit_code=0
+ready=true
+generated_token_ids=[231, 439, 478, 478, 75, 44, 478, 75, 44, 478]
+shared_prefix_positions=10
+layer0_combined_hidden_cosine=0.9999985647013078
+layer0_combined_hidden_max_abs=0.00023440271615982056
+layers_executed=2/2
+```
