@@ -3430,3 +3430,29 @@ python -m pytest tests/test_runtime_layer_bridge.py::test_recommended_prompt_lay
 ...                                                                      [100%]
 3 passed in 3.46s
 ```
+
+## Phase MoE Honest Speed / Stage 1 / tiny oracle
+
+```text
+Tiny Qwen3-MoE fixture:
+model_path=tests/fixtures/tiny_moe_qwen3
+config=2 layers, hidden_size=128, experts=8, top_k=2, vocab_size=512
+reference=tests/fixtures/tiny_moe_qwen3/reference/reference.json
+generated_token_ids=[462, 376, 509, 463, 207, 353, 429, 463, 467, 189]
+captured_checkpoints=embedding_first_token, layer0_attention_output, layer0_router_logits, layer0_moe_output, layer0_combined_hidden, final_hidden_before_lm_head
+
+Tiny Mixtral-MoE fixture:
+model_path=tests/fixtures/tiny_moe_mixtral
+config=2 layers, hidden_size=128, experts=8, top_k=2, vocab_size=512
+reference=tests/fixtures/tiny_moe_mixtral/reference/reference.json
+generated_token_ids=[231, 439, 478, 478, 75, 44, 478, 75, 44, 478]
+captured_checkpoints=embedding_first_token, layer0_attention_output, layer0_router_logits, layer0_moe_output, layer0_combined_hidden, final_hidden_before_lm_head
+
+python -m pytest tests/test_tiny_moe_oracle.py -q
+..                                                                       [100%]
+2 passed in 0.10s
+
+python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_uses_real_prompt_tokenization tests/test_runtime_layer_bridge.py::test_recommended_prompt_layer_count_keeps_moe_at_full_stack_for_correctness -q
+..                                                                       [100%]
+2 passed in 1.71s
+```

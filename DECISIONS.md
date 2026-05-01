@@ -668,3 +668,17 @@ Decision:
 - PromptDecodeLoopResult now reports configured_layer_count, prompt_layer_count, layers_executed, expected_layers_executed, and anti_cheat_passed.
 - A default full run raises before execution if it would use fewer than the configured full stack.
 ```
+
+## Phase MoE Honest Speed / tiny oracle
+
+```text
+Decision:
+- Add two tiny local MoE fixtures under tests/fixtures/: tiny_moe_qwen3 and tiny_moe_mixtral.
+- Both use 2 layers, hidden_size=128, 8 experts/layer, top-2 routing, vocab_size=512, fixed input_ids.json, and fixed random seed weights saved as safetensors.
+- tools/moe_reference_run.py now supports tokenizer-free fixtures by reading input_ids.json and writes reference arrays directly into each fixture folder.
+
+Why:
+- Full HF Transformers reference capture for Qwen3-30B-A3B and Mixtral-8x7B is not practical on this machine without accelerate/offload.
+- Tiny same-architecture fixtures make math-correctness checks runnable locally and prevent future speed work from relying only on generated-text impressions.
+- The fixed token ids avoid adding tokenizer files to synthetic fixtures while still exercising embedding, attention, router, expert, final hidden, and generated-token paths.
+```
