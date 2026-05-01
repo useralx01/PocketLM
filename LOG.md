@@ -3580,3 +3580,47 @@ python -m pytest tests/test_tensor_residency.py -q
 ............................                                             [100%]
 28 passed in 1.54s
 ```
+
+## Phase MoE Honest Speed / Stage 4 / honest baseline / Mixtral fixed
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='512'; $env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER='1'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model mixtral-8x7b-instruct-v01 --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-mixtral-stage4-fixed.jsonl 2>&1
+
+run=1 elapsed=532.706s avg=26.635s/token peak_ws=8664MB free_after=2849MB layers_executed=640/640 anti_cheat=true hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=4239 tensor_load_time=347.553s
+generated_text="a city that is known for its beauty, culture, and history. Paris is a city that is"
+
+run=2 elapsed=511.442s avg=25.572s/token peak_ws=8664MB free_after=3030MB layers_executed=640/640 anti_cheat=true hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=8478 tensor_load_time=330.883s
+generated_text="a city that is known for its beauty, culture, and history. Paris is a city that is"
+
+run=3 elapsed=509.695s avg=25.485s/token peak_ws=8664MB free_after=2658MB layers_executed=640/640 anti_cheat=true hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=12717 tensor_load_time=330.561s
+generated_text="a city that is known for its beauty, culture, and history. Paris is a city that is"
+
+verdict=correct/coherent full-stack output; memory pressure fixed; speed and expert cache hit rate still miss target.
+```
+
+## Phase MoE Honest Speed / Stage 4 / dense regression / Qwen2.5-14B
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "hello world" --max-new-tokens 4 > state\moe-honest-14b-stage4.jsonl 2>&1
+
+elapsed=65.366s avg=16.342s/token peak_ws=2508MB free_after=6087MB layers_executed=192/192 anti_cheat=true tensor_load_time=54.037s
+generated_text="Hello! How can"
+generated_token_ids=[9707, 0, 2585, 646]
+
+verdict=dense regression intact.
+```
+
+## Phase MoE Honest Speed / Stage 5 / per-layer cap fix
+
+```text
+problem=Qwen3-A3B routes top-k=8 experts/token, but the default cache cap kept only 4 resident experts/layer. That makes the cache evict experts that the model may immediately need again.
+fix=when model config reports num_experts_per_tok and no explicit override is set, raise max_resident_experts_per_layer to at least top-k.
+
+python -m pytest tests/test_tensor_residency.py::test_moe_residency_policy_keeps_per_layer_cap_at_least_top_k tests/test_tensor_residency.py::test_moe_residency_policy_honors_explicit_per_layer_cap -q
+..                                                                       [100%]
+2 passed in 1.94s
+
+python -m pytest tests/test_tensor_residency.py -q
+..............................                                           [100%]
+30 passed in 1.48s
+```

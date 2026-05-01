@@ -135,24 +135,31 @@ class TensorResidencyPolicy:
                 max_resident_mb = model_budget_mb
                 model_aware_budget_active = True
         expert_cache_mb = max(0, _env_int("PCKETLM_EXPERT_TENSOR_CACHE_MB", DEFAULT_EXPERT_CACHE_MB))
+        moe_top_k = 0
         if (
             model_id
             and free_memory_bytes is not None
-            and not _env_is_set("PCKETLM_EXPERT_TENSOR_CACHE_MB")
         ):
             try:
                 from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
 
                 catalog = load_tensor_catalog(model_id)
                 is_moe_model = bool(catalog.num_experts and catalog.num_experts_per_tok)
+                moe_top_k = int(catalog.num_experts_per_tok or 0)
             except Exception:
                 is_moe_model = False
-            if is_moe_model:
+            if is_moe_model and not _env_is_set("PCKETLM_EXPERT_TENSOR_CACHE_MB"):
                 free_mb = int(free_memory_bytes // (1024**2))
                 adaptive_expert_mb = max(DEFAULT_EXPERT_CACHE_MB, min(max(0, free_mb - 2048), 2048))
                 expert_cache_mb = max(expert_cache_mb, adaptive_expert_mb)
 
         expert_decay_rate = max(0.0, min(1.0, _env_float("PCKETLM_EXPERT_CACHE_DECAY", DEFAULT_EXPERT_DECAY_RATE)))
+        max_resident_experts_per_layer = max(
+            0,
+            _env_int("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER", DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER),
+        )
+        if moe_top_k and not _env_is_set("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER"):
+            max_resident_experts_per_layer = max(max_resident_experts_per_layer, moe_top_k)
 
         return cls(
             enabled=os.environ.get("PCKETLM_TENSOR_CACHE", "1").strip().lower() not in {"0", "false", "no"},
@@ -167,10 +174,7 @@ class TensorResidencyPolicy:
             free_memory_bytes=free_memory_bytes,
             sticky_residency_steps=max(0, _env_int("PCKETLM_TENSOR_CACHE_STICKY_STEPS", DEFAULT_STICKY_RESIDENCY_STEPS)),
             expert_max_resident_bytes=expert_cache_mb * 1024 * 1024,
-            max_resident_experts_per_layer=max(
-                0,
-                _env_int("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER", DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER),
-            ),
+            max_resident_experts_per_layer=max_resident_experts_per_layer,
             expert_decay_rate=expert_decay_rate,
         )
 

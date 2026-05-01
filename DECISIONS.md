@@ -722,3 +722,16 @@ Why:
 - The expert budget was not the only issue: large non-expert tensors were marked always-resident and could not be evicted.
 - This made the residency manager unsafe on this 16 GB machine and would hide memory bugs behind "cache tuning" numbers.
 ```
+
+## Phase MoE Honest Speed / expert per-layer cap
+
+```text
+Decision:
+- If a MoE catalog reports num_experts_per_tok and PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER is not explicitly set, the default per-layer expert cap is raised to at least num_experts_per_tok.
+- Explicit user overrides still win, even when they are lower than top-k, so diagnostics can intentionally stress the cache.
+
+Why:
+- Qwen3-A3B routes top-k=8 experts/token, while the old default cap was 4 experts/layer.
+- A cap below top-k means a single decode step can evict experts that belong to the same routing frontier, so hit rate measurements are dominated by self-inflicted churn.
+- This is a correctness-of-cache-policy fix, not a model-specific branch: it reads the catalog/config value.
+```
