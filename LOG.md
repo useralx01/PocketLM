@@ -3266,3 +3266,30 @@ result=timed_out_after_18693s
 action=stopped_orphaned_python_pid_29684
 reason=unsafe/invalid measurement, did not produce complete raw rows
 ```
+
+## Phase MoE Speed v2 / Stage 5 / final checks
+
+```text
+qwen2.5-14b-instruct full max_new_tokens=4:
+ready=true
+generated_text=Hello! How can
+elapsed_seconds=95.098
+peak_working_set_mb=2509
+free_ram_start_mb=3556
+free_ram_end_mb=3502
+
+qwen3-30b-a3b full max_new_tokens=20 repeat=3:
+env PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER=32
+env PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+env PCKETLM_EXPERT_CACHE_DECAY=1
+run=1 elapsed_seconds=108.536 avg_seconds_per_token=5.4268 peak_working_set_mb=4940 expert_hit_rate_token20=0.5462 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+run=2 elapsed_seconds=90.169 avg_seconds_per_token=4.5085 peak_working_set_mb=5198 expert_hit_rate_token20=0.6546 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+run=3 elapsed_seconds=86.925 avg_seconds_per_token=4.3463 peak_working_set_mb=5257 expert_hit_rate_complete=0.6920 generated_text_repr='exion particular,\u2026 \u2026\n\n...'
+qwen3_regression=pass
+
+python -m pytest tests/ -q
+235 passed in 23.01s
+
+phase_outcome=partial
+reason=Qwen3 20-token gate passed and Mixtral runs end-to-end, but Mixtral expert hit rate reached only 21.40%, not comparable to Qwen3.
+```

@@ -563,3 +563,9 @@ Latest MoE speed outcome:
 - Qwen3-30B-A3B best tested cache configuration was `4096 MB` expert cache and `32` experts/layer: `49.262s/token` warm, `8.79%` expert hit rate, `5893 MB` peak working set, generated `<think>`.
 - The phase stopped under STOP-3 because three real cache configurations stayed above `20s/token` and below `50%` hit rate; the required gate was `<=10s/token` and `>=70%`.
 - Full suite passed with `229` tests. Mixtral validation was not run because the STOP condition ended the phase before Stage 6.
+
+Latest MoE speed v2 outcome:
+- Re-measured Qwen3-30B-A3B with realistic `20` token generation. After the MoE long-generation schedule fix, best warm run was `3.121s/token` with `63.19%` last-15-token expert hit rate; final regression run was `4.346s/token` with `69.20%` cumulative hit rate.
+- Downloaded and imported Mixtral-8x7B-Instruct-v0.1 (`86.99 GB`, `26/26` files), generalized MoE tensor naming for `block_sparse_moe`, and built a ready catalog with `995` tensors, `19` shards, `32` layers, and `768` expert tensors.
+- Mixtral diagnostic slices passed through full all-layer MoE, and full `20` token generation ran end-to-end with verbatim output, best measured `9.132s/token`, `8908 MB` peak working set, and `21.40%` expert hit rate.
+- Full suite passed with `235` tests. Outcome is partial: Qwen3 met the phase gate and Mixtral runs, but Mixtral cache hit rate is not yet comparable and needs compressed expert residency or a hotter expert scheduler.

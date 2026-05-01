@@ -78,6 +78,7 @@
 - Define the profile schema
 - Define the benchmark schema
 - Rescope direct paged runtime speed around quantized execution, native fused CPU backend, GPU path, or a redesigned packed executor; cache/prefetch/zero-copy levers did not reach the target.
+- Improve Mixtral MoE expert hit rate beyond the current `21.40%` by adding compressed expert residency or a hotter expert scheduler; Qwen3 now meets the 20-token MoE cache gate, but Mixtral does not yet have comparable reuse.
 - Implement first model file validation pass
 - Implement first registry write/read flow
 - Implement import readiness detection from real model folders
