@@ -108,3 +108,8 @@
 - Add capability-based optimization profiles
 - Add advanced research mode
 - Add export/import of optimization profiles
+## Phase MoE Correctness Follow-Up
+
+- Replace the invalid 12-layer MoE speed shortcut with a correctness-preserving acceleration plan.
+- Rework expert residency for full-stack Qwen3; current valid 20-token run is `27.923s/token` with `1.25%` expert hit rate.
+- Add a small local MoE oracle fixture or an offloaded HF reference path so checkpoint-level cosine comparisons can run without loading 60-90 GB into RAM.

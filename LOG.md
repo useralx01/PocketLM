@@ -3318,3 +3318,96 @@ python -m pytest tests/test_runtime_layer_bridge.py tests/test_runtime_diagnose_
 ..........................................                               [100%]
 42 passed in 2.76s
 ```
+
+## Phase MoE Correctness / Stage 1 / HF reference attempt
+
+```text
+python tools\moe_reference_run.py --model-id qwen3-30b-a3b --model-path models\qwen3-30b-a3b\original --max-new-tokens 1
+exit_code=1
+last_output=Loading weights: 5%|4         | 26/531 [00:05<01:20,  6.31it/s]
+reference_json_created=no
+
+python tools\moe_reference_run.py --model-id mixtral-8x7b-instruct-v01 --model-path models\mixtral-8x7b-instruct-v01\original --max-new-tokens 1
+exit_code=1
+last_output=Loading weights: 0%|          | 0/291 [00:00<?, ?it/s]
+reference_json_created=no
+
+local_substitution_model=none available under models/
+reason=full HF AutoModelForCausalLM reference requires loading 60-90 GB model weights into a Python Transformers process; accelerate/offload is not installed and no smaller same-family local MoE fixture exists. The correction below uses local Transformers router/expert math source plus pcketlm end-to-end text validation.
+```
+
+## Phase MoE Correctness / Stage 4 / Qwen3 end-to-end text
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 10
+exit_code=0
+ready=true
+elapsed_seconds=310.357
+peak_working_set_mb=4238
+free_ram_start_mb=5362
+free_ram_end_mb=2533
+generated_token_ids=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279]
+generated_text="<think>\nOkay, the user is asking for the"
+full_stack_layers=48
+verdict=coherent English; prior gibberish removed, but speed is slower because the invalid 12-layer shortcut is gone.
+```
+
+## Phase MoE Correctness / Stage 4 / Mixtral end-to-end text
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model mixtral-8x7b-instruct-v01 --slice full --prompt "The capital of France is" --max-new-tokens 10 > state\moe-correctness-mixtral-full.jsonl 2>&1
+exit_code=0
+ready=true
+elapsed_seconds=430.186
+peak_working_set_mb=7539
+free_ram_start_mb=6512
+free_ram_end_mb=2871
+generated_token_ids=[264, 2990, 369, 349, 2651, 354, 871, 9689, 28725, 5679]
+generated_text="a city that is known for its beauty, culture"
+full_stack_layers=32
+verdict=coherent English; prior byte/code-like gibberish removed.
+```
+
+## Phase MoE Correctness / Stage 4 / 14B dense regression
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "hello world" --max-new-tokens 4 > state\moe-correctness-14b-regression.jsonl 2>&1
+exit_code=0
+ready=true
+elapsed_seconds=81.258
+peak_working_set_mb=2507
+free_ram_start_mb=5660
+free_ram_end_mb=4816
+generated_token_ids=[9707, 0, 2585, 646]
+generated_text="Hello! How can"
+verdict=pass
+```
+
+## Phase MoE Correctness / Stage 4 / pytest
+
+```text
+python -m pytest tests/ -q
+........................................................................ [ 30%]
+........................................................................ [ 60%]
+........................................................................ [ 91%]
+.....................                                                    [100%]
+237 passed in 21.05s
+```
+
+## Phase MoE Correctness / Stage 4 / Qwen3 20-token speed check
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "Write a short paragraph about local AI." --max-new-tokens 20 > state\moe-correctness-qwen3-20token.jsonl 2>&1
+exit_code=0
+ready=true
+elapsed_seconds=558.464
+avg_seconds_per_token=27.923
+tokens_per_second=0.0358
+peak_working_set_mb=4191
+free_ram_start_mb=5330
+free_ram_end_mb=2633
+expert_hit_rate_token20=0.0125
+generated_token_ids=[151667, 198, 32313, 11, 279, 1196, 4588, 752, 311, 3270, 264, 2805, 14311, 911, 2205, 15235, 13, 6771, 752, 1191]
+generated_text="<think>\nOkay, the user asked me to write a short paragraph about local AI. Let me start"
+verdict=correctness pass, speed gate fail. Previous 4.3s/token number came from the invalid 12-layer MoE shortcut and is not comparable.
+```

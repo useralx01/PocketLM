@@ -569,3 +569,6 @@ Latest MoE speed v2 outcome:
 - Downloaded and imported Mixtral-8x7B-Instruct-v0.1 (`86.99 GB`, `26/26` files), generalized MoE tensor naming for `block_sparse_moe`, and built a ready catalog with `995` tensors, `19` shards, `32` layers, and `768` expert tensors.
 - Mixtral diagnostic slices passed through full all-layer MoE, and full `20` token generation ran end-to-end with verbatim output, best measured `9.132s/token`, `8908 MB` peak working set, and `21.40%` expert hit rate.
 - Full suite passed with `235` tests. Outcome is partial: Qwen3 met the phase gate and Mixtral runs, but Mixtral cache hit rate is not yet comparable and needs compressed expert residency or a hotter expert scheduler.
+## Phase MoE Correctness
+
+Partial: MoE output correctness restored for Qwen3-30B-A3B and Mixtral with coherent full-stack text; dense 14B regression passes and `237 passed`, but the valid full-stack Qwen3 20-token run is `27.923s/token` with `1.25%` expert hit rate, so the prior speed claim is invalid.

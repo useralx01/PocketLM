@@ -644,4 +644,9 @@ moe_layer_count:
 - The prior speed phase capped MoE long generations to 12 layers for max_new_tokens > 8.
 - That is not a valid product/runtime result: it runs a partial transformer stack and produces meaningless tokens.
 - MoE prompt decoding now uses config.num_hidden_layers for the full stack. Speed work must not trade away model correctness.
+
+reference_capture:
+- The local HF Transformers reference tool was added, but full reference capture could not complete on this machine for Qwen3-30B-A3B or Mixtral-8x7B because it requires loading the whole 60-90 GB model into a Transformers process and accelerate/offload is not installed.
+- No smaller same-family local MoE fixture exists under models/, and this correctness phase is not allowed to add new models.
+- For this pass, the oracle for the math fix is the installed Transformers implementation source for Qwen3MoeTopKRouter/Qwen3MoeExperts and MixtralTopKRouter/MixtralExperts, plus end-to-end coherent generated text.
 ```
