@@ -95,6 +95,7 @@ class TensorResidencyPolicy:
     expert_max_resident_bytes: int = DEFAULT_EXPERT_CACHE_MB * 1024 * 1024
     max_resident_experts_per_layer: int = DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER
     expert_decay_rate: float = DEFAULT_EXPERT_DECAY_RATE
+    expert_q4_residency: bool = False
 
     @classmethod
     def from_environment(cls, model_id: str | None = None) -> "TensorResidencyPolicy":
@@ -176,6 +177,7 @@ class TensorResidencyPolicy:
             expert_max_resident_bytes=expert_cache_mb * 1024 * 1024,
             max_resident_experts_per_layer=max_resident_experts_per_layer,
             expert_decay_rate=expert_decay_rate,
+            expert_q4_residency=_env_enabled("PCKETLM_EXPERT_Q4_CACHE", "0"),
         )
 
     def to_dict(self) -> dict:
@@ -197,6 +199,7 @@ class TensorResidencyPolicy:
             "expert_max_resident_mb": round(self.expert_max_resident_bytes / (1024**2), 2),
             "max_resident_experts_per_layer": self.max_resident_experts_per_layer,
             "expert_decay_rate": self.expert_decay_rate,
+            "expert_q4_residency": self.expert_q4_residency,
         }
 
 
@@ -235,13 +238,23 @@ class TensorResidencyStats:
 
 
 @dataclass(slots=True)
+class _QuantizedQ4Tensor:
+    packed: torch.Tensor
+    scales: torch.Tensor
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    nbytes: int
+
+
+@dataclass(slots=True)
 class _ResidentTensor:
-    tensor: torch.Tensor
+    tensor: torch.Tensor | None
     entry: TensorCatalogEntry
     nbytes: int
     dtype: str
     loaded_step: int
     expert_key: tuple[int, int] | None = None
+    q4: _QuantizedQ4Tensor | None = None
 
 
 _CacheKey = tuple[str, str, str, int, int, str]
@@ -380,13 +393,16 @@ def _is_always_resident_entry(entry: TensorCatalogEntry) -> bool:
 
 def _loaded_slice_from_resident(model_id: str, resident: _ResidentTensor) -> LoadedTensorSlice:
     entry = resident.entry
+    tensor = resident.tensor if resident.tensor is not None else _dequantize_q4_tensor(resident.q4)
+    if tensor is None:
+        raise RuntimeError(f"resident tensor {entry.tensor_name} has no tensor storage")
     return LoadedTensorSlice(
         model_id=model_id,
         tensor_name=entry.tensor_name,
         shard_name=entry.shard_name,
         dtype=resident.dtype,
-        shape=[int(value) for value in resident.tensor.shape],
-        tensor=resident.tensor,
+        shape=[int(value) for value in tensor.shape],
+        tensor=tensor,
         layer_index=entry.layer_index,
         component_group=entry.component_group,
         loaded_nbytes=resident.nbytes,
@@ -428,6 +444,47 @@ def _hot_tensor_for_compute(loaded: LoadedTensorSlice, dtype: torch.dtype) -> to
     return tensor.clone()
 
 
+def _quantize_q4_tensor(tensor: torch.Tensor) -> _QuantizedQ4Tensor:
+    source = tensor.detach().cpu()
+    shape = tuple(int(value) for value in source.shape)
+    if source.numel() == 0:
+        packed = torch.empty((0,), dtype=torch.uint8)
+        scales = torch.empty((0,), dtype=torch.float16)
+        return _QuantizedQ4Tensor(packed=packed, scales=scales, shape=shape, dtype=source.dtype, nbytes=0)
+
+    rows = source.to(dtype=torch.float32).reshape(-1, shape[-1] if shape else 1)
+    scales = rows.abs().amax(dim=1).clamp_min(1e-8) / 7.0
+    quantized = torch.round(rows / scales[:, None]).clamp(-8, 7).to(torch.int16) + 8
+    flat = quantized.reshape(-1).to(torch.uint8)
+    if int(flat.numel()) % 2:
+        flat = torch.cat([flat, torch.zeros((1,), dtype=torch.uint8)])
+    low = flat[0::2]
+    high = flat[1::2] << 4
+    packed = (low | high).contiguous()
+    scales = scales.to(dtype=torch.float16).contiguous()
+    nbytes = int(packed.numel() * packed.element_size() + scales.numel() * scales.element_size())
+    return _QuantizedQ4Tensor(packed=packed, scales=scales, shape=shape, dtype=source.dtype, nbytes=nbytes)
+
+
+def _dequantize_q4_tensor(q4: _QuantizedQ4Tensor | None) -> torch.Tensor | None:
+    if q4 is None:
+        return None
+    numel = 1
+    for value in q4.shape:
+        numel *= int(value)
+    if numel == 0:
+        return torch.empty(q4.shape, dtype=q4.dtype)
+    packed = q4.packed
+    unpacked = torch.empty((int(packed.numel()) * 2,), dtype=torch.int16)
+    unpacked[0::2] = (packed & 0x0F).to(torch.int16)
+    unpacked[1::2] = ((packed >> 4) & 0x0F).to(torch.int16)
+    signed = unpacked[:numel].to(torch.float32) - 8.0
+    last_dim = q4.shape[-1] if q4.shape else 1
+    rows = signed.reshape(-1, last_dim)
+    dequantized = rows * q4.scales.to(dtype=torch.float32)[:, None]
+    return dequantized.reshape(q4.shape).to(dtype=q4.dtype)
+
+
 def _tensor_for_residency_store(tensor: torch.Tensor, loaded: LoadedTensorSlice) -> torch.Tensor:
     if loaded.borrowed_from_live_handle and tensor.data_ptr() == loaded.tensor.data_ptr():
         return tensor.clone()
@@ -454,8 +511,15 @@ def _store_resident_tensor(
     policy: TensorResidencyPolicy,
 ) -> None:
     global _resident_bytes, _resident_expert_bytes
-    nbytes = tensor.element_size() * tensor.nelement()
     expert_key = _expert_key(entry)
+    q4: _QuantizedQ4Tensor | None = None
+    resident_tensor: torch.Tensor | None = tensor
+    if expert_key is not None and policy.expert_q4_residency:
+        q4 = _quantize_q4_tensor(tensor)
+        resident_tensor = None
+        nbytes = q4.nbytes
+    else:
+        nbytes = tensor.element_size() * tensor.nelement()
     if expert_key is None:
         if nbytes > policy.max_resident_bytes:
             _stats.skips += 1
@@ -495,12 +559,13 @@ def _store_resident_tensor(
                 _stats.expert_evictions += 1
 
         _resident_tensors[key] = _ResidentTensor(
-            tensor=tensor,
+            tensor=resident_tensor,
             entry=entry,
             nbytes=nbytes,
             dtype=str(tensor.dtype),
             loaded_step=_residency_step,
             expert_key=expert_key,
+            q4=q4,
         )
         _resident_bytes += nbytes
         if expert_key is not None:

@@ -16,6 +16,7 @@ from pcketlm.core.runtime.tensor_residency import (
     record_expert_activation,
     tensor_residency_stats,
 )
+from pcketlm.core.runtime.tensor_residency import _dequantize_q4_tensor, _quantize_q4_tensor
 
 
 def _entry(tmp_path: Path, tensor_name: str = "model.layers.0.self_attn.k_proj.weight") -> TensorCatalogEntry:
@@ -388,6 +389,81 @@ def test_expert_residency_respects_zero_expert_budget(tmp_path: Path, monkeypatc
     assert snapshot["expert_misses"] == 2
     assert snapshot["expert_hit_rate"] == 0.0
     assert snapshot["expert_resident_count"] == 0
+
+
+def test_q4_expert_residency_round_trips_known_tensor() -> None:
+    tensor = torch.linspace(-1.0, 1.0, steps=128, dtype=torch.float32).reshape(8, 16)
+
+    q4 = _quantize_q4_tensor(tensor)
+    restored = _dequantize_q4_tensor(q4)
+
+    assert restored is not None
+    assert restored.shape == tensor.shape
+    assert torch.nn.functional.cosine_similarity(tensor.flatten(), restored.flatten(), dim=0).item() > 0.995
+    assert q4.nbytes <= tensor.element_size() * tensor.nelement()
+
+
+def test_q4_expert_residency_holds_more_expert_tensors_under_same_budget(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "expert-q4-budget-test"
+    entries = {}
+    for index in range(4):
+        entry = _entry(tmp_path, f"model.layers.0.mlp.experts.{index}.gate_proj.weight")
+        entry.component_group = "expert_mlp"
+        entry.expert_index = index
+        entry.shape = [64, 64]
+        entry.data_nbytes = 64 * 64 * 4
+        entries[entry.tensor_name] = entry
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        entry = entries[tensor_name]
+        tensor = torch.linspace(-1.0, 1.0, steps=64 * 64, dtype=torch.float32).reshape(64, 64)
+        return LoadedTensorSlice(
+            model_id=model_id_arg,
+            tensor_name=entry.tensor_name,
+            shard_name=entry.shard_name,
+            dtype=str(tensor.dtype),
+            shape=list(tensor.shape),
+            tensor=tensor + float(entry.expert_index),
+            layer_index=entry.layer_index,
+            component_group=entry.component_group,
+            loaded_nbytes=tensor.element_size() * tensor.nelement(),
+            blockers=[],
+            ready=True,
+        )
+
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._find_tensor_entry",
+        lambda _model_id, tensor_name: entries.get(tensor_name),
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    fp_policy = TensorResidencyPolicy(
+        max_resident_bytes=128 * 1024,
+        max_tensor_bytes=128 * 1024,
+        expert_max_resident_bytes=32 * 1024,
+        max_resident_experts_per_layer=8,
+    )
+    for tensor_name in entries:
+        record_expert_activation(0, entries[tensor_name].expert_index)
+        load_resident_tensor(model_id, tensor_name, dtype=torch.float32, policy=fp_policy)
+    fp_count = expert_residency_snapshot()["expert_resident_count"]
+
+    clear_tensor_residency_cache()
+    q4_policy = TensorResidencyPolicy(
+        max_resident_bytes=128 * 1024,
+        max_tensor_bytes=128 * 1024,
+        expert_max_resident_bytes=32 * 1024,
+        max_resident_experts_per_layer=8,
+        expert_q4_residency=True,
+    )
+    for tensor_name in entries:
+        record_expert_activation(0, entries[tensor_name].expert_index)
+        load_resident_tensor(model_id, tensor_name, dtype=torch.float32, policy=q4_policy)
+    q4_count = expert_residency_snapshot()["expert_resident_count"]
+
+    assert fp_count < 4
+    assert q4_count == 4
 
 
 def test_expert_residency_uses_separate_budget_from_dense_cache(tmp_path: Path, monkeypatch) -> None:

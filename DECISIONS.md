@@ -735,3 +735,17 @@ Why:
 - A cap below top-k means a single decode step can evict experts that belong to the same routing frontier, so hit rate measurements are dominated by self-inflicted churn.
 - This is a correctness-of-cache-policy fix, not a model-specific branch: it reads the catalog/config value.
 ```
+
+## Phase MoE Honest Speed / Q4 expert residency
+
+```text
+Decision:
+- Add optional PCKETLM_EXPERT_Q4_CACHE=1 for expert residency only.
+- Experts are quantized on store with per-row symmetric Q4: round-to-nearest into signed 4-bit values, pack two values per byte, store fp16 row scales, and dequantize on cache hit.
+- Disk safetensors remain unchanged; the first load still computes from the original tensor, and compression only affects resident expert reuse.
+
+Why:
+- Stage 5 4GB fp16 residency reached only 29.14% hit rate and 18.948s/token while using 3.62 GB for 1152 resident expert tensors.
+- The observed 20-token Qwen3 working set is too large for fp16 residency on this 16 GB test machine.
+- Q4 should let the same RAM hold roughly 4x more expert values, trading a small dequantization/error cost for fewer disk reads.
+```

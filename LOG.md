@@ -3624,3 +3624,77 @@ python -m pytest tests/test_tensor_residency.py -q
 ..............................                                           [100%]
 30 passed in 1.48s
 ```
+
+## Phase MoE Honest Speed / Stage 5 / Qwen3 budget point 1
+
+```text
+working_set_from_stage4=3594 distinct layer/expert pairs, 31278 expert touches
+stage4_run3_resident=553 tensors, 1739587584 bytes, 3145728 bytes/tensor
+note=30/50/70 percent of the observed working set would exceed the safe RAM available on this 16 GB machine, so the sweep uses the largest safe cache budgets instead.
+
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='2048'; Remove-Item Env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-qwen3-stage5-2048.jsonl 2>&1
+
+run=1 elapsed=389.086s avg=19.454s/token peak_ws=4159MB free_after=3726MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=31278 resident_count=682 resident_bytes=2145386496 tensor_load_time=325.320s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=2 elapsed=419.160s avg=20.958s/token peak_ws=4404MB free_after=3416MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=62556 resident_count=682 resident_bytes=2145386496 tensor_load_time=352.971s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=3 elapsed=425.931s avg=21.297s/token peak_ws=4404MB free_after=3441MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=93834 resident_count=682 resident_bytes=2145386496 tensor_load_time=359.614s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+verdict=2GB budget improved elapsed versus Stage 4 best but produced 0 cache hits; cache content is still too small/poorly aligned for replay reuse.
+```
+
+## Phase MoE Honest Speed / Stage 5 / Qwen3 budget point 2
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='3072'; Remove-Item Env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-qwen3-stage5-3072.jsonl 2>&1
+
+run=1 elapsed=423.762s avg=21.188s/token peak_ws=5203MB free_after=2713MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=31278 resident_count=1024 resident_bytes=3221225472 tensor_load_time=360.206s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=2 elapsed=431.550s avg=21.578s/token peak_ws=5228MB free_after=3005MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=62556 resident_count=1024 resident_bytes=3221225472 tensor_load_time=367.769s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=3 elapsed=432.373s avg=21.619s/token peak_ws=5283MB free_after=2804MB layers_executed=960/960 hit_rate_token20=0.0000 expert_hits_token20=0 expert_misses_token20=93834 resident_count=1024 resident_bytes=3221225472 tensor_load_time=369.090s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+verdict=3GB stores more tensors but is slower than 2GB and still 0 hits; bigger fp16 residency alone is not enough.
+```
+
+## Phase MoE Honest Speed / Stage 5 / Qwen3 budget point 3
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; Remove-Item Env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-qwen3-stage5-4096.jsonl 2>&1
+
+run=1 elapsed=379.378s avg=18.969s/token peak_ws=5598MB free_after=2969MB layers_executed=960/960 hit_rate_token20=0.2716 expert_hits_token20=8496 expert_misses_token20=22782 resident_count=1152 resident_bytes=3623878656 tensor_load_time=314.582s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=2 elapsed=379.820s avg=18.991s/token peak_ws=5598MB free_after=2869MB layers_executed=960/960 hit_rate_token20=0.2864 expert_hits_token20=17919 expert_misses_token20=44637 resident_count=1152 resident_bytes=3623878656 tensor_load_time=316.064s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+run=3 elapsed=378.953s avg=18.948s/token peak_ws=5598MB free_after=2950MB layers_executed=960/960 hit_rate_token20=0.2914 expert_hits_token20=27342 expert_misses_token20=66492 resident_count=1152 resident_bytes=3623878656 tensor_load_time=315.140s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+verdict=4GB proves fp16 expert cache can hit, but best avg=18.948s/token and hit_rate=29.14%; proceed to Stage 6 Q4 compressed expert residency.
+```
+
+## Phase MoE Honest Speed / Stage 6 / Q4 compressed expert residency tests
+
+```text
+python -m pytest tests/test_tensor_residency.py::test_q4_expert_residency_round_trips_known_tensor tests/test_tensor_residency.py::test_q4_expert_residency_holds_more_expert_tensors_under_same_budget -q
+..                                                                       [100%]
+2 passed in 2.58s
+
+python -m pytest tests/test_tensor_residency.py -q
+................................                                         [100%]
+32 passed in 1.54s
+
+command=$env:PCKETLM_RUNTIME_MATH_DTYPE='float32'; $env:PCKETLM_EXPERT_Q4_CACHE='1'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model tiny_moe_qwen3 --model-path tests\fixtures\tiny_moe_qwen3 --slice compare-with-reference --reference-root tests\fixtures --max-new-tokens 10
+layer0_combined_hidden_cosine=1.0000001226194957
+layer0_combined_hidden_max_abs=1.4901161193847656e-08
+generated_token_overlap=9/10
+expert_hit_rate=0.6512
+note=Q4 cache changes one later token in the tiny oracle but keeps checkpoint cosine above the Stage 6 >=0.99 correctness bar; real-model output must still be checked verbatim.
+```
