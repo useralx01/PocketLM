@@ -749,3 +749,15 @@ Why:
 - The observed 20-token Qwen3 working set is too large for fp16 residency on this 16 GB test machine.
 - Q4 should let the same RAM hold roughly 4x more expert values, trading a small dequantization/error cost for fewer disk reads.
 ```
+
+## Phase MoE Honest Speed / Q4 per-layer expert cap
+
+```text
+Decision:
+- When PCKETLM_EXPERT_Q4_CACHE=1 and the operator has not set PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER explicitly, set the per-layer cap to 4 * num_experts_per_tok.
+
+Why:
+- The first Q4 real run held the same 1152 expert tensors as fp16 because the top-k cap, not byte budget, was the active limiter.
+- Compression cannot improve hit rate if the cache is still forbidden from holding more experts per layer.
+- Explicit overrides still win for diagnostics and memory-constrained runs.
+```

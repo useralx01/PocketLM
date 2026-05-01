@@ -832,6 +832,21 @@ def test_moe_residency_policy_honors_explicit_per_layer_cap(monkeypatch) -> None
     assert policy.max_resident_experts_per_layer == 2
 
 
+def test_q4_moe_residency_policy_raises_per_layer_cap_above_top_k(monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.delenv("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER", raising=False)
+    monkeypatch.setenv("PCKETLM_EXPERT_Q4_CACHE", "1")
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 10 * 1024**3)
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_catalog.load_tensor_catalog",
+        lambda _model_id: SimpleNamespace(num_hidden_layers=48, num_experts=128, num_experts_per_tok=8),
+    )
+
+    policy = TensorResidencyPolicy.from_environment("qwen3-topk-test")
+
+    assert policy.max_resident_experts_per_layer == 32
+
+
 def test_load_resident_tensors_batches_misses_and_reuses_cached_results(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-batch-cache-test"

@@ -3698,3 +3698,18 @@ generated_token_overlap=9/10
 expert_hit_rate=0.6512
 note=Q4 cache changes one later token in the tiny oracle but keeps checkpoint cosine above the Stage 6 >=0.99 correctness bar; real-model output must still be checked verbatim.
 ```
+
+## Phase MoE Honest Speed / Stage 6 / Q4 cap fix
+
+```text
+problem=Q4 first real run compressed resident experts but still capped each layer to top-k, so it held the same 1152 tensors as fp16 and did not improve hit rate.
+fix=when PCKETLM_EXPERT_Q4_CACHE=1 and no explicit per-layer override is set, raise max_resident_experts_per_layer to 4 * num_experts_per_tok.
+
+python -m pytest tests/test_tensor_residency.py::test_q4_moe_residency_policy_raises_per_layer_cap_above_top_k tests/test_tensor_residency.py::test_q4_expert_residency_holds_more_expert_tensors_under_same_budget -q
+..                                                                       [100%]
+2 passed in 2.38s
+
+python -m pytest tests/test_tensor_residency.py -q
+.................................                                        [100%]
+33 passed in 1.52s
+```

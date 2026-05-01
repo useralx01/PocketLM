@@ -155,12 +155,14 @@ class TensorResidencyPolicy:
                 expert_cache_mb = max(expert_cache_mb, adaptive_expert_mb)
 
         expert_decay_rate = max(0.0, min(1.0, _env_float("PCKETLM_EXPERT_CACHE_DECAY", DEFAULT_EXPERT_DECAY_RATE)))
+        expert_q4_residency = _env_enabled("PCKETLM_EXPERT_Q4_CACHE", "0")
         max_resident_experts_per_layer = max(
             0,
             _env_int("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER", DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER),
         )
         if moe_top_k and not _env_is_set("PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER"):
-            max_resident_experts_per_layer = max(max_resident_experts_per_layer, moe_top_k)
+            q4_multiplier = 4 if expert_q4_residency else 1
+            max_resident_experts_per_layer = max(max_resident_experts_per_layer, moe_top_k * q4_multiplier)
 
         return cls(
             enabled=os.environ.get("PCKETLM_TENSOR_CACHE", "1").strip().lower() not in {"0", "false", "no"},
@@ -177,7 +179,7 @@ class TensorResidencyPolicy:
             expert_max_resident_bytes=expert_cache_mb * 1024 * 1024,
             max_resident_experts_per_layer=max_resident_experts_per_layer,
             expert_decay_rate=expert_decay_rate,
-            expert_q4_residency=_env_enabled("PCKETLM_EXPERT_Q4_CACHE", "0"),
+            expert_q4_residency=expert_q4_residency,
         )
 
     def to_dict(self) -> dict:
