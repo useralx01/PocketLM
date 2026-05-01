@@ -573,6 +573,15 @@ Why:
 - Mixtral uses a different MoE tensor naming layout than Qwen3, but the math roles are the same: `w1` is gate projection, `w3` is up projection, and `w2` is down projection.
 - Resolving from the actual safetensors catalog keeps the forward path architecture-driven instead of adding a model-id branch.
 
+## Phase MoE Speed v2 / Stage 4 / tokenizer warning handling
+
+Decision:
+- Tensor catalog readiness now treats source validation warnings as non-fatal, while still blocking on missing runtime files and incomplete shard sets.
+
+Why:
+- Mixtral ships `tokenizer.model` and `tokenizer.json`, not the Qwen-style `vocab.json` + `merges.txt` pair.
+- The previous catalog path incorrectly turned the tokenizer-pair warning into a hard blocker even though the model source was complete and the tokenizer can be loaded from the shipped files.
+
 ## Phase MoE Speed v2 / Stage 4 / Mixtral architecture reference
 
 Source:

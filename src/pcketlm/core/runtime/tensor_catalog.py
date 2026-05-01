@@ -238,7 +238,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
     """Build and persist a tensor-aware catalog from a sharded safetensors source."""
     catalog_path = tensor_catalog_path(model_id)
     source = describe_runtime_source(model_dir)
-    blockers = list(source.missing_runtime_files) + list(source.warnings)
+    blockers = list(source.missing_runtime_files)
 
     if not source.ready or not source.index_path:
         return _empty_catalog(

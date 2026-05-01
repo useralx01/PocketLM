@@ -3188,3 +3188,39 @@ download_status_file=state/downloads/mixtral-8x7b-instruct-v01.json
 python -m pytest tests/ -q
 234 passed in 19.63s
 ```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral download complete
+
+```text
+status=complete
+bytes_on_disk=93408101518
+bytes_on_disk_gb=86.99
+expected_bytes=93408098146
+expected_bytes_gb=86.99
+progress_pct=100.0
+expected_file_count=26
+present_expected_file_count=26
+registry_imported=true
+registry_validated=true
+registry_warning=Tokenizer pair files are incomplete or missing.
+```
+
+## Phase MoE Speed v2 / Stage 4 / Mixtral catalog
+
+```text
+catalog_ready=true
+tensor_count=995
+shard_count=19
+layer_count=32
+hidden_size=4096
+num_experts=8
+num_experts_per_tok=2
+moe_intermediate_size=14336
+component_group_counts={"embeddings": 1, "expert_mlp": 768, "router": 32, "layer_norm": 64, "attention": 128, "lm_head": 1, "final_norm": 1}
+blockers=[]
+
+execution_plan_ready=true
+execution_plan_unit_count=355
+execution_plan_phases=["prefill", "layer-entry", "layer-attention", "layer-router", "layer-expert", "decode-head"]
+execution_plan_blockers=[]
+```

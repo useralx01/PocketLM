@@ -32,8 +32,7 @@ def test_build_tensor_catalog_reads_tensor_headers_and_groups_layers(tmp_path: P
         encoding="utf-8",
     )
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
-    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+    (model_dir / "tokenizer.model").write_text("", encoding="utf-8")
 
     shard_1 = model_dir / "model-00001-of-00002.safetensors"
     shard_2 = model_dir / "model-00002-of-00002.safetensors"
@@ -140,8 +139,7 @@ def test_build_tensor_catalog_records_qwen32b_config_values(tmp_path: Path, monk
         encoding="utf-8",
     )
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
-    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+    (model_dir / "tokenizer.model").write_text("", encoding="utf-8")
 
     shard = model_dir / "model-00001-of-00001.safetensors"
     tensors = {
@@ -202,8 +200,7 @@ def test_build_tensor_catalog_classifies_moe_router_and_experts(tmp_path: Path, 
         encoding="utf-8",
     )
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
-    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+    (model_dir / "tokenizer.model").write_text("", encoding="utf-8")
 
     shard = model_dir / "model-00001-of-00001.safetensors"
     tensors = {
@@ -267,8 +264,7 @@ def test_build_tensor_catalog_classifies_mixtral_router_and_experts(tmp_path: Pa
         encoding="utf-8",
     )
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
-    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+    (model_dir / "tokenizer.model").write_text("", encoding="utf-8")
 
     shard = model_dir / "model-00001-of-00001.safetensors"
     tensors = {
