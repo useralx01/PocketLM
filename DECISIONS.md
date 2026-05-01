@@ -682,3 +682,16 @@ Why:
 - Tiny same-architecture fixtures make math-correctness checks runnable locally and prevent future speed work from relying only on generated-text impressions.
 - The fixed token ids avoid adding tokenizer files to synthetic fixtures while still exercising embedding, attention, router, expert, final hidden, and generated-token paths.
 ```
+
+## Phase MoE Honest Speed / tiny oracle comparison tolerance
+
+```text
+Observation:
+- Tiny Qwen3 matches the HF oracle token-for-token and checkpoint-for-checkpoint under PCKETLM_RUNTIME_MATH_DTYPE=float32.
+- Tiny Mixtral matches generated token ids 10/10 and embedding exactly, but layer0_combined_hidden has cosine 0.9999986952 with max_abs 0.00023440271615982056.
+
+Decision:
+- Do not count the Mixtral tiny comparison as a strict Stage 3 pass yet because the prompt's checkpoint gate says max_abs < 1e-4.
+- Treat this as a small numeric drift, not a semantic MoE wiring bug, because generated ids are token-exact and cosine is above 0.999.
+- Keep the strict gate in the diagnostic result so future reports cannot silently call the checkpoint pass perfect.
+```

@@ -185,6 +185,35 @@ def test_runtime_diagnose_cli_compare_with_reference_reports_token_overlap(monke
     assert result["expected_token_ids"] == [10, 11, 12]
 
 
+def test_runtime_diagnose_cli_compare_with_tiny_qwen3_oracle(monkeypatch, capsys) -> None:
+    fixture_root = runtime_diagnose_cli.Path("tests/fixtures")
+    model_path = fixture_root / "tiny_moe_qwen3"
+    monkeypatch.setenv("PCKETLM_RUNTIME_MATH_DTYPE", "float32")
+
+    exit_code = runtime_diagnose_cli.main(
+        [
+            "--model",
+            "tiny_moe_qwen3",
+            "--model-path",
+            str(model_path),
+            "--slice",
+            "compare-with-reference",
+            "--reference-root",
+            str(fixture_root),
+            "--max-new-tokens",
+            "10",
+        ]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    result = lines[2]["result"]
+    assert result["ready"] is True
+    assert result["shared_prefix_positions"] == 10
+    assert result["actual_token_ids"] == result["expected_token_ids"]
+    assert all(checkpoint["ready"] for checkpoint in result["checkpoint_comparisons"])
+
+
 def test_runtime_diagnose_cli_summarizes_kv_cache_bytes() -> None:
     key = torch.zeros((1, 8, 3, 128), dtype=torch.float16)
     value = torch.zeros((1, 8, 3, 128), dtype=torch.float16)

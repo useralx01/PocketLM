@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,10 +69,12 @@ def describe_runtime_source(model_dir: Path) -> RuntimeSourceDescriptor:
 
     shard_paths: list[Path] = []
     if index_path.exists():
-        index_inspection = inspect_qwen_source(model_dir)
-        if index_inspection.expected_shards:
-            # Re-read the index via the existing inspector contract by using file discovery.
-            shard_paths = sorted(model_dir.glob("model-*.safetensors"))
+        try:
+            index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            index_payload = {}
+        weight_map = index_payload.get("weight_map") or {}
+        shard_paths = sorted({model_dir / str(shard_name) for shard_name in weight_map.values()})
 
     missing_runtime_files = list(validation.missing_files)
     ready = validation.result == "ok" and inspection.expected_shards > 0

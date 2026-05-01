@@ -3456,3 +3456,42 @@ python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop
 ..                                                                       [100%]
 2 passed in 1.71s
 ```
+
+## Phase MoE Honest Speed / Stage 3 / tiny oracle comparison
+
+```text
+command=$env:PCKETLM_RUNTIME_MATH_DTYPE='float32'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model tiny_moe_qwen3 --model-path tests\fixtures\tiny_moe_qwen3 --slice compare-with-reference --reference-root tests\fixtures --max-new-tokens 10
+exit_code=0
+ready=true
+generated_token_ids=[462, 376, 509, 463, 207, 353, 429, 463, 467, 189]
+shared_prefix_positions=10
+embedding_first_token_cosine=0.9999998889
+embedding_first_token_max_abs=0.0
+layer0_combined_hidden_cosine=1.0000001226
+layer0_combined_hidden_max_abs=7.450580596923828e-09
+layers_executed=2/2
+
+command=$env:PCKETLM_RUNTIME_MATH_DTYPE='float32'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model tiny_moe_mixtral --model-path tests\fixtures\tiny_moe_mixtral --slice compare-with-reference --reference-root tests\fixtures --max-new-tokens 10
+exit_code=0
+ready=false
+generated_token_ids=[231, 439, 478, 478, 75, 44, 478, 75, 44, 478]
+shared_prefix_positions=10
+embedding_first_token_cosine=0.9999998889
+embedding_first_token_max_abs=0.0
+layer0_combined_hidden_cosine=0.9999986952
+layer0_combined_hidden_max_abs=0.00023440271615982056
+layers_executed=2/2
+verdict=token-exact and coherent path, but strict max_abs<1e-4 checkpoint gate not met for Mixtral layer0 hidden; documented as numeric drift before real-model speed work.
+
+python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_compare_with_tiny_qwen3_oracle -q
+.                                                                        [100%]
+1 passed in 2.31s
+
+python -m pytest tests/test_runtime_diagnose_cli.py tests/test_tiny_moe_oracle.py -q
+.........                                                                [100%]
+9 passed in 2.51s
+
+python -m pytest tests/test_runtime_tensor_catalog.py -q
+.....                                                                    [100%]
+5 passed in 2.03s
+```

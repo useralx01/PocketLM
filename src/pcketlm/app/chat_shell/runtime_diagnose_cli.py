@@ -11,8 +11,11 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import torch
 
+import pcketlm.core.runtime.layer_bridge as layer_bridge_module
+import pcketlm.core.runtime.tokenizer_runtime as tokenizer_runtime_module
 from pcketlm.core.runtime import (
     DEFAULT_LM_HEAD_CHUNK_ROWS,
     KVDecodeState,
@@ -34,6 +37,7 @@ from pcketlm.core.runtime.layer_bridge import (
     select_next_token_from_topk,
 )
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
+from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
     expert_residency_snapshot,
@@ -788,6 +792,61 @@ def _safe_reference_name(model_id: str) -> str:
     return model_id.replace(".", "_").replace("-", "_").replace("/", "_")
 
 
+def _reference_json_path(model_id: str, reference_root: Path) -> Path:
+    candidates = [
+        reference_root / f"{_safe_reference_name(model_id)}_moe_reference" / "reference.json",
+        reference_root / model_id / "reference" / "reference.json",
+        reference_root / model_id / "reference.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _array_compare(name: str, actual: torch.Tensor | None, expected_path: Path) -> dict[str, Any]:
+    if actual is None:
+        return {
+            "name": name,
+            "ready": False,
+            "blockers": [f"{name} actual tensor missing."],
+        }
+    if not expected_path.exists():
+        return {
+            "name": name,
+            "ready": False,
+            "blockers": [f"{name} reference array missing: {expected_path}"],
+        }
+    expected = torch.from_numpy(np.load(expected_path)).float()
+    actual_float = actual.detach().cpu().float()
+    if list(actual_float.shape) != list(expected.shape):
+        return {
+            "name": name,
+            "ready": False,
+            "actual_shape": [int(value) for value in actual_float.shape],
+            "expected_shape": [int(value) for value in expected.shape],
+            "blockers": [f"{name} shape mismatch."],
+        }
+    diff = actual_float - expected
+    actual_flat = actual_float.reshape(-1)
+    expected_flat = expected.reshape(-1)
+    denominator = torch.linalg.vector_norm(actual_flat) * torch.linalg.vector_norm(expected_flat)
+    cosine = 1.0 if float(denominator.item()) == 0.0 else float(torch.dot(actual_flat, expected_flat).item() / denominator.item())
+    max_abs = float(diff.abs().max().item()) if diff.numel() else 0.0
+    max_rel = float((diff.abs() / expected.abs().clamp_min(1e-12)).max().item()) if diff.numel() else 0.0
+    ready = cosine >= 0.999 and max_abs < 1e-4
+    return {
+        "name": name,
+        "ready": ready,
+        "actual_shape": [int(value) for value in actual_float.shape],
+        "expected_shape": [int(value) for value in expected.shape],
+        "max_abs_diff": max_abs,
+        "max_rel_diff": max_rel,
+        "cosine_similarity": cosine,
+        "blockers": [] if ready else [f"{name} diverged from oracle."],
+    }
+
+
 def _compare_with_reference(
     model_id: str,
     *,
@@ -795,7 +854,7 @@ def _compare_with_reference(
     max_new_tokens: int,
     reference_root: Path,
 ) -> dict:
-    reference_path = reference_root / f"{_safe_reference_name(model_id)}_moe_reference" / "reference.json"
+    reference_path = _reference_json_path(model_id, reference_root)
     if not reference_path.exists():
         return {
             "ready": False,
@@ -803,34 +862,152 @@ def _compare_with_reference(
             "blockers": [f"Reference fixture missing: {reference_path}"],
         }
     reference = json.loads(reference_path.read_text(encoding="utf-8"))
-    result = run_prompt_decode_loop(
-        model_id,
-        prompt=prompt,
-        max_new_tokens=max_new_tokens,
-        min_new_tokens=max_new_tokens,
-        selection_policy="greedy",
-        top_k=1,
-        top_p=1.0,
-        temperature=0.0,
-    )
-    payload = result.to_dict()
-    payload.pop("final_decode_state", None)
+    prompt_ids = [int(value) for value in reference.get("prompt_token_ids", [])]
+    checkpoint_results: list[dict[str, Any]] = []
+    manual_generated_ids: list[int] | None = None
+    if prompt_ids:
+        hidden_state, embedding_blockers = load_token_entry_hidden_state(model_id, prompt_ids)
+        if embedding_blockers:
+            checkpoint_results.append(
+                {
+                    "name": "embedding_lookup",
+                    "ready": False,
+                    "blockers": list(embedding_blockers),
+                }
+            )
+        if hidden_state is not None:
+            checkpoint_results.append(
+                _array_compare(
+                    "embedding_first_token",
+                    hidden_state[:, :1, :],
+                    reference_path.parent / "embedding_first_token.npy",
+                )
+            )
+            config = load_layer_bridge_config(model_id)
+            layer0 = run_layer_bridge_stack(model_id, start_layer=0, layer_count=1, input_hidden=hidden_state)
+            checkpoint_results.append(
+                _array_compare(
+                    "layer0_combined_hidden",
+                    layer0.output_tensor,
+                    reference_path.parent / "layer0_combined_hidden.npy",
+                )
+            )
+            full_stack = run_layer_bridge_stack(
+                model_id,
+                start_layer=0,
+                layer_count=int(config.num_hidden_layers),
+                input_hidden=hidden_state,
+            )
+            checkpoint_results.append(
+                {
+                    "name": "all_layers_executed",
+                    "ready": len(full_stack.executed_layers) == int(config.num_hidden_layers),
+                    "actual_layers": len(full_stack.executed_layers),
+                    "expected_layers": int(config.num_hidden_layers),
+                    "blockers": [] if len(full_stack.executed_layers) == int(config.num_hidden_layers) else ["Full stack did not execute every configured layer."],
+                }
+            )
+            manual_generated_ids = []
+            chain_ids = list(prompt_ids)
+            for _token_index in range(max_new_tokens):
+                chain_hidden, chain_blockers = load_token_entry_hidden_state(model_id, chain_ids)
+                if chain_blockers or chain_hidden is None:
+                    checkpoint_results.append(
+                        {
+                            "name": "manual_greedy_generation",
+                            "ready": False,
+                            "blockers": list(chain_blockers) or ["Manual generation embedding failed."],
+                        }
+                    )
+                    break
+                chain_stack = run_layer_bridge_stack(
+                    model_id,
+                    start_layer=0,
+                    layer_count=int(config.num_hidden_layers),
+                    input_hidden=chain_hidden,
+                )
+                if not chain_stack.ready or chain_stack.output_tensor is None:
+                    checkpoint_results.append(
+                        {
+                            "name": "manual_greedy_generation",
+                            "ready": False,
+                            "blockers": list(chain_stack.blockers) or ["Manual generation layer stack failed."],
+                        }
+                    )
+                    break
+                tail = run_decode_tail(
+                    model_id,
+                    chain_stack.output_tensor[:, -1:, :],
+                    top_k=1,
+                    return_logits=False,
+                    recent_token_ids=chain_ids,
+                )
+                if not tail.ready or not tail.top_token_ids:
+                    checkpoint_results.append(
+                        {
+                            "name": "manual_greedy_generation",
+                            "ready": False,
+                            "blockers": list(tail.blockers) or ["Manual generation decode tail failed."],
+                        }
+                    )
+                    break
+                selection = select_next_token_from_topk(tail.top_token_ids, tail.top_logits, policy="greedy")
+                if selection.chosen_token_id is None:
+                    checkpoint_results.append(
+                        {
+                            "name": "manual_greedy_generation",
+                            "ready": False,
+                            "blockers": ["Manual generation top-k selection failed."],
+                        }
+                    )
+                    break
+                manual_generated_ids.append(int(selection.chosen_token_id))
+                chain_ids.append(int(selection.chosen_token_id))
+    if manual_generated_ids is None:
+        result = run_prompt_decode_loop(
+            model_id,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=max_new_tokens,
+            selection_policy="greedy",
+            top_k=1,
+            top_p=1.0,
+            temperature=0.0,
+        )
+        payload = result.to_dict()
+        payload.pop("final_decode_state", None)
+        actual_ids = [int(value) for value in result.generated_token_ids]
+        generated_text = result.generated_text
+        blockers = list(result.blockers)
+    else:
+        payload = {
+            "ready": True,
+            "model_id": model_id,
+            "prompt": prompt,
+            "prompt_token_ids": prompt_ids,
+            "generated_token_ids": manual_generated_ids,
+            "generated_text": " ".join(str(value) for value in manual_generated_ids),
+        }
+        actual_ids = manual_generated_ids
+        generated_text = str(payload["generated_text"])
+        blockers = []
     expected_ids = [int(value) for value in reference.get("generated_token_ids", [])]
-    actual_ids = [int(value) for value in result.generated_token_ids]
     overlap = sum(1 for expected, actual in zip(expected_ids, actual_ids) if expected == actual)
-    blockers = list(result.blockers)
+    for checkpoint in checkpoint_results:
+        blockers.extend(checkpoint.get("blockers", []))
     required_overlap = min(7, len(expected_ids), len(actual_ids))
     if required_overlap and overlap < required_overlap:
         blockers.append(f"Generated token overlap {overlap}/{required_overlap} is below the correctness gate.")
     payload.update(
         {
-            "ready": result.ready and not blockers,
+            "ready": bool(payload.get("ready", False)) and not blockers,
             "reference_path": str(reference_path),
             "expected_token_ids": expected_ids,
             "actual_token_ids": actual_ids,
             "shared_prefix_positions": overlap,
             "expected_text": str(reference.get("decoded_generated_text", "")),
-            "generated_text": result.generated_text,
+            "generated_text": generated_text,
+            "checkpoint_comparisons": checkpoint_results,
             "expert_telemetry": expert_residency_snapshot(),
             "blockers": blockers,
         }
@@ -892,6 +1069,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prompt", default="hello world", help="Prompt for the full prompt slice")
     parser.add_argument("--repeat", type=int, default=1, help="Run the chosen slice repeatedly in one process")
     parser.add_argument("--reference-root", default="tests/fixtures", help="Fixture root for compare-with-reference")
+    parser.add_argument("--model-path", help="Override the model source folder for fixture diagnostics")
     return parser.parse_args(argv)
 
 
@@ -901,6 +1079,13 @@ def main(argv: list[str] | None = None) -> int:
     slice_name = str(args.slice)
     max_new_tokens = max(1, int(args.max_new_tokens))
     repeat = max(1, int(args.repeat))
+    if args.model_path:
+        model_path = Path(args.model_path)
+        override = lambda _model_id, model_path=model_path: model_path
+        globals()["original_model_root"] = override
+        layer_bridge_module.original_model_root = override
+        tokenizer_runtime_module.original_model_root = override
+        build_tensor_catalog(model_id, model_path)
     started_at = time.perf_counter()
     _emit(
         "start",
