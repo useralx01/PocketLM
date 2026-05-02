@@ -974,3 +974,13 @@ Decision:
 ## Phase C++ Q4 Dequant / compiler choice
 
 No compiler was selected because `cl`, `g++`, and `clang` were all unavailable on PATH. Per STOP-1, the native Q4 dequant phase cannot proceed until Microsoft Visual Studio Build Tools with the "Desktop development with C++" workload is installed and `cl.exe` is visible in a fresh terminal.
+
+## Phase C++ Q4 Dequant / toolchain choice
+
+Compiler: MSVC Build Tools 2022 installed through winget.
+
+`cl.exe`: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe`
+
+`vcvars64.bat`: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`
+
+Build convention: `tools/build_native.py` writes a short temporary `.cmd` file that calls `vcvars64.bat` before invoking `cl.exe`. This avoids PATH/INCLUDE/LIB assumptions in normal PowerShell sessions and keeps the Python binding on stdlib `ctypes`, not pybind11.

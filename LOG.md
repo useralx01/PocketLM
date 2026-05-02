@@ -4445,3 +4445,32 @@ clang: not found
 ```
 
 Install instruction: install Microsoft Visual Studio Build Tools with the "Desktop development with C++" workload, then open a fresh terminal so `cl.exe` is on PATH.
+
+## Phase C++ Q4 Dequant / Toolchain Install
+
+```text
+branch:
+phase-cpp-q4-dequant
+
+winget --version:
+v1.28.240
+
+winget install exit code:
+0
+
+cl.exe:
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe
+
+vcvars64.bat:
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat
+```
+
+ctypes smoke:
+
+```text
+python tools\build_native.py --force
+C:\Users\isale\Documents\pcketlm\src\pcketlm\native\add_test.dll
+
+ctypes add_test(2, 3):
+5
+```
