@@ -131,6 +131,36 @@ def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tm
     assert "tensor_load_stats" in lines[2]["result"]
 
 
+def test_runtime_diagnose_cli_sets_tensor_source(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    captured = {}
+
+    class _FakeResult:
+        def to_dict(self) -> dict:
+            captured["source_seen"] = runtime_diagnose_cli.os.environ.get("PCKETLM_TENSOR_SOURCE")
+            return {
+                "ready": True,
+                "generated_text": "The capital",
+                "blockers": [],
+            }
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+    monkeypatch.setattr(runtime_diagnose_cli, "run_prompt_decode_loop", lambda *_args, **_kwargs: _FakeResult())
+
+    exit_code = runtime_diagnose_cli.main(["--model", "qwen-test", "--slice", "full", "--source", "q4"])
+
+    assert exit_code == 0
+    assert captured["source_seen"] == "q4"
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[0]["tensor_source"] == "q4"
+
+
 def test_runtime_diagnose_cli_speculative_outputs_metrics(monkeypatch, capsys, tmp_path) -> None:
     gb = 1024**3
     captured = {}

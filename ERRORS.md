@@ -192,3 +192,23 @@ current result on branch phase-32b-fix from commit 0fe28ef:
 classification:
 - Resolved by intervening runtime changes; no new crash root cause remained to bisect in this phase.
 ```
+
+## Phase Q4 Streaming / target miss
+
+```text
+symptom:
+- Qwen 32B Q4 streaming generated coherent text but ran slower than fp16.
+
+numbers:
+- fp16 4-token comparison: 51.4145s/token, generated "The capital of France".
+- Q4 4-token run: 119.0094s/token, generated "The capital of France".
+- Q4 + speculative bounded 4-token check: 118.8495s/token, accepted=3, corrected=1.
+
+root cause:
+- Q4 disk reads work, but Python dequantization during tensor load dominates the runtime.
+- Repeated decode-step cache misses mean the same class of tensors is dequantized again across generated tokens.
+
+fix direction:
+- Keep the Q4 artifact format and correctness tests.
+- Do not call this a speed path until dequant is native/fused or the runtime keeps a larger fp16 dequantized window resident across decode steps.
+```

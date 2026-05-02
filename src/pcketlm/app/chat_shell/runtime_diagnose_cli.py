@@ -49,7 +49,7 @@ from pcketlm.core.runtime.speculative import (
     DEFAULT_VERIFIER_MODEL_ID,
     speculative_generate,
 )
-from pcketlm.core.runtime.tensor_loader import reset_tensor_load_stats, tensor_load_stats_snapshot
+from pcketlm.core.runtime.tensor_loader import q4_source_status, reset_tensor_load_stats, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tokenizer_runtime import (
     decode_token_ids_to_text,
     load_generation_settings,
@@ -1102,6 +1102,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=4, help="Speculative candidate count")
     parser.add_argument("--reference-root", default="tests/fixtures", help="Fixture root for compare-with-reference")
     parser.add_argument("--model-path", help="Override the model source folder for fixture diagnostics")
+    parser.add_argument("--source", choices=["auto", "fp16", "q4"], default="auto", help="Tensor source for runtime loads")
     return parser.parse_args(argv)
 
 
@@ -1111,6 +1112,8 @@ def main(argv: list[str] | None = None) -> int:
     slice_name = str(args.slice)
     max_new_tokens = max(1, int(args.max_new_tokens))
     repeat = max(1, int(args.repeat))
+    previous_tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE")
+    os.environ["PCKETLM_TENSOR_SOURCE"] = str(args.source)
     previous_model_roots = None
     if args.model_path:
         previous_model_roots = (
@@ -1133,6 +1136,8 @@ def main(argv: list[str] | None = None) -> int:
         started_at=started_at,
         pid=os.getpid(),
         model_dir=str(original_model_root(model_id)),
+        tensor_source=str(args.source),
+        q4_source=q4_source_status(model_id),
     )
     operation, callback = _operation_for_slice(slice_name)
     try:
@@ -1295,6 +1300,10 @@ def main(argv: list[str] | None = None) -> int:
             globals()["original_model_root"] = previous_model_roots[0]
             layer_bridge_module.original_model_root = previous_model_roots[1]
             tokenizer_runtime_module.original_model_root = previous_model_roots[2]
+        if previous_tensor_source is None:
+            os.environ.pop("PCKETLM_TENSOR_SOURCE", None)
+        else:
+            os.environ["PCKETLM_TENSOR_SOURCE"] = previous_tensor_source
         _emit(
             "python-error",
             model_id=model_id,
@@ -1318,6 +1327,10 @@ def main(argv: list[str] | None = None) -> int:
         globals()["original_model_root"] = previous_model_roots[0]
         layer_bridge_module.original_model_root = previous_model_roots[1]
         tokenizer_runtime_module.original_model_root = previous_model_roots[2]
+    if previous_tensor_source is None:
+        os.environ.pop("PCKETLM_TENSOR_SOURCE", None)
+    else:
+        os.environ["PCKETLM_TENSOR_SOURCE"] = previous_tensor_source
     return 0
 
 

@@ -606,3 +606,8 @@ Latest Phase Speculative Stateful outcome:
 Latest Phase 32B Fix outcome:
 - Qwen2.5-32B-Instruct full decode no longer crashes on the latest stable runtime. It generated `"The capital of France"` in three full `max_new_tokens=4` runs with `256/256` layers, `2923 MB` peak working set, and `43.3836s` / `45.5578s` / `49.1500s` per token.
 - Regression checks passed for Qwen 14B, Qwen3-30B-A3B non-spec, Qwen3 speculative K=20, Mixtral, and the full pytest suite (`260` tests).
+
+Latest Phase Q4 Streaming outcome:
+- Qwen2.5-32B-Instruct now has a separate Q4 streaming artifact (`15.27 GB`, compression ratio `0.250185`) and the loader can hydrate Q4 tensors back to bf16 with `q4_loaded=true`.
+- Correctness passed: Q4 generated `"The capital of France"` with full layers. Speed target failed: Q4 measured `119.0094s/token`, slower than same-phase fp16 `51.4145s/token`, because Python dequantization dominates.
+- Qwen 14B, Qwen3-30B-A3B, Qwen3 speculative K=20, and Mixtral fp16 regressions passed; full suite passed with `265` tests.

@@ -108,7 +108,9 @@
         "missing_files": [],
         "warnings": []
       },
-      "artifact_paths": []
+      "artifact_paths": [
+        "models\\qwen2.5-32b-instruct\\artifacts\\q4"
+      ]
     },
     {
       "model_id": "qwen3-0.6b",

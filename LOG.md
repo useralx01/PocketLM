@@ -4244,3 +4244,178 @@ python -m pytest tests/ -q
 ............................................                             [100%]
 260 passed in 22.79s
 ```
+
+## Phase Q4 Streaming / Setup
+
+```text
+latest-stable chosen from git log --oneline --all:
+0d661f8 phase-32b-fix/final: 32b runs, 43.3836s-token, regressions green
+
+branch:
+phase-q4-streaming
+```
+
+## Phase Q4 Streaming / Stage 1-3 / unit proof
+
+```text
+python -m pytest tests/test_q4_quantizer.py tests/test_runtime_tensor_loader.py tests/test_runtime_diagnose_cli.py -q
+........................                                                 [100%]
+24 passed in 3.57s
+
+After registry/source wiring:
+python -m pytest tests/test_q4_quantizer.py tests/test_runtime_tensor_loader.py tests/test_runtime_diagnose_cli.py -q
+........................                                                 [100%]
+24 passed in 3.94s
+```
+
+## Phase Q4 Streaming / Stage 1 / Qwen 32B artifact
+
+```text
+Disk pre-flight:
+- C: free_gb=429.65
+
+Conversion command:
+python tools\quantize_to_q4.py --model-dir models\qwen2.5-32b-instruct\original --output-dir models\qwen2.5-32b-instruct\artifacts\q4
+
+Conversion result:
+- format=pcketlm-q4
+- scheme=per-channel-symmetric-v1
+- total_original_bytes=65527752704
+- total_q4_bytes=16394091008
+- compression_ratio=0.250185
+- artifact_file_count=35
+- artifact_size_gb=15.27
+- artifact_size_mb=15635.25
+
+Live loader proof:
+- tensor=model.layers.0.input_layernorm.weight
+- ready=true
+- dtype=torch.bfloat16
+- shape=[5120]
+- q4_loaded=true
+- q4_loads=1
+- q4_loaded_nbytes=2560
+```
+
+## Phase Q4 Streaming / Stage 4 / Qwen 32B measurement
+
+```text
+Prompt:
+"The capital of France is"
+
+Qwen 32B Q4, max_new_tokens=1:
+- ready=true
+- generated_text="The"
+- layers=64/64
+- total=120.7643s
+- per_token=120.7643s
+- q4_loaded=true
+- q4_loads=769
+- loaded_mb=59522.13
+- q4_loaded_mb=14880.53
+- peak_ws=5231MB
+
+Qwen 32B Q4, max_new_tokens=4:
+- ready=true
+- generated_text="The capital of France"
+- generated_token_ids=[785,6722,315,9625]
+- layers=256/256
+- total=476.0375s
+- per_token=119.0094s
+- q4_loaded=true
+- q4_loads=2122
+- loaded_mb=237842.29
+- q4_loaded_mb=59460.57
+- peak_ws=5240MB
+
+Qwen 32B fp16 comparison, max_new_tokens=4:
+- ready=true
+- generated_text="The capital of France"
+- layers=256/256
+- total=205.6579s
+- per_token=51.4145s
+- q4_loaded=false
+- loaded_mb=237362.13
+- peak_ws=2893MB
+
+Finding:
+- Q4 streaming produces coherent English and uses the Q4 artifact, but misses the <=12s/token target.
+- The bottleneck moved from disk bytes to Python dequantization and repeated cache misses; this Q4 path dequantizes 59.46GB of packed weights for a 4-token run.
+```
+
+## Phase Q4 Streaming / Stage 5 / Qwen 32B speculative check
+
+```text
+Bounded check:
+- verifier=qwen2.5-32b-instruct
+- source=q4
+- speculator=qwen3-1.7b
+- K=20
+- max_new_tokens=4
+
+Result:
+- ready=true
+- generated_text="The capital of France"
+- generated_token_ids=[785,6722,315,9625]
+- elapsed=475.3841s
+- effective=118.8495s/token
+- accepted=3
+- corrected=1
+- average_accepted_per_pass=1.5
+- layers=192/192
+- q4_loaded=true
+- q4_loads=1890
+- q4_loaded_mb=44640.79
+- peak_ws=5277MB
+
+Finding:
+- Speculative compounding does not help this Qwen2.5 verifier with the Qwen3 speculator.
+- Acceptance is low due family/behavior mismatch, and Q4 verifier passes remain too expensive.
+```
+
+## Phase Q4 Streaming / Stage 6 / regressions
+
+```text
+Qwen 14B fp16:
+- ready=true
+- generated_text="Hello! How can"
+- layers=192/192
+- per_token=43.4851s
+- peak_ws=2413MB
+- q4_loaded=false
+
+Qwen3-30B-A3B fp16:
+- ready=true
+- generated_text="<think>\nOkay,"
+- layers=192/192
+- per_token=42.4906s
+- peak_ws=3713MB
+- q4_loaded=false
+
+Qwen3 speculative pair fp16:
+- ready=true
+- generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+- K=20
+- accepted=20
+- corrected=0
+- effective=8.0482s/token
+- layers=48/48
+- peak_ws=4826MB
+- q4_loaded=false
+
+Mixtral fp16:
+- ready=true
+- generated_text="a city that is"
+- layers=128/128
+- per_token=58.1162s
+- peak_ws=7582MB
+- q4_loaded=false
+
+pytest:
+python -m pytest tests/ -q
+........................................................................ [ 27%]
+........................................................................ [ 54%]
+........................................................................ [ 81%]
+.................................................                        [100%]
+265 passed in 22.50s
+```

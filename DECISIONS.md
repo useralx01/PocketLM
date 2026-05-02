@@ -920,3 +920,54 @@ Decision:
 - Do not change residency, tensor loading, or layer bridge code in this phase.
 - Treat the previous 0xC0000005 as resolved by intervening runtime work and preserve the current behavior with live LOG evidence rather than adding speculative fixes.
 ```
+
+## Phase Q4 Streaming / quantization scheme
+
+```text
+Decision:
+- Use per-output-channel symmetric Q4 with fp16 scales.
+- Store Q4 bytes in `models/<id>/artifacts/q4/*.q4.safetensors`.
+- Store scales in companion `*.scales.safetensors`.
+- Store tensor shape/dtype/shard metadata in `q4_manifest.json`.
+
+Why:
+- It preserves original safetensors as read-only.
+- It gives the loader enough metadata to dequantize into the existing fp16/bf16 tensor path, so layer_bridge remains unchanged.
+- The real Qwen 32B artifact is 0.250185 of fp16 bytes: 65,527,752,704 original bytes -> 16,394,091,008 Q4+scale bytes.
+```
+
+## Phase Q4 Streaming / runtime source policy
+
+```text
+Decision:
+- Add `PCKETLM_TENSOR_SOURCE=auto|fp16|q4`.
+- Add `--source=auto|fp16|q4` to runtime_diagnose_cli.py.
+- In auto mode, use Q4 only when a ready `pcketlm-q4` manifest exists for that model.
+- In fp16 mode, force the original safetensors path.
+
+Why:
+- Q4 artifacts are derived and optional.
+- Diagnostics need an explicit comparison switch so Q4 speed/quality claims cannot accidentally use fp16.
+```
+
+## Phase Q4 Streaming / outcome classification
+
+```text
+Verdict:
+- Q4 streaming is correct but not fast enough in this Python implementation.
+
+Evidence:
+- Qwen 32B Q4 generated coherent text: "The capital of France".
+- Q4 telemetry showed `q4_loaded=true`.
+- Q4 artifact read for 4 tokens: q4_loaded_mb=59460.57, q4_loads=2122.
+- Q4 4-token speed: 119.0094s/token.
+- Same-phase fp16 comparison: 51.4145s/token.
+
+Cause:
+- The disk byte count dropped about 4x, but Python dequantization is now the dominant load-time cost.
+- The current residency pattern still reloads/dequantizes large tensors across decode steps, so "dequant once per cache miss" is too often in practice.
+
+Decision:
+- Do not promote Q4 streaming as a speed path yet.
+- Next speed work needs native/vectorized dequant fused with the loader, or a persistent fp16 cache/window that avoids repeated Q4 dequant of the same tensors.
+```

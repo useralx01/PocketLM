@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
+import json
+import math
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ from pcketlm.core.runtime.tensor_catalog import (
     load_tensor_entry_index,
 )
 from pcketlm.core.runtime.tensor_execution_plan import TensorExecutionUnit, load_tensor_execution_plan
+from pcketlm.core.storage.paths import artifacts_root
 
 _HANDLE_CACHE_MAX_ENTRIES = 16
 _handle_cache: OrderedDict[tuple[str, int], object] = OrderedDict()
@@ -42,6 +45,8 @@ class TensorLoadStats:
     scoped_handle_reuses: int = 0
     persistent_handle_reuses: int = 0
     live_handle_tensor_hits: int = 0
+    q4_loads: int = 0
+    q4_loaded_nbytes: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +62,10 @@ class TensorLoadStats:
             "scoped_handle_reuses": self.scoped_handle_reuses,
             "persistent_handle_reuses": self.persistent_handle_reuses,
             "live_handle_tensor_hits": self.live_handle_tensor_hits,
+            "q4_loads": self.q4_loads,
+            "q4_loaded_nbytes": self.q4_loaded_nbytes,
+            "q4_loaded_mb": round(self.q4_loaded_nbytes / (1024**2), 2),
+            "q4_loaded": self.q4_loads > 0,
         }
 
 
@@ -84,6 +93,8 @@ def tensor_load_stats_snapshot() -> TensorLoadStats:
             scoped_handle_reuses=_load_stats.scoped_handle_reuses,
             persistent_handle_reuses=_load_stats.persistent_handle_reuses,
             live_handle_tensor_hits=_load_stats.live_handle_tensor_hits,
+            q4_loads=_load_stats.q4_loads,
+            q4_loaded_nbytes=_load_stats.q4_loaded_nbytes,
         )
 
 
@@ -111,6 +122,7 @@ class LoadedTensorSlice:
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
     borrowed_from_live_handle: bool = False
+    q4_loaded: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -125,6 +137,7 @@ class LoadedTensorSlice:
             "blockers": list(self.blockers),
             "ready": self.ready,
             "borrowed_from_live_handle": self.borrowed_from_live_handle,
+            "q4_loaded": self.q4_loaded,
         }
 
 
@@ -309,6 +322,7 @@ def _loaded_slice_from_entry(
     blockers: list[str] | None = None,
     ready: bool = True,
     borrowed_from_live_handle: bool = False,
+    q4_loaded: bool = False,
 ) -> LoadedTensorSlice:
     actual_blockers = [] if blockers is None else list(blockers)
     actual_shape = list(entry.shape) if tensor is None else [int(value) for value in tensor.shape]
@@ -331,7 +345,146 @@ def _loaded_slice_from_entry(
         blockers=actual_blockers,
         ready=ready and not actual_blockers and tensor is not None,
         borrowed_from_live_handle=borrowed_from_live_handle,
+        q4_loaded=q4_loaded,
     )
+
+
+def _q4_artifact_root(model_id: str) -> Path:
+    return artifacts_root(model_id) / "q4"
+
+
+def _q4_manifest_path(model_id: str) -> Path:
+    return _q4_artifact_root(model_id) / "q4_manifest.json"
+
+
+@lru_cache(maxsize=16)
+def _q4_manifest(model_id: str, mtime_ns: int) -> dict:
+    del mtime_ns
+    path = _q4_manifest_path(model_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _load_q4_manifest(model_id: str) -> dict:
+    path = _q4_manifest_path(model_id)
+    return _q4_manifest(model_id, path.stat().st_mtime_ns if path.exists() else 0)
+
+
+def _q4_source_enabled(model_id: str) -> bool:
+    source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+    if source in {"fp16", "bf16", "original", "safetensors"}:
+        return False
+    manifest = _load_q4_manifest(model_id)
+    ready = manifest.get("format") == "pcketlm-q4" and bool(manifest.get("tensors"))
+    if source == "q4":
+        return ready
+    return source == "auto" and ready
+
+
+def q4_source_status(model_id: str) -> dict:
+    """Return Q4 artifact readiness for diagnostics and tests."""
+    manifest_path = _q4_manifest_path(model_id)
+    manifest = _load_q4_manifest(model_id)
+    ready = manifest.get("format") == "pcketlm-q4" and bool(manifest.get("tensors"))
+    return {
+        "enabled": _q4_source_enabled(model_id),
+        "ready": ready,
+        "manifest_path": str(manifest_path),
+        "tensor_count": len(manifest.get("tensors") or {}),
+        "total_original_bytes": int(manifest.get("total_original_bytes") or 0),
+        "total_q4_bytes": int(manifest.get("total_q4_bytes") or 0),
+        "compression_ratio": float(manifest.get("compression_ratio") or 0.0),
+    }
+
+
+def _torch_dtype_from_catalog(dtype: str) -> torch.dtype:
+    normalized = _normalize_catalog_dtype(dtype)
+    if normalized == "torch.bfloat16":
+        return torch.bfloat16
+    if normalized == "torch.float16":
+        return torch.float16
+    if normalized == "torch.float32":
+        return torch.float32
+    return torch.float16
+
+
+def _unpack_int4(packed: torch.Tensor, value_count: int) -> torch.Tensor:
+    bytes_flat = packed.detach().to(torch.uint8).flatten()
+    low = torch.bitwise_and(bytes_flat, 0x0F)
+    high = torch.bitwise_and(torch.bitwise_right_shift(bytes_flat, 4), 0x0F)
+    unsigned = torch.empty((bytes_flat.numel() * 2,), dtype=torch.int16)
+    unsigned[0::2] = low.to(torch.int16)
+    unsigned[1::2] = high.to(torch.int16)
+    signed = torch.where(unsigned >= 8, unsigned - 16, unsigned)
+    return signed[:value_count].to(torch.int8).contiguous()
+
+
+def _dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: list[int], dtype: str) -> torch.Tensor:
+    value_count = int(math.prod(shape)) if shape else 1
+    quantized = _unpack_int4(packed, value_count).to(torch.float32)
+    if not shape:
+        matrix = quantized.reshape(1, 1)
+    elif len(shape) == 1:
+        matrix = quantized.reshape(shape[0], 1)
+    else:
+        matrix = quantized.reshape(shape[0], -1)
+    restored = matrix * scales.detach().cpu().float().reshape(-1, 1)
+    return restored.reshape(shape).to(dtype=_torch_dtype_from_catalog(dtype)).contiguous()
+
+
+def _q4_entry(model_id: str, tensor_name: str) -> dict | None:
+    manifest = _load_q4_manifest(model_id)
+    tensors = manifest.get("tensors") or {}
+    payload = tensors.get(tensor_name)
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_q4_tensor_from_handles(
+    model_id: str,
+    entry: TensorCatalogEntry,
+    q4_handle: object,
+    scale_handle: object,
+) -> LoadedTensorSlice:
+    payload = _q4_entry(model_id, entry.tensor_name)
+    if payload is None:
+        return _loaded_slice_from_entry(
+            model_id,
+            entry,
+            blockers=[f"Q4 artifact does not contain tensor {entry.tensor_name}."],
+            ready=False,
+        )
+    packed = q4_handle.get_tensor(entry.tensor_name)
+    scales = scale_handle.get_tensor(entry.tensor_name)
+    tensor = _dequantize_q4_tensor(packed, scales, [int(value) for value in payload.get("shape", entry.shape)], entry.dtype)
+    _update_load_stats(q4_loads=1, q4_loaded_nbytes=int(packed.nelement() * packed.element_size()))
+    return _loaded_slice_from_entry(model_id, entry, tensor, q4_loaded=True)
+
+
+def _load_q4_tensor(model_id: str, entry: TensorCatalogEntry) -> LoadedTensorSlice | None:
+    if not _q4_source_enabled(model_id):
+        return None
+    payload = _q4_entry(model_id, entry.tensor_name)
+    if payload is None:
+        return None
+    root = _q4_artifact_root(model_id)
+    q4_path = root / str(payload.get("q4_shard"))
+    scale_path = root / str(payload.get("scale_shard"))
+    try:
+        with safe_open(q4_path, framework="pt", device="cpu") as q4_handle:
+            with safe_open(scale_path, framework="pt", device="cpu") as scale_handle:
+                _update_load_stats(shard_opens=2)
+                return _load_q4_tensor_from_handles(model_id, entry, q4_handle, scale_handle)
+    except Exception as exc:  # pragma: no cover - defensive Q4 IO path
+        return _loaded_slice_from_entry(
+            model_id,
+            entry,
+            blockers=[f"Failed to load Q4 tensor {entry.tensor_name}: {exc}"],
+            ready=False,
+        )
 
 
 def _handle_cache_enabled() -> bool:
@@ -445,6 +598,11 @@ def load_tensor_by_name(model_id: str, tensor_name: str) -> LoadedTensorSlice:
         )
 
     try:
+        q4_loaded = _load_q4_tensor(model_id, entry)
+        if q4_loaded is not None:
+            if q4_loaded.ready:
+                _update_load_stats(tensors_loaded=1, loaded_nbytes=q4_loaded.loaded_nbytes)
+            return q4_loaded
         scoped_handle = _open_scoped_shard_handle(entry.shard_path)
         artifact_pack_path = _artifact_pack_path_for_tensor(model_id, entry.tensor_name)
         if artifact_pack_path is not None:
@@ -513,6 +671,7 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
 
     entries_by_name = load_tensor_entry_index(model_id)
     results: dict[str, LoadedTensorSlice] = {}
+    q4_groups: dict[tuple[Path, Path], list[TensorCatalogEntry]] = {}
     shard_groups: dict[Path, list[TensorCatalogEntry]] = {}
     artifact_groups: dict[Path, list[TensorCatalogEntry]] = {}
     for tensor_name in unique_tensor_names:
@@ -528,11 +687,40 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
                 ready=False,
             )
             continue
+        q4_payload = _q4_entry(model_id, entry.tensor_name) if _q4_source_enabled(model_id) else None
+        if q4_payload is not None:
+            root = _q4_artifact_root(model_id)
+            q4_groups.setdefault(
+                (root / str(q4_payload.get("q4_shard")), root / str(q4_payload.get("scale_shard"))),
+                [],
+            ).append(entry)
+            continue
         artifact_pack_path = _artifact_pack_path_for_tensor(model_id, entry.tensor_name)
         if artifact_pack_path is not None:
             artifact_groups.setdefault(artifact_pack_path, []).append(entry)
             continue
         shard_groups.setdefault(entry.shard_path, []).append(entry)
+
+    for (q4_path, scale_path), entries in q4_groups.items():
+        try:
+            _update_load_stats(shard_opens=2)
+            with safe_open(q4_path, framework="pt", device="cpu") as q4_handle:
+                with safe_open(scale_path, framework="pt", device="cpu") as scale_handle:
+                    for entry in entries:
+                        results[entry.tensor_name] = _load_q4_tensor_from_handles(
+                            model_id,
+                            entry,
+                            q4_handle,
+                            scale_handle,
+                        )
+        except Exception as exc:  # pragma: no cover - defensive Q4 IO path
+            for entry in entries:
+                results[entry.tensor_name] = _loaded_slice_from_entry(
+                    model_id,
+                    entry,
+                    blockers=[f"Failed to load Q4 tensor {entry.tensor_name}: {exc}"],
+                    ready=False,
+                )
 
     for pack_path, entries in artifact_groups.items():
         try:

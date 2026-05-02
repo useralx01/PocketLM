@@ -1,0 +1,133 @@
+import json
+from pathlib import Path
+
+import torch
+from safetensors.torch import save_file
+
+from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_plan
+from pcketlm.core.runtime.tensor_loader import (
+    load_tensor_by_name,
+    q4_source_status,
+    reset_tensor_load_stats,
+    tensor_load_stats_snapshot,
+)
+from tools.quantize_to_q4 import (
+    dequantize_q4_tensor,
+    pack_int4,
+    quantize_model_dir_to_q4,
+    quantize_tensor_to_q4,
+    unpack_int4,
+)
+
+
+def test_q4_pack_unpack_is_bit_exact() -> None:
+    values = torch.tensor([-7, -6, -1, 0, 1, 6, 7], dtype=torch.int8)
+
+    packed = pack_int4(values)
+    unpacked = unpack_int4(packed, int(values.numel()))
+
+    assert unpacked.tolist() == values.tolist()
+
+
+def test_q4_round_trip_grid_tensor_has_low_relative_error() -> None:
+    tensor = torch.tensor(
+        [
+            [-7.0, -3.0, 0.0, 3.0, 7.0],
+            [-14.0, -6.0, 0.0, 6.0, 14.0],
+        ],
+        dtype=torch.float16,
+    )
+
+    packed, scales, metadata = quantize_tensor_to_q4(tensor)
+    restored = dequantize_q4_tensor(packed, scales, metadata["shape"], dtype=torch.float16)
+    rel = ((restored.float() - tensor.float()).abs() / tensor.float().abs().clamp_min(1e-6)).max().item()
+
+    assert rel < 0.02
+
+
+def test_q4_artifact_size_is_about_quarter_fp16(tmp_path: Path) -> None:
+    model_dir = _write_quantizer_fixture(tmp_path, torch.arange(8192, dtype=torch.float16).reshape(64, 128))
+    manifest = quantize_model_dir_to_q4(model_dir, tmp_path / "q4")
+
+    assert manifest["compression_ratio"] < 0.27
+
+
+def test_q4_loader_dequantizes_to_runtime_tensor(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    model_id = "q4-loader-test"
+    model_dir = _write_runtime_fixture(tmp_path, model_id)
+    build_tensor_execution_plan(model_id, model_dir)
+    quantize_model_dir_to_q4(model_dir, tmp_path / "models" / model_id / "artifacts" / "q4")
+    reset_tensor_load_stats()
+
+    loaded = load_tensor_by_name(model_id, "model.layers.0.self_attn.q_proj.weight")
+    stats = tensor_load_stats_snapshot()
+    status = q4_source_status(model_id)
+
+    assert loaded.ready is True
+    assert loaded.q4_loaded is True
+    assert loaded.tensor is not None
+    assert loaded.tensor.dtype == torch.bfloat16
+    assert torch.allclose(loaded.tensor.float(), torch.full((8, 8), 3.0), atol=0.01)
+    assert stats.q4_loads == 1
+    assert stats.to_dict()["q4_loaded"] is True
+    assert status["ready"] is True
+
+
+def _write_quantizer_fixture(tmp_path: Path, tensor: torch.Tensor) -> Path:
+    model_dir = tmp_path / "source"
+    model_dir.mkdir(parents=True)
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    save_file({"weight": tensor}, str(shard))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": shard.stat().st_size}, "weight_map": {"weight": shard.name}}),
+        encoding="utf-8",
+    )
+    return model_dir
+
+
+def _write_runtime_fixture(tmp_path: Path, model_id: str) -> Path:
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "model_type": "qwen2",
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "max_position_embeddings": 128,
+                "vocab_size": 16,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (model_dir / "vocab.json").write_text("{}", encoding="utf-8")
+    (model_dir / "merges.txt").write_text("", encoding="utf-8")
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    tensors = {
+        "model.embed_tokens.weight": torch.arange(128, dtype=torch.bfloat16).reshape(16, 8),
+        "model.layers.0.input_layernorm.weight": torch.ones((8,), dtype=torch.bfloat16),
+        "model.layers.0.post_attention_layernorm.weight": torch.full((8,), 2, dtype=torch.bfloat16),
+        "model.layers.0.self_attn.q_proj.weight": torch.full((8, 8), 3, dtype=torch.bfloat16),
+        "model.layers.0.mlp.gate_proj.weight": torch.full((8, 8), 4, dtype=torch.bfloat16),
+        "model.norm.weight": torch.full((8,), 5, dtype=torch.bfloat16),
+        "lm_head.weight": torch.full((16, 8), 6, dtype=torch.bfloat16),
+    }
+    save_file(tensors, str(shard))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard.stat().st_size},
+                "weight_map": {name: shard.name for name in tensors},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return model_dir
