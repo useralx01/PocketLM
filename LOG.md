@@ -4474,3 +4474,31 @@ C:\Users\isale\Documents\pcketlm\src\pcketlm\native\add_test.dll
 ctypes add_test(2, 3):
 5
 ```
+
+## Phase C++ Q4 Dequant / Stage 2-5
+
+Native Q4 kernel build:
+
+```text
+python tools\build_native.py --force
+C:\Users\isale\Documents\pcketlm\src\pcketlm\native\add_test.dll
+C:\Users\isale\Documents\pcketlm\src\pcketlm\native\q4_dequant.dll
+```
+
+Manual native/Python equivalence smoke:
+
+```text
+available True
+(2, 5) True 0.0
+(3, 4) True 0.0
+(7,) True 0.0
+() True 0.0
+```
+
+Focused validation:
+
+```text
+python -m pytest tests/test_native_q4_dequant.py tests/test_q4_quantizer.py tests/test_runtime_tensor_loader.py -q
+.................                                                        [100%]
+17 passed in 1.68s
+```

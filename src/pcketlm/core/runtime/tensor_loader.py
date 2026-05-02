@@ -423,7 +423,7 @@ def _unpack_int4(packed: torch.Tensor, value_count: int) -> torch.Tensor:
     return signed[:value_count].to(torch.int8).contiguous()
 
 
-def _dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: list[int], dtype: str) -> torch.Tensor:
+def _python_dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: list[int]) -> torch.Tensor:
     value_count = int(math.prod(shape)) if shape else 1
     quantized = _unpack_int4(packed, value_count).to(torch.float32)
     if not shape:
@@ -433,7 +433,29 @@ def _dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: lis
     else:
         matrix = quantized.reshape(shape[0], -1)
     restored = matrix * scales.detach().cpu().float().reshape(-1, 1)
-    return restored.reshape(shape).to(dtype=_torch_dtype_from_catalog(dtype)).contiguous()
+    return restored.reshape(shape).to(dtype=torch.float16).contiguous()
+
+
+def _dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: list[int], dtype: str) -> torch.Tensor:
+    del dtype
+    if not os.environ.get("PCKETLM_DISABLE_NATIVE_Q4"):
+        try:
+            from pcketlm.native import q4_dequant_to_fp16
+
+            value_count = int(math.prod(shape)) if shape else 1
+            if not shape:
+                num_channels = 1
+                channel_size = 1
+            elif len(shape) == 1:
+                num_channels = int(shape[0])
+                channel_size = 1
+            else:
+                num_channels = int(shape[0])
+                channel_size = max(1, value_count // num_channels)
+            return q4_dequant_to_fp16(packed, scales, num_channels, channel_size).reshape(shape).contiguous()
+        except Exception:
+            pass
+    return _python_dequantize_q4_tensor(packed, scales, shape)
 
 
 def _q4_entry(model_id: str, tensor_name: str) -> dict | None:

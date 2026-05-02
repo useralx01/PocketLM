@@ -70,7 +70,7 @@ def test_q4_loader_dequantizes_to_runtime_tensor(tmp_path: Path, monkeypatch) ->
     assert loaded.ready is True
     assert loaded.q4_loaded is True
     assert loaded.tensor is not None
-    assert loaded.tensor.dtype == torch.bfloat16
+    assert loaded.tensor.dtype == torch.float16
     assert torch.allclose(loaded.tensor.float(), torch.full((8, 8), 3.0), atol=0.01)
     assert stats.q4_loads == 1
     assert stats.to_dict()["q4_loaded"] is True

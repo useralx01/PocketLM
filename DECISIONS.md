@@ -984,3 +984,13 @@ Compiler: MSVC Build Tools 2022 installed through winget.
 `vcvars64.bat`: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`
 
 Build convention: `tools/build_native.py` writes a short temporary `.cmd` file that calls `vcvars64.bat` before invoking `cl.exe`. This avoids PATH/INCLUDE/LIB assumptions in normal PowerShell sessions and keeps the Python binding on stdlib `ctypes`, not pybind11.
+
+## Phase C++ Q4 Dequant / dtype contract
+
+The native kernel implements the phase contract literally: Q4 bytes on disk dequantize into fp16 residency. The fp16 output is the comparison target for both native and Python fallback paths. This means Q4-loaded tensors use fp16 even when the original safetensors catalog dtype is bf16; the original fp16/bf16 safetensors path remains unchanged.
+
+Calling convention: a single cdecl `extern "C" __declspec(dllexport)` function with raw pointers and `int64_t` sizes:
+
+```text
+q4_dequant_to_fp16(const uint8_t* packed, const uint16_t* scales, uint16_t* out_fp16, int64_t num_channels, int64_t channel_size)
+```
