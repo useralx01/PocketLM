@@ -597,3 +597,8 @@ Latest Phase Speculative Pair outcome:
 - Best full 20-token run: Qwen3-1.7B safetensors, K=8, `14.2873s/token`, `90%` accepted tokens, `144/144` verifier layers, coherent text.
 - Target `<=8s/token` was not met because the current verifier is still stateless and reruns full prompt+candidate passes.
 - Dense Qwen 14B regression passes with `Hello! How can`; full suite passes with `254` tests.
+
+Latest Phase Speculative Stateful outcome:
+- Stateful verifier KV commit/rollback landed, with a fused first prompt+candidate verifier pass to avoid an extra layer-stack pass.
+- Best measured Qwen3-30B-A3B speculative run uses Qwen3-1.7B direct speculator, K=20: `6.5575s/token` best / `6.8976s/token` worst stability run, `100%` acceptance, exact 20-token alignment, and `48/48` verifier layers.
+- Dense Qwen 14B regression passes with `Hello! How can`; full suite passes with `260` tests.

@@ -4097,3 +4097,83 @@ python -m pytest tests/ -q
 ......................................                                   [100%]
 254 passed in 8.23s
 ```
+
+## Phase Speculative Stateful / Setup
+
+```text
+phase-speculative-stateful
+```
+
+## Phase Speculative Stateful / Stage 1-2 / tests
+
+```text
+python -m pytest tests/test_speculative.py tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_speculative_outputs_metrics -q
+...........                                                              [100%]
+11 passed in 1.77s
+
+After fusing first prefill + first candidate verification:
+python -m pytest tests/test_speculative.py tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_speculative_outputs_metrics -q
+............                                                             [100%]
+12 passed in 2.49s
+```
+
+## Phase Speculative Stateful / Stage 3 / real measurements
+
+```text
+Environment:
+- PCKETLM_SPECULATOR_BACKEND=direct
+- PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0
+- PCKETLM_EXPERT_TENSOR_CACHE_MB=4096
+- prompt="The capital of France is"
+- verifier=qwen3-30b-a3b
+- speculator=qwen3-1.7b
+- max_new_tokens=20 unless noted
+
+9-token smoke before fused first pass:
+- K=8, elapsed=154.8645s, effective=17.2073s/token
+- verifier_passes=2, layers_executed=144/144, verifier_token_positions_processed=43
+- accepted=9, corrected=0
+- text="<think>\nOkay, the user is asking for"
+
+9-token smoke after fused first pass:
+- K=8, elapsed=111.7080s, effective=12.4120s/token
+- verifier_passes=2, layers_executed=96/96, verifier_token_positions_processed=43
+- accepted=9, corrected=0
+- text="<think>\nOkay, the user is asking for"
+
+K sweep:
+- K=4: elapsed=283.0189s, effective=14.1509s/token, accepted=20, corrected=0, verifier_passes=5, layers=240/240, verifier_token_positions_processed=54, peak_ws=5670MB
+- K=8: elapsed=226.6145s, effective=11.3307s/token, accepted=20, corrected=0, verifier_passes=3, layers=144/144, verifier_token_positions_processed=54, peak_ws=5542MB
+- K=12: elapsed=170.1279s, effective=8.5064s/token, accepted=20, corrected=0, verifier_passes=2, layers=96/96, verifier_token_positions_processed=54, peak_ws=5778MB
+- K=20: elapsed=131.1502s, effective=6.5575s/token, accepted=20, corrected=0, verifier_passes=1, layers=48/48, verifier_token_positions_processed=54, peak_ws=5598MB
+
+K=20 stability:
+- run1: elapsed=131.1502s, effective=6.5575s/token, accepted=20, corrected=0, layers=48/48
+- run2: elapsed=137.9513s, effective=6.8976s/token, accepted=20, corrected=0, layers=48/48
+- run3: elapsed=136.6692s, effective=6.8334s/token, accepted=20, corrected=0, layers=48/48
+
+Generated token ids, K=20:
+151667,198,32313,11,279,1196,374,10161,369,279,6722,315,9625,13,6771,752,1744,13,358,1414
+
+Verbatim text:
+"<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+```
+
+## Phase Speculative Stateful / Stage 4 / final checks
+
+```text
+14B dense regression:
+- command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "hello world" --max-new-tokens 4
+- generated_text="Hello! How can"
+- generated_token_ids=[9707,0,2585,646]
+- layers_executed=192/192
+- peak_ws=2508MB
+
+pytest:
+python -m pytest tests/ -q
+........................................................................ [ 27%]
+........................................................................ [ 55%]
+........................................................................ [ 83%]
+............................................                             [100%]
+260 passed in 8.38s
+```

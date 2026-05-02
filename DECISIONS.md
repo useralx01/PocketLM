@@ -860,3 +860,47 @@ Why target is not met:
 - Same-family pairing fixed acceptance, but the current verifier remains stateless and reruns a full prompt+candidate stack for every speculative pass.
 - The next speed step is persistent verifier KV commit/rollback or a true batched verifier continuation path, not another speculator swap.
 ```
+
+## Phase Speculative Stateful / KV design
+
+```text
+Decision:
+- Add `SpeculativeSession` as the verifier owner for committed token ids, committed KV, tentative candidate KV, commit, and rollback.
+- Candidate verification after the first pass runs only the new candidate token ids against the committed KV, with RoPE position offset equal to the committed sequence length.
+- Rejected candidates are not committed. If a verifier correction is needed, the correction token is appended through a one-token verify/commit step so KV stays aligned.
+
+Why:
+- This keeps rejected suffixes out of persistent verifier state.
+- It gives tests a concrete stateful API: prefill, verify, commit, rollback.
+```
+
+## Phase Speculative Stateful / fused first pass
+
+```text
+Decision:
+- Fuse the first verifier prompt prefill with the first candidate verification.
+- The initial pass runs prompt + candidates once, stores full tentative KV, and commits only the prompt plus accepted candidates.
+
+Why:
+- The first pure stateful version was correct but slower: the 9-token smoke took 17.2073s/token because it added a separate prefill stack before candidate verification.
+- Fusing the first pass preserved identical token output and reduced the same 9-token smoke to 12.4120s/token by dropping layers from 144/144 to 96/96.
+```
+
+## Phase Speculative Stateful / K choice
+
+```text
+Decision:
+- Use `K=20` for the current Qwen3-1.7B -> Qwen3-30B-A3B pair.
+- Keep `PCKETLM_SPECULATOR_BACKEND=direct` for this measured path because Qwen3-1.7B safetensors/direct matched verifier tokens better than the local Q4 GGUF artifact.
+
+Evidence:
+- K=4: 14.1509s/token, 5 verifier passes, 100% accepted.
+- K=8: 11.3307s/token, 3 verifier passes, 100% accepted.
+- K=12: 8.5064s/token, 2 verifier passes, 100% accepted.
+- K=20: 6.5575s/token, 1 verifier pass, 100% accepted.
+- Stability runs for K=20: 6.5575s/token, 6.8976s/token, 6.8334s/token.
+
+Why:
+- The speculator matched all 20 verifier tokens on this prompt, so a single 20-token verifier batch is safe and fastest.
+- Smaller K values stayed correct but missed the <=7s/token target because each extra speculative round pays another full paged layer-stack pass.
+```

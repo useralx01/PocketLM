@@ -114,4 +114,3 @@
 - Rework expert residency for full-stack Qwen3; current valid 20-token run is `27.923s/token` with `1.25%` expert hit rate.
 - Add a small local MoE oracle fixture or an offloaded HF reference path so checkpoint-level cosine comparisons can run without loading 60-90 GB into RAM.
 - Replace GGUF Qwen 14B as the Qwen3 speculative speculator, or run Qwen3 in a consistent non-thinking verifier mode; current Qwen2.5 speculator proposes direct-answer tokens while Qwen3 verifies with `<think>`.
-- Make speculative decoding stateful: verifier KV must prefill once, verify candidate chunks as continuations, and commit/rollback KV instead of rerunning the full prompt stack per speculative pass.
