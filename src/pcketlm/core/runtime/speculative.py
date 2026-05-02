@@ -15,6 +15,7 @@ from pcketlm.core.runtime.layer_bridge import (
     load_token_entry_hidden_state,
     run_decode_tail,
     run_layer_bridge_stack,
+    run_prompt_decode_loop,
 )
 from pcketlm.core.runtime.tensor_residency import expert_residency_snapshot
 from pcketlm.core.runtime.tokenizer_runtime import (
@@ -22,9 +23,10 @@ from pcketlm.core.runtime.tokenizer_runtime import (
     encode_prompt_text,
     prepare_prompt_text,
 )
+from pcketlm.core.storage.paths import artifacts_root
 
 
-DEFAULT_SPECULATOR_MODEL_ID = "qwen2.5-14b-instruct"
+DEFAULT_SPECULATOR_MODEL_ID = "qwen3-1.7b"
 DEFAULT_VERIFIER_MODEL_ID = "qwen3-30b-a3b"
 
 
@@ -35,6 +37,7 @@ class CandidateProposal:
     speculator_model_id: str
     prompt_text: str
     generated_text: str
+    backend: str = "unknown"
     token_ids: list[int] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     blockers: list[str] = field(default_factory=list)
@@ -45,6 +48,7 @@ class CandidateProposal:
             "speculator_model_id": self.speculator_model_id,
             "prompt_text": self.prompt_text,
             "generated_text": self.generated_text,
+            "backend": self.backend,
             "token_ids": list(self.token_ids),
             "elapsed_seconds": self.elapsed_seconds,
             "blockers": list(self.blockers),
@@ -150,7 +154,7 @@ def propose_candidates(
     prompt_text: str | None = None,
     gguf_runner: Callable[..., object] | None = None,
 ) -> CandidateProposal:
-    """Use the GGUF model to propose K candidate tokens, then encode them for the verifier."""
+    """Use a fast speculator to propose K candidate tokens, then encode them for the verifier."""
     started = time.perf_counter()
     blockers: list[str] = []
     if k <= 0:
@@ -164,27 +168,45 @@ def propose_candidates(
             speculator_model_id=speculator_model_id,
             prompt_text=prompt_text or "",
             generated_text="",
+            backend="none",
             elapsed_seconds=round(time.perf_counter() - started, 4),
             blockers=blockers,
             ready=False,
         )
 
-    start_gguf_server(speculator_model_id)
-    runner = gguf_runner or run_gguf_prompt
-    result = runner(
-        speculator_model_id,
-        prompt_text,
-        max_tokens=max(k, 1),
-        stop_strings=["<|im_end|>"],
-        prefer_server=True,
-    )
-    if hasattr(result, "to_dict"):
-        payload = result.to_dict()
+    backend = "direct-paged"
+    generated_text = ""
+    if gguf_runner is not None or _has_gguf_artifact(speculator_model_id):
+        backend = "gguf"
+        start_gguf_server(speculator_model_id)
+        runner = gguf_runner or run_gguf_prompt
+        result = runner(
+            speculator_model_id,
+            prompt_text,
+            max_tokens=max(k, 1),
+            stop_strings=["<|im_end|>"],
+            prefer_server=True,
+        )
+        if hasattr(result, "to_dict"):
+            payload = result.to_dict()
+        else:
+            payload = dict(result)  # type: ignore[arg-type]
+        generated_text = str(payload.get("generated_text") or "")
+        if not bool(payload.get("ready", False)):
+            blockers.extend(str(value) for value in payload.get("blockers", []))
     else:
-        payload = dict(result)  # type: ignore[arg-type]
-    generated_text = str(payload.get("generated_text") or "")
-    if not bool(payload.get("ready", False)):
-        blockers.extend(str(value) for value in payload.get("blockers", []))
+        result = run_prompt_decode_loop(
+            speculator_model_id,
+            prompt_text,
+            steps=max(k, 1),
+            max_new_tokens=max(k, 1),
+            selection_policy="greedy",
+            apply_chat_format=False,
+            stop_strings=["<|im_end|>"],
+        )
+        generated_text = result.generated_text
+        if not result.ready:
+            blockers.extend(result.blockers)
     encoded_ids, encode_blockers = encode_prompt_text(text_model_id, generated_text)
     blockers.extend(encode_blockers)
     token_ids = encoded_ids[:k]
@@ -194,11 +216,16 @@ def propose_candidates(
         speculator_model_id=speculator_model_id,
         prompt_text=prompt_text,
         generated_text=generated_text,
+        backend=backend,
         token_ids=token_ids,
         elapsed_seconds=round(time.perf_counter() - started, 4),
         blockers=blockers,
         ready=not blockers and len(token_ids) == k,
     )
+
+
+def _has_gguf_artifact(model_id: str) -> bool:
+    return any(artifacts_root(model_id).glob("*.gguf"))
 
 
 def verify_candidates_once(

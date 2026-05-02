@@ -590,3 +590,10 @@ Latest Phase Speculative outcome:
 - GGUF Qwen 14B proposes direct-answer tokens for K=2/4/8 while the Qwen3 verifier's first greedy token is `<think>`, so accepted-per-pass is `0.0`.
 - Real speculative K=4 one-token run took `130.719s/token`; K=4 twenty-token run timed out at `1200s`.
 - Dense Qwen 14B regression still passes with `Hello! How can`. Outcome: STOP-3, the speculator distribution is mismatched to the verifier.
+
+Latest Phase Speculative Pair outcome:
+- Added same-family Qwen3 speculators: `qwen3-1.7b` safetensors, `qwen3-1.7b` GGUF Q4_K_M, and `qwen3-0.6b` safetensors fallback.
+- Tokenizers match Qwen3-30B-A3B exactly, and Qwen3-1.7B proposes `<think>` first, fixing the prior Qwen2.5 acceptance failure.
+- Best full 20-token run: Qwen3-1.7B safetensors, K=8, `14.2873s/token`, `90%` accepted tokens, `144/144` verifier layers, coherent text.
+- Target `<=8s/token` was not met because the current verifier is still stateless and reruns full prompt+candidate passes.
+- Dense Qwen 14B regression passes with `Hello! How can`; full suite passes with `254` tests.

@@ -155,3 +155,24 @@ classification:
 - STOP-3. The speculator/verifier distributions are mismatched; the verifier accepts zero candidates at the first position.
 - Tuning K cannot fix a first-token mismatch. A useful next attempt needs a speculator with Qwen3-thinking behavior or a verifier prompt mode that disables thinking consistently for both non-speculative and speculative baselines.
 ```
+
+## Phase Speculative Pair / acquisition fallbacks
+
+```text
+failed_exact_repos:
+- bartowski/Qwen3-1.7B-Instruct-GGUF
+- Qwen/Qwen3-1.7B-Instruct-GGUF
+- bartowski/Qwen3-4B-Instruct-GGUF
+- bartowski/Qwen3-0.6B-Instruct-GGUF
+- Qwen/Qwen3-1.7B-Instruct
+- Qwen/Qwen3-0.6B-Instruct
+- Qwen/Qwen3-4B-Instruct
+
+fallback_taken:
+- Qwen/Qwen3-1.7B safetensors
+- Qwen/Qwen3-0.6B safetensors
+- bartowski/Qwen_Qwen3-1.7B-GGUF Q4_K_M
+
+classification:
+- Recoverable naming mismatch, not a model availability failure. Same-family base Qwen3 models exist and match reasoning behavior.
+```

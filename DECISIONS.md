@@ -828,3 +828,35 @@ Decision:
 - The current text decode/re-encode comparison is coherent, but the speculator distribution is mismatched to the verifier distribution.
 - Treat this phase as not met rather than claiming a speed win from a verifier that accepts zero candidates.
 ```
+
+## Phase Speculative Pair / Speculator acquisition
+
+```text
+Decision:
+- Use Qwen3-1.7B as the primary same-family speculator.
+- The exact `*-Instruct` repos from the brief were not available via the Hugging Face API.
+- Downloaded `Qwen/Qwen3-1.7B` safetensors and `bartowski/Qwen_Qwen3-1.7B-GGUF` Q4_K_M.
+- Also downloaded `Qwen/Qwen3-0.6B` as the low-RAM fallback and generated a local safetensors index for its single-shard model file.
+
+Why:
+- Tokenizers match Qwen3-30B-A3B exactly for the test prompt.
+- Both 1.7B and 0.6B enter reasoning mode and propose `<think>` first, fixing the Qwen2.5 direct-answer mismatch.
+- Qwen3-1.7B safetensors produced the best measured full 20-token result despite slower proposal time because it matched verifier tokens more reliably than the Q4 GGUF artifact.
+```
+
+## Phase Speculative Pair / K choice
+
+```text
+Decision:
+- Best measured configuration is `speculator=qwen3-1.7b`, backend=safetensors/direct-paged, K=8.
+
+Evidence:
+- K=8 / 20 tokens: 14.2873s/token, 18 accepted tokens, 2 verifier corrections, 90% accepted-token rate, 144/144 verifier layers.
+- K=4 short run was already 16.5772s/token for 5 tokens.
+- Qwen3-1.7B GGUF K=8 regressed to 41.3582s/token because Q4 quantization/speculator drift reduced accepted-per-pass to 1.3333.
+- Qwen3-0.6B K=8 9-token diagnostic was slower than 1.7B safetensors: 10.3392s/token vs 9.7317s/token.
+
+Why target is not met:
+- Same-family pairing fixed acceptance, but the current verifier remains stateless and reruns a full prompt+candidate stack for every speculative pass.
+- The next speed step is persistent verifier KV commit/rollback or a true batched verifier continuation path, not another speculator swap.
+```

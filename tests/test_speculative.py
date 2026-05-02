@@ -39,6 +39,39 @@ def test_propose_candidates_uses_gguf_and_reencodes_for_verifier(monkeypatch) ->
     assert calls["kwargs"]["max_tokens"] == 2
 
 
+def test_propose_candidates_falls_back_to_direct_paged_speculator(monkeypatch) -> None:
+    calls = {}
+
+    monkeypatch.setattr(speculative, "_has_gguf_artifact", lambda _model_id: False)
+    monkeypatch.setattr(speculative, "decode_token_ids_to_text", lambda model_id, token_ids: ("prompt text", []))
+    monkeypatch.setattr(speculative, "encode_prompt_text", lambda model_id, text: ([151667, 198, 42], []))
+
+    def fake_direct(model_id: str, prompt: str, **kwargs):
+        calls.update({"model_id": model_id, "prompt": prompt, "kwargs": kwargs})
+        return SimpleNamespace(
+            ready=True,
+            generated_text="<think>\n",
+            blockers=[],
+        )
+
+    monkeypatch.setattr(speculative, "run_prompt_decode_loop", fake_direct)
+
+    result = speculative.propose_candidates(
+        "qwen3-1.7b",
+        [1, 2, 3],
+        2,
+        verifier_model_id="qwen3-30b-a3b",
+    )
+
+    assert result.ready is True
+    assert result.backend == "direct-paged"
+    assert result.token_ids == [151667, 198]
+    assert calls["model_id"] == "qwen3-1.7b"
+    assert calls["prompt"] == "prompt text"
+    assert calls["kwargs"]["apply_chat_format"] is False
+    assert calls["kwargs"]["max_new_tokens"] == 2
+
+
 def test_verify_candidates_once_runs_one_stack_pass_and_returns_k_plus_one(monkeypatch) -> None:
     calls = {"stack": 0, "tail_positions": []}
 

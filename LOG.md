@@ -3915,3 +3915,185 @@ python -m pytest tests/ -q
 .....................................                                    [100%]
 253 passed in 12.39s
 ```
+
+## Phase Speculative Pair / Setup
+
+```text
+phase-speculative-pair
+```
+
+## Phase Speculative Pair / Stage 1 / acquisition
+
+```text
+preflight:
+C: free_disk=437.71GB
+stopped previous GGUF server:
+- before: model_id=qwen2.5-14b-instruct pid=33352 ready=true working_set=2.01GB
+- after: ready=false pid=None
+
+1A requested Instruct GGUF repo attempts:
+- bartowski/Qwen3-1.7B-Instruct-GGUF: RepositoryNotFoundError
+- Qwen/Qwen3-1.7B-Instruct-GGUF: RepositoryNotFoundError
+- bartowski/Qwen3-4B-Instruct-GGUF: RepositoryNotFoundError
+- bartowski/Qwen3-0.6B-Instruct-GGUF: RepositoryNotFoundError
+
+1B exact Instruct safetensors attempts:
+- Qwen/Qwen3-1.7B-Instruct: RepositoryNotFoundError
+- Qwen/Qwen3-0.6B-Instruct: RepositoryNotFoundError
+- Qwen/Qwen3-4B-Instruct: RepositoryNotFoundError
+
+useful same-family fallback:
+- Qwen/Qwen3-1.7B safetensors downloaded to models/qwen3-1.7b/original
+- files=20 size=3890.44MB
+- registry model_id=qwen3-1.7b validated=true runnable=true
+
+low-RAM fallback:
+- Qwen/Qwen3-0.6B safetensors downloaded to models/qwen3-0.6b/original
+- files=16 size=1448.81MB
+- generated model.safetensors.index.json for the single-shard file
+- registry model_id=qwen3-0.6b validated=true runnable=true
+
+discovered available base GGUF fallback:
+- bartowski/Qwen_Qwen3-1.7B-GGUF / Qwen_Qwen3-1.7B-Q4_K_M.gguf
+- downloaded to models/qwen3-1.7b/artifacts
+- size=1223.03MB
+```
+
+## Phase Speculative Pair / Stage 2 / tokenizer and behavior compatibility
+
+```text
+tokenizer check:
+- prompt="The capital of France is"
+- qwen3-1.7b token_count=34
+- qwen3-30b-a3b token_count=34
+- token_ids_identical=true
+
+verifier first greedy token:
+- token_id=151667
+- text="<think>"
+
+qwen3-1.7b safetensors proposal:
+- backend=direct-paged
+- elapsed=16.6727s
+- generated_text="<think>\nOkay,"
+- token_ids=[151667, 198, 32313, 11]
+- ready=true
+
+qwen3-0.6b safetensors proposal:
+- backend=direct-paged
+- elapsed=10.4697s
+- generated_text="<think>\nOkay, the user is asking"
+- token_ids=[151667, 198, 32313, 11, 279, 1196, 374, 10161]
+- ready=true
+
+qwen3-1.7b GGUF proposal:
+- backend=gguf
+- elapsed=4.3004s
+- generated_text="<think>\nOkay, the user is asking"
+- token_ids=[151667, 198, 32313, 11, 279, 1196, 374, 10161]
+- ready=true
+- llama-server pid=23588 working_set=1.95GB
+```
+
+## Phase Speculative Pair / Stage 3 / measurements
+
+```text
+locked non-speculative baseline from prior phase:
+- qwen3-30b-a3b full 20 tokens: 19.3338s/token
+
+qwen3-1.7b safetensors, K=4, max_new_tokens=5:
+- elapsed=82.886s
+- effective=16.5772s/token
+- verifier_passes=1
+- accepted_token_count=4
+- corrected_token_count=1
+- average_accepted_per_pass=4.0
+- layers_executed=48/48
+- peak_ws=5403MB
+- text="<think>\nOkay, the"
+
+qwen3-1.7b safetensors, K=8, max_new_tokens=9:
+- elapsed=87.5853s
+- effective=9.7317s/token
+- verifier_passes=1
+- accepted_token_count=8
+- corrected_token_count=1
+- average_accepted_per_pass=8.0
+- layers_executed=48/48
+- peak_ws=5559MB
+- text="<think>\nOkay, the user is asking for"
+
+qwen3-0.6b safetensors, K=8, max_new_tokens=9:
+- elapsed=93.0534s
+- effective=10.3392s/token
+- verifier_passes=1
+- accepted_token_count=8
+- corrected_token_count=1
+- average_accepted_per_pass=8.0
+- layers_executed=48/48
+- peak_ws=5635MB
+- text="<think>\nOkay, the user is asking for"
+
+qwen3-1.7b safetensors, K=8, max_new_tokens=20:
+- elapsed=285.7465s
+- effective=14.2873s/token
+- effective_tokens_per_second=0.069992
+- verifier_passes=3
+- speculator_calls=3
+- accepted_token_count=18
+- corrected_token_count=2
+- average_accepted_per_pass=6.0
+- acceptance_by_generated_tokens=90%
+- layers_executed=144/144
+- peak_ws=5817MB
+- text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+qwen3-1.7b GGUF, K=8, max_new_tokens=20:
+- elapsed=827.1585s
+- effective=41.3582s/token
+- verifier_passes=9
+- speculator_calls=9
+- accepted_token_count=12
+- corrected_token_count=8
+- average_accepted_per_pass=1.3333
+- acceptance_by_generated_tokens=60%
+- layers_executed=432/432
+- peak_ws=5663MB
+- text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+qwen3-1.7b GGUF, K=4, max_new_tokens=20:
+- elapsed=1107.3414s
+- effective=55.3679s/token
+- verifier_passes=13
+- speculator_calls=13
+- accepted_token_count=8
+- corrected_token_count=12
+- average_accepted_per_pass=0.6154
+- acceptance_by_generated_tokens=40%
+- layers_executed=624/624
+- peak_ws=5466MB
+- text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+
+best=Qwen3-1.7B safetensors, K=8, 14.2873s/token, 90% accepted tokens.
+outcome=partial. Same-family speculator fixed the acceptance problem, but existing stateless verifier passes still miss the <=8s/token target.
+```
+
+## Phase Speculative Pair / Stage 4 / final checks
+
+```text
+14B dense regression:
+- command=python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "hello world" --max-new-tokens 4
+- generated_text="Hello! How can"
+- generated_token_ids=[9707, 0, 2585, 646]
+- layers_executed=192/192
+- anti_cheat=true
+- peak_ws=2507MB
+
+pytest:
+python -m pytest tests/ -q
+........................................................................ [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+......................................                                   [100%]
+254 passed in 8.23s
+```

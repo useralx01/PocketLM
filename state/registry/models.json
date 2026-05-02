@@ -111,6 +111,78 @@
       "artifact_paths": []
     },
     {
+      "model_id": "qwen3-0.6b",
+      "label": "Qwen3-0.6B",
+      "family": "qwen",
+      "model_type": "dense",
+      "source_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen3-0.6b\\original",
+      "original_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen3-0.6b\\original",
+      "source_kind": "local-folder",
+      "source_origin": "huggingface",
+      "repo_id": "Qwen/Qwen3-0.6B",
+      "format_name": "safetensors-sharded",
+      "config": {
+        "architecture": "Qwen3ForCausalLM",
+        "model_type": "qwen3",
+        "hidden_size": 1024,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "intermediate_size": 3072,
+        "moe_intermediate_size": null,
+        "num_experts": null,
+        "num_experts_per_tok": null,
+        "max_position_embeddings": 40960,
+        "vocab_size": 151936,
+        "torch_dtype": "bfloat16"
+      },
+      "imported": true,
+      "validated": true,
+      "runnable": true,
+      "validation": {
+        "result": "ok",
+        "missing_files": [],
+        "warnings": []
+      },
+      "artifact_paths": []
+    },
+    {
+      "model_id": "qwen3-1.7b",
+      "label": "Qwen3-1.7B",
+      "family": "qwen",
+      "model_type": "dense",
+      "source_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen3-1.7b\\original",
+      "original_path": "C:\\Users\\isale\\Documents\\pcketlm\\models\\qwen3-1.7b\\original",
+      "source_kind": "local-folder",
+      "source_origin": "huggingface",
+      "repo_id": "Qwen/Qwen3-1.7B",
+      "format_name": "safetensors-sharded",
+      "config": {
+        "architecture": "Qwen3ForCausalLM",
+        "model_type": "qwen3",
+        "hidden_size": 2048,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "intermediate_size": 6144,
+        "moe_intermediate_size": null,
+        "num_experts": null,
+        "num_experts_per_tok": null,
+        "max_position_embeddings": 40960,
+        "vocab_size": 151936,
+        "torch_dtype": "bfloat16"
+      },
+      "imported": true,
+      "validated": true,
+      "runnable": true,
+      "validation": {
+        "result": "ok",
+        "missing_files": [],
+        "warnings": []
+      },
+      "artifact_paths": []
+    },
+    {
       "model_id": "qwen3-30b-a3b",
       "label": "Qwen3-30B-A3B",
       "family": "qwen-moe",
