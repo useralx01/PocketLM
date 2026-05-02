@@ -4177,3 +4177,70 @@ python -m pytest tests/ -q
 ............................................                             [100%]
 260 passed in 8.38s
 ```
+
+## Phase 32B Fix / Setup
+
+```text
+latest-stable chosen from git log --oneline --all:
+0fe28ef phase-speculative-stateful/final: K=20 eff=6.5575s accept=100% fwd_reduction=66.7%
+
+branch:
+phase-32b-fix
+```
+
+## Phase 32B Fix / Stage 1 / current state
+
+```text
+Pre-flight:
+- GGUF server stop result: ready=false, running=false, summary="GGUF server is not loaded."
+- Qwen 32B files present: models/qwen2.5-32b-instruct/original/
+- safetensors: count=17, size_mb=62492.22
+- Qwen 14B regression: generated_text="Hello! How can", layers=192/192, peak_ws=2508MB
+
+Fresh-process slice ladder:
+- load-config: exit=0, ready=true, free_ram_after=4789MB, working_set_peak=204MB, elapsed=0.004s
+- embedding-only: exit=0, ready=true, free_ram_after=4846MB, working_set_peak=207MB, elapsed=0.027s
+- embed-forward: exit=0, ready=true, free_ram_after=4655MB, working_set_peak=414MB, elapsed=5.780s
+- layer-0: exit=0, ready=true, free_ram_after=4571MB, working_set_peak=2095MB, elapsed=3.328s
+- all-layers: exit=0, ready=true, free_ram_after=4637MB, working_set_peak=2273MB, elapsed=47.992s
+- all-layers-norm: exit=0, ready=true, free_ram_after=4920MB, working_set_peak=2272MB, elapsed=50.566s
+- all-layers-norm-lm: exit=0, ready=true, free_ram_after=4794MB, working_set_peak=2947MB, elapsed=51.563s
+- full max_new_tokens=1: exit=0, ready=true, generated_text="The", layers=64/64, free_ram_after=5262MB, working_set_peak=2893MB, elapsed=43.787s
+- full max_new_tokens=4: exit=0, ready=true, generated_text="The capital of France", layers=256/256, free_ram_after=6056MB, working_set_peak=2911MB, elapsed=187.611s
+
+Stage 1 finding:
+- The old native 0xC0000005 crash no longer reproduces on the latest stable branch.
+- Qwen 32B full decode now produces coherent English with anti-cheat active.
+- Stage 2 and Stage 3 were skipped because no failing slice remained to bisect or fix.
+```
+
+## Phase 32B Fix / Stage 4 / validation
+
+```text
+Qwen 32B repeat=3, prompt="The capital of France is", max_new_tokens=4:
+- run1: generated_text="The capital of France", layers=256/256, total=173.5346s, per_token=43.3836s, peak_ws=2923MB, free_ram_after=5907MB
+- run2: generated_text="The capital of France", layers=256/256, total=182.2313s, per_token=45.5578s, peak_ws=2923MB, free_ram_after=4918MB
+- run3: generated_text="The capital of France", layers=256/256, total=196.6000s, per_token=49.1500s, peak_ws=2923MB, free_ram_after=3745MB
+
+Qwen 14B dense:
+- generated_text="Hello! How can", layers=192/192, peak_ws=2508MB
+
+Qwen3-30B-A3B non-speculative:
+- generated_text="<think>\nOkay,", layers=192/192, total=150.8330s, per_token=37.7082s, peak_ws=4087MB
+- note: this is a 4-token smoke, so fixed prefill dominates seconds/token; coherence and anti-cheat are the regression bar here.
+
+Qwen3 speculative pair:
+- generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+- K=20, accepted=20, corrected=0, effective=7.2548s/token, layers=48/48, peak_ws=5558MB
+
+Mixtral-8x7B:
+- generated_text="a city that is", layers=128/128, total=200.0365s, per_token=50.0091s, peak_ws=7741MB
+
+pytest:
+python -m pytest tests/ -q
+........................................................................ [ 27%]
+........................................................................ [ 55%]
+........................................................................ [ 83%]
+............................................                             [100%]
+260 passed in 22.79s
+```

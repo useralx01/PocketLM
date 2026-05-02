@@ -904,3 +904,19 @@ Why:
 - The speculator matched all 20 verifier tokens on this prompt, so a single 20-token verifier batch is safe and fastest.
 - Smaller K values stayed correct but missed the <=7s/token target because each extra speculative round pays another full paged layer-stack pass.
 ```
+
+## Phase 32B Fix / Stage 1 / classification
+
+```text
+Verdict:
+- Crash already resolved on latest stable commit `0fe28ef`.
+
+Evidence:
+- Qwen 32B passed load-config, embedding-only, embed-forward, layer-0, all-layers, all-layers-norm, all-layers-norm-lm, full max_new_tokens=1, and full max_new_tokens=4.
+- The full max_new_tokens=4 run generated coherent dense Qwen text: "The capital of France".
+- Anti-cheat passed with layers_executed=256/256 for 4 generated tokens (64 configured layers per generated token).
+
+Decision:
+- Do not change residency, tensor loading, or layer bridge code in this phase.
+- Treat the previous 0xC0000005 as resolved by intervening runtime work and preserve the current behavior with live LOG evidence rather than adding speculative fixes.
+```

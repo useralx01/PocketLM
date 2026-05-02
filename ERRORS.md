@@ -176,3 +176,19 @@ fallback_taken:
 classification:
 - Recoverable naming mismatch, not a model availability failure. Same-family base Qwen3 models exist and match reasoning behavior.
 ```
+
+## Phase 32B Fix / old native crash no longer reproduces
+
+```text
+previous symptom:
+- Qwen2.5-32B-Instruct --slice=full crashed with native Windows 0xC0000005 and no Python traceback.
+
+current result on branch phase-32b-fix from commit 0fe28ef:
+- all diagnostic slices through all-layers-norm-lm exit 0.
+- --slice=full --max-new-tokens=1 exits 0 and generates "The" with layers=64/64.
+- --slice=full --max-new-tokens=4 exits 0 and generates "The capital of France" with layers=256/256.
+- repeat=3 full validation also exits 0 for all runs.
+
+classification:
+- Resolved by intervening runtime changes; no new crash root cause remained to bisect in this phase.
+```

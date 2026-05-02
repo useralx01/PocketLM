@@ -602,3 +602,7 @@ Latest Phase Speculative Stateful outcome:
 - Stateful verifier KV commit/rollback landed, with a fused first prompt+candidate verifier pass to avoid an extra layer-stack pass.
 - Best measured Qwen3-30B-A3B speculative run uses Qwen3-1.7B direct speculator, K=20: `6.5575s/token` best / `6.8976s/token` worst stability run, `100%` acceptance, exact 20-token alignment, and `48/48` verifier layers.
 - Dense Qwen 14B regression passes with `Hello! How can`; full suite passes with `260` tests.
+
+Latest Phase 32B Fix outcome:
+- Qwen2.5-32B-Instruct full decode no longer crashes on the latest stable runtime. It generated `"The capital of France"` in three full `max_new_tokens=4` runs with `256/256` layers, `2923 MB` peak working set, and `43.3836s` / `45.5578s` / `49.1500s` per token.
+- Regression checks passed for Qwen 14B, Qwen3-30B-A3B non-spec, Qwen3 speculative K=20, Mixtral, and the full pytest suite (`260` tests).
