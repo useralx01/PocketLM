@@ -971,3 +971,6 @@ Decision:
 - Do not promote Q4 streaming as a speed path yet.
 - Next speed work needs native/vectorized dequant fused with the loader, or a persistent fp16 cache/window that avoids repeated Q4 dequant of the same tensors.
 ```
+## Phase C++ Q4 Dequant / compiler choice
+
+No compiler was selected because `cl`, `g++`, and `clang` were all unavailable on PATH. Per STOP-1, the native Q4 dequant phase cannot proceed until Microsoft Visual Studio Build Tools with the "Desktop development with C++" workload is installed and `cl.exe` is visible in a fresh terminal.

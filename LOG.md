@@ -4419,3 +4419,29 @@ python -m pytest tests/ -q
 .................................................                        [100%]
 265 passed in 22.50s
 ```
+## Phase C++ Q4 Dequant / Setup
+
+```text
+latest-stable chosen:
+a6d0f63 phase-q4-streaming/final: 32B Q4 119.0094s-token, target not met
+
+branch:
+phase-cpp-q4-dequant
+```
+
+## Phase C++ Q4 Dequant / STOP-1
+
+No C++ compiler was available on PATH, so the native ctypes smoke could not be built.
+
+```text
+where cl
+cl: not found
+
+where g++
+g++: not found
+
+where clang
+clang: not found
+```
+
+Install instruction: install Microsoft Visual Studio Build Tools with the "Desktop development with C++" workload, then open a fresh terminal so `cl.exe` is on PATH.
