@@ -1000,3 +1000,13 @@ q4_dequant_to_fp16(const uint8_t* packed, const uint16_t* scales, uint16_t* out_
 The scalar native kernel is correct but not fast enough. A real Qwen 32B Q4 1-token run took `311.1491s/token`, with `303.8371s` inside tensor loading. A one-tensor microprofile showed the scalar native dequant at about `0.17-0.30s` for a `5120x5120` projection, while the existing PyTorch vectorized fallback took about `0.10s` on the same tensor.
 
 Decision: stop this phase per STOP-4. The next C++ path should not be a scalar loop called per tensor; it should use SIMD and/or threading, or fuse packed reads with dequant into the broader executor so dequant does not become another per-tensor bottleneck.
+
+## Phase C++ Q4 Dequant SIMD / implementation choice
+
+SIMD pattern: adapt llama.cpp's AVX2 nibble-unpack approach to pcketlm's per-channel symmetric Q4. Each vector iteration loads 8 packed bytes, masks low/high nibbles, sign-extends with the `(nibble ^ 8) - 8` trick, converts two groups of 8 int4 values to fp32, multiplies by the channel scale, converts to fp16 with F16C, then interleaves fp16 lanes back into original value order.
+
+Build flags: `/arch:AVX2` and `/openmp`.
+
+Fallback policy: the DLL exposes `q4_cpu_has_avx2_f16c()`. If AVX2/F16C is unavailable, the C function falls back to the scalar implementation; Python still has `PCKETLM_DISABLE_NATIVE_Q4=1` to force the Python path.
+
+Threading: OpenMP parallelizes across output channels. `PCKETLM_NATIVE_THREADS` can override the OpenMP thread count. On the 5120x5120 reference tensor, one thread was already under the target (`0.0039s` best), and 8-16 threads stayed around `0.0037-0.0038s`.

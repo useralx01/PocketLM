@@ -4566,3 +4566,58 @@ python_torch_vectorized seconds:
 ```
 
 STOP-4 verdict: the scalar C++ ctypes kernel is correct but slower than the existing PyTorch vectorized fallback. The next native phase needs a SIMD/threaded fused unpack+dequant kernel or a different packed executor, not this scalar loop.
+
+## Phase C++ Q4 Dequant SIMD / Setup
+
+```text
+branch:
+phase-cpp-q4-dequant
+```
+
+Reference read: llama.cpp's x86 quant code uses unaligned loads and nibble unpack helpers such as `bytes_from_nibbles_32`; pcketlm adapts the nibble mask/shift/sign-extension pattern to its own per-channel symmetric Q4 layout, which needs interleaved output order.
+
+## Phase C++ Q4 Dequant SIMD / Stage 1-3
+
+Build:
+
+```text
+python tools\build_native.py --force
+C:\Users\isale\Documents\pcketlm\src\pcketlm\native\add_test.dll
+C:\Users\isale\Documents\pcketlm\src\pcketlm\native\q4_dequant.dll
+
+native feature check:
+{'available': True, 'avx2_f16c': True}
+```
+
+Focused validation:
+
+```text
+python -m pytest tests/test_native_q4_dequant.py tests/test_q4_quantizer.py -q
+........                                                                 [100%]
+8 passed in 1.63s
+```
+
+Microbench on real Qwen 32B tensor:
+
+```text
+tensor:
+model.layers.0.self_attn.q_proj.weight
+
+shape:
+[5120, 5120]
+
+packed_mb:
+12.5
+
+native_threads=1:
+[0.0039, 0.0076, 0.004, 0.0041, 0.0045], best=0.0039s
+
+native_threads=8:
+[0.0038, 0.0043, 0.0042, 0.0037, 0.0038], best=0.0037s
+
+native_threads=16:
+[0.0042, 0.0042, 0.0038, 0.004, 0.0062], best=0.0038s
+
+python_torch_vectorized:
+[0.0914, 0.0755, 0.0729, 0.0788, 0.0765], best=0.0729s
+```

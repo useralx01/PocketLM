@@ -38,6 +38,8 @@ def _load_q4_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.q4_dequant_to_fp16.restype = None
+        lib.q4_cpu_has_avx2_f16c.argtypes = []
+        lib.q4_cpu_has_avx2_f16c.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _Q4_LOAD_ERROR = exc
         return None
@@ -48,6 +50,11 @@ def _load_q4_lib() -> ctypes.CDLL | None:
 
 def native_q4_available() -> bool:
     return _load_q4_lib() is not None
+
+
+def native_q4_has_avx2_f16c() -> bool:
+    lib = _load_q4_lib()
+    return bool(lib and lib.q4_cpu_has_avx2_f16c())
 
 
 def native_q4_load_error() -> Exception | None:

@@ -34,7 +34,7 @@ def build_cpp(source: Path, *, force: bool = False) -> Path:
     batch = (
         "@echo off\n"
         f'call "{vcvars}" >nul\n'
-        f'cl.exe /nologo /O2 /EHsc /std:c++17 /LD "{source}" /Fe:"{dll}"\n'
+        f'cl.exe /nologo /O2 /EHsc /std:c++17 /arch:AVX2 /openmp /LD "{source}" /Fe:"{dll}"\n'
     )
     with tempfile.NamedTemporaryFile("w", suffix=".cmd", delete=False, encoding="utf-8") as handle:
         handle.write(batch)

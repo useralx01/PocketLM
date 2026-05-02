@@ -1,5 +1,9 @@
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
+#include <intrin.h>
+#include <omp.h>
 
 static float fp16_to_float(uint16_t h) {
     const uint32_t sign = (static_cast<uint32_t>(h & 0x8000u)) << 16;
@@ -83,7 +87,69 @@ static uint16_t float_to_fp16(float value) {
     return static_cast<uint16_t>(sign | half_exp | half_mant);
 }
 
-extern "C" __declspec(dllexport) void q4_dequant_to_fp16(
+static bool cpu_has_avx2_f16c() {
+    int info[4] = {0, 0, 0, 0};
+    __cpuid(info, 0);
+    if (info[0] < 7) {
+        return false;
+    }
+
+    __cpuid(info, 1);
+    const bool osxsave = (info[2] & (1 << 27)) != 0;
+    const bool avx = (info[2] & (1 << 28)) != 0;
+    const bool f16c = (info[2] & (1 << 29)) != 0;
+    if (!osxsave || !avx || !f16c) {
+        return false;
+    }
+    const unsigned long long xcr0 = _xgetbv(0);
+    if ((xcr0 & 0x6) != 0x6) {
+        return false;
+    }
+
+    __cpuidex(info, 7, 0);
+    const bool avx2 = (info[1] & (1 << 5)) != 0;
+    return avx2;
+}
+
+extern "C" __declspec(dllexport) int q4_cpu_has_avx2_f16c() {
+    return cpu_has_avx2_f16c() ? 1 : 0;
+}
+
+static inline int8_t unpack_int4_scalar(const uint8_t* packed, int64_t value_index) {
+    const uint8_t byte = packed[value_index / 2];
+    uint8_t nibble = (value_index % 2 == 0) ? (byte & 0x0Fu) : ((byte >> 4) & 0x0Fu);
+    int8_t q = static_cast<int8_t>(nibble);
+    if (q >= 8) {
+        q = static_cast<int8_t>(q - 16);
+    }
+    return q;
+}
+
+static inline void dequant_16_values_avx2(
+    const uint8_t* packed,
+    uint16_t* out_fp16,
+    int64_t value_index,
+    const __m256 scale
+) {
+    const __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(packed + value_index / 2));
+    const __m128i mask = _mm_set1_epi8(0x0F);
+    const __m128i bias = _mm_set1_epi8(0x08);
+    const __m128i low_unsigned = _mm_and_si128(bytes, mask);
+    const __m128i high_unsigned = _mm_and_si128(_mm_srli_epi16(bytes, 4), mask);
+    const __m128i low_signed = _mm_sub_epi8(_mm_xor_si128(low_unsigned, bias), bias);
+    const __m128i high_signed = _mm_sub_epi8(_mm_xor_si128(high_unsigned, bias), bias);
+
+    const __m256 low_f = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(low_signed)), scale);
+    const __m256 high_f = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(high_signed)), scale);
+    const __m128i low_h = _mm256_cvtps_ph(low_f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    const __m128i high_h = _mm256_cvtps_ph(high_f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    const __m128i out_lo = _mm_unpacklo_epi16(low_h, high_h);
+    const __m128i out_hi = _mm_unpackhi_epi16(low_h, high_h);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_fp16 + value_index), out_lo);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_fp16 + value_index + 8), out_hi);
+}
+
+static void q4_dequant_to_fp16_scalar(
     const uint8_t* packed,
     const uint16_t* scales,
     uint16_t* out_fp16,
@@ -95,13 +161,46 @@ extern "C" __declspec(dllexport) void q4_dequant_to_fp16(
         const int64_t channel_offset = c * channel_size;
         for (int64_t i = 0; i < channel_size; ++i) {
             const int64_t value_index = channel_offset + i;
-            const uint8_t byte = packed[value_index / 2];
-            uint8_t nibble = (value_index % 2 == 0) ? (byte & 0x0Fu) : ((byte >> 4) & 0x0Fu);
-            int8_t q = static_cast<int8_t>(nibble);
-            if (q >= 8) {
-                q = static_cast<int8_t>(q - 16);
+            out_fp16[value_index] = float_to_fp16(static_cast<float>(unpack_int4_scalar(packed, value_index)) * scale);
+        }
+    }
+}
+
+extern "C" __declspec(dllexport) void q4_dequant_to_fp16(
+    const uint8_t* packed,
+    const uint16_t* scales,
+    uint16_t* out_fp16,
+    int64_t num_channels,
+    int64_t channel_size
+) {
+    if (!cpu_has_avx2_f16c()) {
+        q4_dequant_to_fp16_scalar(packed, scales, out_fp16, num_channels, channel_size);
+        return;
+    }
+
+    const char* thread_env = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (thread_env != nullptr) {
+        const int requested = std::atoi(thread_env);
+        if (requested > 0) {
+            omp_set_num_threads(requested);
+        }
+    }
+
+#pragma omp parallel for schedule(static)
+    for (int64_t c = 0; c < num_channels; ++c) {
+        const float scale = fp16_to_float(scales[c]);
+        const __m256 scale_v = _mm256_set1_ps(scale);
+        const int64_t channel_offset = c * channel_size;
+
+        int64_t i = 0;
+        if ((channel_offset % 2) == 0) {
+            for (; i + 16 <= channel_size; i += 16) {
+                dequant_16_values_avx2(packed, out_fp16, channel_offset + i, scale_v);
             }
-            out_fp16[value_index] = float_to_fp16(static_cast<float>(q) * scale);
+        }
+        for (; i < channel_size; ++i) {
+            const int64_t value_index = channel_offset + i;
+            out_fp16[value_index] = float_to_fp16(static_cast<float>(unpack_int4_scalar(packed, value_index)) * scale);
         }
     }
 }
