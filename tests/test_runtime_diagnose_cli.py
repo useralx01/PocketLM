@@ -6,6 +6,48 @@ import torch
 from pcketlm.app.chat_shell import runtime_diagnose_cli
 
 
+def test_runtime_diagnose_cli_model_path_override_is_restored(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    original_cli_root = lambda _model_id: tmp_path / "cli-root"
+    original_bridge_root = lambda _model_id: tmp_path / "bridge-root"
+    original_tokenizer_root = lambda _model_id: tmp_path / "tokenizer-root"
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", original_cli_root)
+    monkeypatch.setattr(runtime_diagnose_cli.layer_bridge_module, "original_model_root", original_bridge_root)
+    monkeypatch.setattr(runtime_diagnose_cli.tokenizer_runtime_module, "original_model_root", original_tokenizer_root)
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "build_tensor_catalog", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "load_layer_bridge_config",
+        lambda _model_id: SimpleNamespace(
+            ready=True,
+            blockers=[],
+            hidden_size=8,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            source_dtype="bfloat16",
+        ),
+    )
+
+    exit_code = runtime_diagnose_cli.main(
+        ["--model", "override-test", "--model-path", str(tmp_path), "--slice", "load-config"]
+    )
+
+    assert exit_code == 0
+    assert runtime_diagnose_cli.original_model_root is original_cli_root
+    assert runtime_diagnose_cli.layer_bridge_module.original_model_root is original_bridge_root
+    assert runtime_diagnose_cli.tokenizer_runtime_module.original_model_root is original_tokenizer_root
+    assert json.loads(capsys.readouterr().out.splitlines()[0])["model_dir"] == str(tmp_path)
+
+
 def test_runtime_diagnose_cli_load_config_outputs_checkpoints(monkeypatch, capsys, tmp_path) -> None:
     gb = 1024**3
     monkeypatch.setattr(

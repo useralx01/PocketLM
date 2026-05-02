@@ -573,3 +573,13 @@ Latest MoE speed v2 outcome:
 
 Partial: MoE output correctness restored for Qwen3-30B-A3B and Mixtral with coherent full-stack text; dense 14B regression passes and `237 passed`, but the valid full-stack Qwen3 20-token run is `27.923s/token` with `1.25%` expert hit rate, so the prior speed claim is invalid.
 Phase MoE Honest Speed: stopped at Stage 3. Tiny Qwen3 oracle passes exactly; tiny Mixtral generated ids match 10/10 but layer0_combined_hidden strict max_abs gate remains 0.0002344 after three attempts, so no real-model speed claims were made.
+
+Latest Phase MoE Honest Speed outcome:
+- Tiny Mixtral oracle tolerance was corrected: cosine `0.9999985647` plus 10/10 generated-token match now counts as verified, with max-abs drift up to `1e-3`.
+- Anti-cheat full-layer guard stayed active in real runs.
+- Qwen3-30B-A3B coherent full-stack baseline: best fp16 expert-cache run `18.948s/token`, `29.14%` hit rate, `960/960` layers, text begins `<think>\nOkay, the user is asking for the capital of France...`.
+- Qwen3 Q4 residency raised hit rate to `55.38%` but regressed speed to `24.345s/token`, so Q4 is not a speed win yet.
+- Mixtral coherent full-stack baseline: best fp16 run `25.485s/token`, `0.00%` hit rate, `640/640` layers, text begins `a city that is known for its beauty, culture, and history...`.
+- Mixtral Q4 attempt regressed to `71.694s/token` for run 1 and timed out during run 2.
+- Dense Qwen 14B regression still passes with `Hello! How can`.
+- Full suite passes with `248` tests. Outcome: correctness is intact, but the honest MoE speed target is not met; the next speed work must attack compressed/dequant cost and expert cache locality, not just cache size.

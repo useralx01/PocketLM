@@ -3713,3 +3713,54 @@ python -m pytest tests/test_tensor_residency.py -q
 .................................                                        [100%]
 33 passed in 1.52s
 ```
+
+## Phase MoE Honest Speed / Stage 6 / Qwen3 Q4 real run
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_Q4_CACHE='1'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; Remove-Item Env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-qwen3-stage6-q4-cap.jsonl 2>&1
+
+run=1 elapsed=482.130s avg=24.107s/token peak_ws=5952MB free_after=2214MB layers_executed=960/960 hit_rate_token20=0.4825 expert_hits_token20=15093 expert_misses_token20=16185 resident_count=4608 resident_bytes=3634888704 tensor_load_time=413.178s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I remember"
+
+run=2 elapsed=485.058s avg=24.253s/token peak_ws=5952MB free_after=2797MB layers_executed=960/960 hit_rate_token20=0.5359 expert_hits_token20=33501 expert_misses_token20=29016 resident_count=4608 resident_bytes=3634888704 tensor_load_time=418.576s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I remember"
+
+run=3 elapsed=486.904s avg=24.345s/token peak_ws=5952MB free_after=2896MB layers_executed=960/960 hit_rate_token20=0.5538 expert_hits_token20=51921 expert_misses_token20=41841 resident_count=4608 resident_bytes=3634888704 tensor_load_time=421.017s
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I remember"
+
+verdict=Q4 increased hit rate from 29.14% to 55.38%, but avg token time regressed from 18.948s/token to 24.345s/token; dequantization overhead dominates this CPU path.
+```
+
+## Phase MoE Honest Speed / Stage 6 / Mixtral Q4 attempt
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; $env:PCKETLM_EXPERT_Q4_CACHE='1'; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; Remove-Item Env:PCKETLM_MAX_RESIDENT_EXPERTS_PER_LAYER -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model mixtral-8x7b-instruct-v01 --slice full --prompt "The capital of France is" --max-new-tokens 20 --repeat 3 > state\moe-honest-mixtral-stage6-q4.jsonl 2>&1
+
+run=1 elapsed=1433.874s avg=71.694s/token peak_ws=7707MB free_after=2280MB layers_executed=640/640 hit_rate_token20=0.0005 expert_hits_token20=2 expert_misses_token20=4237 resident_count=146 resident_bytes=4289761280
+generated_text="a city that is known for its beauty, culture, and history. Paris is a city that is"
+
+run=2 started with free_ram=2276MB and was terminated by the 2400s command timeout before completion.
+verdict=Q4 is not usable for Mixtral in this implementation; it increases memory residency bytes without useful reuse and is much slower than the fp16 Stage 4 baseline.
+```
+
+## Phase MoE Honest Speed / Stage 7 / tests
+
+```text
+initial full-suite result:
+python -m pytest tests/ -q
+21 failed, 226 passed in 38.23s
+root_cause=runtime_diagnose_cli --model-path override leaked original_model_root into layer_bridge_module and tokenizer_runtime_module after in-process tests.
+
+fix=restore original_model_root overrides before returning from runtime_diagnose_cli.main and before re-raising exceptions.
+
+python -m pytest tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_model_path_override_is_restored tests/test_runtime_layer_bridge.py::test_load_layer_bridge_config_reads_required_qwen_values -q
+..                                                                       [100%]
+2 passed in 9.59s
+
+python -m pytest tests/ -q
+........................................................................ [ 29%]
+........................................................................ [ 58%]
+........................................................................ [ 87%]
+................................                                         [100%]
+248 passed in 36.61s
+```

@@ -761,3 +761,29 @@ Why:
 - Compression cannot improve hit rate if the cache is still forbidden from holding more experts per layer.
 - Explicit overrides still win for diagnostics and memory-constrained runs.
 ```
+
+## Phase MoE Honest Speed / Q4 result
+
+```text
+Observation:
+- Q4 with a 4GB expert budget raised Qwen3 resident expert tensors from 1152 to 4608 and hit rate from 29.14% to 55.38%.
+- Token time regressed from 18.948s/token to 24.345s/token.
+- Tensor-load/dequant bucket increased from 315.140s to 421.017s on run 3.
+
+Decision:
+- Keep Q4 available as an experimental residency lever, but do not claim it as a speed win.
+- The next real speed lever needs a faster compressed format/dequant path or packed expert prefetch, not just higher hit rate.
+```
+
+## Phase MoE Honest Speed / Mixtral Q4 result
+
+```text
+Observation:
+- Mixtral Q4 run 1 took 1433.874s for 20 tokens (71.694s/token), hit rate 0.05%, resident_count 146, resident_bytes 4289761280.
+- Run 2 did not finish before the 2400s command timeout.
+
+Decision:
+- Treat Q4 expert residency as not landed for Mixtral.
+- Use the coherent fp16 Stage 4 Mixtral run as the honest baseline/final for this phase.
+- The next Mixtral speed path should first fix expert grouping/cache key locality before reintroducing compression.
+```

@@ -1079,7 +1079,13 @@ def main(argv: list[str] | None = None) -> int:
     slice_name = str(args.slice)
     max_new_tokens = max(1, int(args.max_new_tokens))
     repeat = max(1, int(args.repeat))
+    previous_model_roots = None
     if args.model_path:
+        previous_model_roots = (
+            globals()["original_model_root"],
+            layer_bridge_module.original_model_root,
+            tokenizer_runtime_module.original_model_root,
+        )
         model_path = Path(args.model_path)
         override = lambda _model_id, model_path=model_path: model_path
         globals()["original_model_root"] = override
@@ -1215,6 +1221,10 @@ def main(argv: list[str] | None = None) -> int:
                 callback=lambda: selected_callback(model_id),
             )
     except Exception as exc:
+        if previous_model_roots is not None:
+            globals()["original_model_root"] = previous_model_roots[0]
+            layer_bridge_module.original_model_root = previous_model_roots[1]
+            tokenizer_runtime_module.original_model_root = previous_model_roots[2]
         _emit(
             "python-error",
             model_id=model_id,
@@ -1234,6 +1244,10 @@ def main(argv: list[str] | None = None) -> int:
         blockers=list(result.get("blockers", [])),
         expert_telemetry=expert_residency_snapshot(),
     )
+    if previous_model_roots is not None:
+        globals()["original_model_root"] = previous_model_roots[0]
+        layer_bridge_module.original_model_root = previous_model_roots[1]
+        tokenizer_runtime_module.original_model_root = previous_model_roots[2]
     return 0
 
 
