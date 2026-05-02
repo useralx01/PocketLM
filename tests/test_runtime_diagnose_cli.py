@@ -131,6 +131,78 @@ def test_runtime_diagnose_cli_full_honors_max_new_tokens(monkeypatch, capsys, tm
     assert "tensor_load_stats" in lines[2]["result"]
 
 
+def test_runtime_diagnose_cli_speculative_outputs_metrics(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    captured = {}
+
+    class _FakeSpeculativeResult:
+        def to_dict(self) -> dict:
+            return {
+                "ready": True,
+                "generated_text": "Paris is the capital.",
+                "elapsed_seconds": 4.0,
+                "effective_tokens_per_second": 2.5,
+                "effective_seconds_per_token": 0.4,
+                "verifier_passes": 3,
+                "average_accepted_per_pass": 2.0,
+                "layers_executed": 192,
+                "expected_layers_executed": 192,
+                "anti_cheat_passed": True,
+                "blockers": [],
+            }
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+
+    def fake_speculative_generate(verifier_model_id, speculator_model_id, prompt, **kwargs):
+        captured.update(
+            {
+                "verifier_model_id": verifier_model_id,
+                "speculator_model_id": speculator_model_id,
+                "prompt": prompt,
+                **kwargs,
+            }
+        )
+        return _FakeSpeculativeResult()
+
+    monkeypatch.setattr(runtime_diagnose_cli, "speculative_generate", fake_speculative_generate)
+
+    exit_code = runtime_diagnose_cli.main(
+        [
+            "--model",
+            "ignored",
+            "--slice",
+            "speculative",
+            "--verifier-model",
+            "qwen3-30b-a3b",
+            "--speculator-model",
+            "qwen2.5-14b-instruct",
+            "--prompt",
+            "The capital of France is",
+            "--max-new-tokens",
+            "10",
+            "--k",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[1]["operation"] == "speculative-prompt-decode"
+    assert lines[2]["result"]["generated_text"] == "Paris is the capital."
+    assert lines[2]["result"]["effective_tokens_per_second"] == 2.5
+    assert lines[2]["result"]["anti_cheat_passed"] is True
+    assert captured["verifier_model_id"] == "qwen3-30b-a3b"
+    assert captured["speculator_model_id"] == "qwen2.5-14b-instruct"
+    assert captured["max_new_tokens"] == 10
+    assert captured["k"] == 4
+
+
 def test_runtime_diagnose_cli_full_repeat_runs_in_one_process(monkeypatch, capsys, tmp_path) -> None:
     gb = 1024**3
     calls = {"count": 0}

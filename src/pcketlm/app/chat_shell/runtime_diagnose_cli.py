@@ -44,6 +44,11 @@ from pcketlm.core.runtime.tensor_residency import (
     load_resident_tensors,
     record_expert_activation,
 )
+from pcketlm.core.runtime.speculative import (
+    DEFAULT_SPECULATOR_MODEL_ID,
+    DEFAULT_VERIFIER_MODEL_ID,
+    speculative_generate,
+)
 from pcketlm.core.runtime.tensor_loader import reset_tensor_load_stats, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tokenizer_runtime import (
     decode_token_ids_to_text,
@@ -74,6 +79,7 @@ VALID_SLICES = {
     "top-k-experts",
     "all-layers-moe",
     "compare-with-reference",
+    "speculative",
     "full",
 }
 
@@ -788,6 +794,27 @@ def _full_forward(model_id: str, max_new_tokens: int = 1, prompt: str = "hello w
     return payload
 
 
+def _speculative_forward(
+    verifier_model_id: str,
+    speculator_model_id: str,
+    max_new_tokens: int,
+    prompt: str,
+    k: int,
+) -> dict:
+    reset_tensor_load_stats()
+    result = speculative_generate(
+        verifier_model_id,
+        speculator_model_id,
+        prompt,
+        max_new_tokens=max_new_tokens,
+        k=k,
+    )
+    payload = result.to_dict()
+    payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
+    payload["expert_telemetry"] = expert_residency_snapshot()
+    return payload
+
+
 def _safe_reference_name(model_id: str) -> str:
     return model_id.replace(".", "_").replace("-", "_").replace("/", "_")
 
@@ -1056,6 +1083,8 @@ def _operation_for_slice(slice_name: str) -> tuple[str, Callable[[str], dict]]:
         return "all-layers-moe", lambda model_id: {}
     if slice_name == "compare-with-reference":
         return "compare-with-reference", lambda model_id: {}
+    if slice_name == "speculative":
+        return "speculative-prompt-decode", lambda model_id: {}
     if slice_name == "full":
         return "full-prompt-decode", _full_forward
     raise ValueError(f"Unknown slice {slice_name!r}.")
@@ -1068,6 +1097,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=1, help="Token cap for the full prompt slice")
     parser.add_argument("--prompt", default="hello world", help="Prompt for the full prompt slice")
     parser.add_argument("--repeat", type=int, default=1, help="Run the chosen slice repeatedly in one process")
+    parser.add_argument("--verifier-model", default=DEFAULT_VERIFIER_MODEL_ID, help="Verifier model id for speculative decoding")
+    parser.add_argument("--speculator-model", default=DEFAULT_SPECULATOR_MODEL_ID, help="GGUF speculator model id")
+    parser.add_argument("--k", type=int, default=4, help="Speculative candidate count")
     parser.add_argument("--reference-root", default="tests/fixtures", help="Fixture root for compare-with-reference")
     parser.add_argument("--model-path", help="Override the model source folder for fixture diagnostics")
     return parser.parse_args(argv)
@@ -1182,6 +1214,44 @@ def main(argv: list[str] | None = None) -> int:
                     reference_root=Path(args.reference_root),
                 ),
             )
+        elif slice_name == "speculative":
+            repeated: list[dict[str, Any]] = []
+            for run_index in range(1, repeat + 1):
+                run_result = _run_checkpoint(
+                    model_id=args.verifier_model,
+                    slice_name=slice_name,
+                    operation=f"{operation}-run-{run_index}" if repeat > 1 else operation,
+                    started_at=started_at,
+                    callback=lambda: _speculative_forward(
+                        args.verifier_model,
+                        args.speculator_model,
+                        max_new_tokens,
+                        args.prompt,
+                        max(1, int(args.k)),
+                    ),
+                )
+                repeated.append(
+                    {
+                        "run": run_index,
+                        "ready": bool(run_result.get("ready", False)),
+                        "generated_text": run_result.get("generated_text"),
+                        "elapsed_seconds": run_result.get("elapsed_seconds"),
+                        "effective_tokens_per_second": run_result.get("effective_tokens_per_second"),
+                        "effective_seconds_per_token": run_result.get("effective_seconds_per_token"),
+                        "verifier_passes": run_result.get("verifier_passes"),
+                        "average_accepted_per_pass": run_result.get("average_accepted_per_pass"),
+                        "layers_executed": run_result.get("layers_executed"),
+                        "expected_layers_executed": run_result.get("expected_layers_executed"),
+                        "anti_cheat_passed": run_result.get("anti_cheat_passed"),
+                        "expert_telemetry": expert_residency_snapshot(),
+                    }
+                )
+            result = repeated[0] if repeat == 1 else {
+                "ready": all(item["ready"] for item in repeated),
+                "runs": repeated,
+                "expert_telemetry": expert_residency_snapshot(),
+                "blockers": [],
+            }
         elif repeat > 1:
             repeated: list[dict[str, Any]] = []
             for run_index in range(1, repeat + 1):

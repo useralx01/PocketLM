@@ -3785,3 +3785,16 @@ python -m pytest tests/test_speculative.py -q
 ....                                                                     [100%]
 4 passed in 2.56s
 ```
+
+## Phase Speculative / Stage 4 / diagnostic CLI
+
+```text
+implemented:
+- runtime_diagnose_cli.py supports --slice speculative.
+- flags: --verifier-model, --speculator-model, --k, --max-new-tokens, --prompt, --repeat.
+- output includes elapsed time, effective tokens/sec, verifier passes, accepted-per-pass, layers_executed, anti_cheat_passed, expert telemetry, and verbatim text.
+
+python -m pytest tests/test_speculative.py tests/test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_speculative_outputs_metrics -q
+.....                                                                    [100%]
+5 passed in 1.38s
+```
