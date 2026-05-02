@@ -583,3 +583,10 @@ Latest Phase MoE Honest Speed outcome:
 - Mixtral Q4 attempt regressed to `71.694s/token` for run 1 and timed out during run 2.
 - Dense Qwen 14B regression still passes with `Hello! How can`.
 - Full suite passes with `248` tests. Outcome: correctness is intact, but the honest MoE speed target is not met; the next speed work must attack compressed/dequant cost and expert cache locality, not just cache size.
+
+Latest Phase Speculative outcome:
+- Implemented speculative decoding scaffolding and diagnostic CLI, but the phase is not met.
+- Non-speculative Qwen3-30B-A3B baseline is `19.3338s/token` with `960/960` layers and coherent text beginning `<think>\nOkay...`.
+- GGUF Qwen 14B proposes direct-answer tokens for K=2/4/8 while the Qwen3 verifier's first greedy token is `<think>`, so accepted-per-pass is `0.0`.
+- Real speculative K=4 one-token run took `130.719s/token`; K=4 twenty-token run timed out at `1200s`.
+- Dense Qwen 14B regression still passes with `Hello! How can`. Outcome: STOP-3, the speculator distribution is mismatched to the verifier.

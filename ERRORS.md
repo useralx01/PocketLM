@@ -134,3 +134,24 @@ classification:
 - Not a semantic MoE routing failure: generated ids match the HF oracle exactly.
 - Still a STOP under the phase rules because the strict checkpoint max_abs gate remains red after three attempts.
 ```
+
+## Phase Speculative / STOP-3 / GGUF speculator mismatch
+
+```text
+symptom:
+- Non-speculative Qwen3-30B-A3B first greedy token for "The capital of France is" is token 151667, decoded as '<think>'.
+- GGUF Qwen 14B proposes direct-answer text instead:
+  - K=2: [785, 6722] -> 'The capital'
+  - K=4: [785, 6722, 315, 9625] -> 'The capital of France'
+  - K=8: [785, 6722, 315, 9625, 374, 12095, 13] -> 'The capital of France is Paris.'
+
+real runs:
+- Non-speculative baseline: 386.676s total, 19.3338s/token, layers_executed=960/960.
+- Speculative K=4, max_new_tokens=1: 130.7245s total, 130.719s/token, accepted_token_count=0, corrected_token_count=1, layers_executed=48/48.
+- Speculative K=4, max_new_tokens=20: timeout after 1200s, no result row.
+- Speculative K=4, max_new_tokens=4: process exited 1 before an after/result row; last checkpoint free_ram=2824MB, working_set=204MB.
+
+classification:
+- STOP-3. The speculator/verifier distributions are mismatched; the verifier accepts zero candidates at the first position.
+- Tuning K cannot fix a first-token mismatch. A useful next attempt needs a speculator with Qwen3-thinking behavior or a verifier prompt mode that disables thinking consistently for both non-speculative and speculative baselines.
+```

@@ -3798,3 +3798,120 @@ python -m pytest tests/test_speculative.py tests/test_runtime_diagnose_cli.py::t
 .....                                                                    [100%]
 5 passed in 1.38s
 ```
+
+## Phase Speculative / Stage 5.1 / non-speculative baseline
+
+```text
+preflight:
+GGUF speculator server loaded=true pid=33352 working_set=6.18GB
+
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; Remove-Item Env:PCKETLM_EXPERT_Q4_CACHE -ErrorAction SilentlyContinue; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice full --prompt "The capital of France is" --max-new-tokens 20 > state\speculative-baseline-qwen3.jsonl 2>&1
+
+elapsed=386.676s
+avg=19.3338s/token
+free_start=1882MB
+free_after=2720MB
+peak_ws=4541MB
+layers_executed=960/960
+anti_cheat=true
+hit_rate_token20=0.2716
+expert_hits_token20=8496
+expert_misses_token20=22782
+generated_token_ids=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 6722, 315, 9625, 13, 6771, 752, 1744, 13, 358, 1414]
+generated_text="<think>\nOkay, the user is asking for the capital of France. Let me think. I know"
+```
+
+## Phase Speculative / Stage 5.2 / speculative K=4 smoke
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; Remove-Item Env:PCKETLM_EXPERT_Q4_CACHE -ErrorAction SilentlyContinue; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice speculative --verifier-model qwen3-30b-a3b --speculator-model qwen2.5-14b-instruct --prompt "The capital of France is" --max-new-tokens 20 --k 4 > state\speculative-qwen3-k4-smoke.jsonl 2>&1
+
+result=timeout at 1200s
+file_events=start,before only
+after_event=missing
+interpretation=invalid speed run; speculative path did not complete 20 tokens within 3.1x the 386.676s non-speculative baseline.
+```
+
+## Phase Speculative / Stage 5.2 / speculative K=4 one-token diagnostic
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; Remove-Item Env:PCKETLM_EXPERT_Q4_CACHE -ErrorAction SilentlyContinue; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice speculative --verifier-model qwen3-30b-a3b --speculator-model qwen2.5-14b-instruct --prompt "The capital of France is" --max-new-tokens 1 --k 4 > state\speculative-qwen3-k4-one.jsonl 2>&1
+
+elapsed=130.7245s
+effective=130.719s/token
+effective_tokens_per_second=0.00765
+verifier_passes=1
+speculator_calls=1
+average_accepted_per_pass=0.0
+accepted_token_count=0
+corrected_token_count=1
+generated_token_ids=[151667]
+generated_text="<think>"
+layers_executed=48/48
+anti_cheat=true
+peak_ws=3576MB
+free_start=953MB
+free_after=1737MB
+```
+
+## Phase Speculative / Stage 5.2 / speculative K=4 four-token diagnostic
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; Remove-Item Env:PCKETLM_EXPERT_Q4_CACHE -ErrorAction SilentlyContinue; $env:PCKETLM_EXPERT_TENSOR_CACHE_MB='4096'; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --slice speculative --verifier-model qwen3-30b-a3b --speculator-model qwen2.5-14b-instruct --prompt "The capital of France is" --max-new-tokens 4 --k 4 > state\speculative-qwen3-k4-four.jsonl 2>&1
+
+result=process exit code 1 after 57.2s
+file_events=start,before only
+after_event=missing
+last_recorded_free_ram=2824MB
+last_recorded_working_set=204MB
+interpretation=non-Python/native early termination before a diagnostic result was emitted.
+```
+
+## Phase Speculative / Stage 5.3 / K proposal comparison
+
+```text
+verifier_prompt_len=34 blockers=[]
+known_verifier_first_token=151667 '<think>'
+
+k=2
+candidate_token_ids=[785, 6722]
+candidate_text='The capital'
+first_matches_verifier=False
+
+k=4
+candidate_token_ids=[785, 6722, 315, 9625]
+candidate_text='The capital of France'
+first_matches_verifier=False
+
+k=8
+candidate_token_ids=[785, 6722, 315, 9625, 374, 12095, 13]
+candidate_text='The capital of France is Paris.'
+first_matches_verifier=False
+
+source=state/speculative-proposals-qwen14-gguf.txt
+decision=all requested K values fail at candidate 1 because Qwen3-30B-A3B greedy emits '<think>' while GGUF Qwen 14B answers directly.
+```
+
+## Phase Speculative / Stage 6.1 / dense 14B regression
+
+```text
+command=$env:PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE='0'; Remove-Item Env:PCKETLM_EXPERT_Q4_CACHE -ErrorAction SilentlyContinue; python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "hello world" --max-new-tokens 4 > state\speculative-14b-regression.jsonl 2>&1
+
+elapsed=109.811s
+generated_token_ids=[9707, 0, 2585, 646]
+generated_text="Hello! How can"
+layers_executed=192/192
+anti_cheat=true
+peak_ws=2208MB
+```
+
+## Phase Speculative / Stage 6.3 / tests
+
+```text
+python -m pytest tests/ -q
+........................................................................ [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+.....................................                                    [100%]
+253 passed in 12.39s
+```

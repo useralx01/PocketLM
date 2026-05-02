@@ -811,3 +811,20 @@ Why:
 - The GGUF server interface returns generated text, not token ids.
 - Qwen-family tokenizers should be compatible enough for this phase, but text decode/re-encode keeps the comparison coherent if the local tokenizer files are not byte-identical.
 ```
+
+## Phase Speculative / K choice result
+
+```text
+Observation:
+- Non-speculative Qwen3-30B-A3B greedy starts with token 151667, decoded as '<think>'.
+- GGUF Qwen 14B proposes direct-answer text for all tested K values:
+  - K=2: 'The capital'
+  - K=4: 'The capital of France'
+  - K=8: 'The capital of France is Paris.'
+- None of those proposals match the verifier's first token.
+
+Decision:
+- No K value in {2,4,8} can improve this prompt/model pair while Qwen3 is in reasoning mode and the speculator answers directly.
+- The current text decode/re-encode comparison is coherent, but the speculator distribution is mismatched to the verifier distribution.
+- Treat this phase as not met rather than claiming a speed win from a verifier that accepts zero candidates.
+```
