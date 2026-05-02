@@ -3764,3 +3764,24 @@ python -m pytest tests/ -q
 ................................                                         [100%]
 248 passed in 36.61s
 ```
+
+## Phase Speculative / Setup
+
+```text
+phase-speculative-decoding
+```
+
+## Phase Speculative / Stages 1-3 / unit verification
+
+```text
+implemented:
+- src/pcketlm/core/runtime/speculative.py
+- propose_candidates() uses the existing GGUF prompt runner and re-encodes generated text into verifier token ids.
+- verify_candidates_once() runs prompt + K candidate ids through one verifier layer-stack pass and then reads K+1 greedy logits positions.
+- speculative_generate() accepts matching candidates, inserts verifier corrections on mismatch, and reports verifier passes / accepted-per-pass / effective speed.
+- V1 verifier state is stateless/tentative: rejected suffixes cannot poison persistent KV because no persistent KV is committed during verification.
+
+python -m pytest tests/test_speculative.py -q
+....                                                                     [100%]
+4 passed in 2.56s
+```

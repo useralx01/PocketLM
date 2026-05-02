@@ -787,3 +787,27 @@ Decision:
 - Use the coherent fp16 Stage 4 Mixtral run as the honest baseline/final for this phase.
 - The next Mixtral speed path should first fix expert grouping/cache key locality before reintroducing compression.
 ```
+
+## Phase Speculative / verifier design
+
+```text
+Decision:
+- The first speculative verifier is stateless/tentative: each verifier pass runs prompt + accepted output + K candidates through the full paged stack once, reads K+1 greedy logits positions, and commits only accepted/corrected token ids.
+- It does not mutate a persistent verifier KV cache during candidate checking.
+
+Why:
+- This satisfies the safety requirement that rejected candidates cannot poison future decode state.
+- It reuses the current multi-token `run_layer_bridge_stack` path instead of rewriting the layer bridge.
+- It is not the final fastest implementation; persistent KV commit/rollback can come after the correctness and speed signal is measured.
+```
+
+## Phase Speculative / speculator tokenizer reconciliation
+
+```text
+Decision:
+- GGUF Qwen 14B proposes text, then pcketlm re-encodes that text with the verifier tokenizer before token comparison.
+
+Why:
+- The GGUF server interface returns generated text, not token ids.
+- Qwen-family tokenizers should be compatible enough for this phase, but text decode/re-encode keeps the comparison coherent if the local tokenizer files are not byte-identical.
+```
