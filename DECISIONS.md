@@ -1010,3 +1010,9 @@ Build flags: `/arch:AVX2` and `/openmp`.
 Fallback policy: the DLL exposes `q4_cpu_has_avx2_f16c()`. If AVX2/F16C is unavailable, the C function falls back to the scalar implementation; Python still has `PCKETLM_DISABLE_NATIVE_Q4=1` to force the Python path.
 
 Threading: OpenMP parallelizes across output channels. `PCKETLM_NATIVE_THREADS` can override the OpenMP thread count. On the 5120x5120 reference tensor, one thread was already under the target (`0.0039s` best), and 8-16 threads stayed around `0.0037-0.0038s`.
+
+## Phase C++ Q4 Dequant SIMD / real-model bottleneck
+
+SIMD dequant is no longer the blocking kernel. It reduced Qwen 32B Q4 one-token runtime from the Python fallback's `131.967s/token` to `63.5385s/token`, but it did not reach the `25s/token` phase target. A standalone grouped load/dequant pass over all `771` Q4 tensors took `12.629s` total, including `8.719s` native dequant. The full layer bridge recorded `56.8791s` in tensor loading for the same generated token.
+
+Decision: do not keep tuning this dequant kernel in isolation. The next phase should attack the runtime load/residency orchestration around Q4 tensors: grouped per-layer loading, fewer repeated `load_tensors_by_name` calls, and persistent dequantized windows that let the bridge use the `12.6s` grouped-load behavior instead of the observed `56.9s` layer-loop behavior.

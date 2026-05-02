@@ -4621,3 +4621,112 @@ native_threads=16:
 python_torch_vectorized:
 [0.0914, 0.0755, 0.0729, 0.0788, 0.0765], best=0.0729s
 ```
+
+## Phase C++ Q4 Dequant SIMD / Stage 4 / Qwen 32B
+
+Native SIMD Q4, one-token bounded run:
+
+```text
+command:
+PCKETLM_NATIVE_THREADS=8 python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --source q4 --prompt "The capital of France is" --max-new-tokens 1
+
+exit:
+0
+
+verbatim:
+The
+
+seconds_per_token:
+63.5385
+
+layers_executed:
+64/64
+
+q4_loaded:
+true
+
+q4_loads:
+769
+
+q4_loaded_mb:
+14880.53
+
+peak_working_set_mb:
+3381
+
+timing:
+prefill_stack_op_load_tensors=56.8791s
+prefill_stack_total=62.0813s
+```
+
+Q4 internal load/dequant profile, all Qwen 32B tensors:
+
+```text
+count:
+771
+
+groups:
+17
+
+wall:
+12.629s
+
+open_s:
+0.037s
+
+get_tensor_s:
+0.116s
+
+native_dequant_s:
+8.719s
+
+q4_mb:
+15623.03
+
+out_fp16_mb:
+62492.13
+```
+
+Kill-switch sanity:
+
+```text
+command:
+PCKETLM_DISABLE_NATIVE_Q4=1 python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --source q4 --prompt "The capital of France is" --max-new-tokens 1
+
+exit:
+0
+
+verbatim:
+The
+
+seconds_per_token:
+131.967
+
+layers_executed:
+64/64
+
+q4_loaded:
+true
+
+q4_loads:
+769
+
+q4_loaded_mb:
+14880.53
+
+peak_working_set_mb:
+5264
+
+timing:
+prefill_stack_op_load_tensors=125.6577s
+prefill_stack_total=130.3378s
+```
+
+Stage 4 verdict: SIMD native dequant is a real improvement over the Python fallback, but Qwen 32B Q4 remains above the `25s/token` target. The new bottleneck is the runtime's per-layer tensor loading/residency path: a standalone grouped Q4 load+dequant profile is `12.629s`, while the full layer bridge records `56.8791s` in tensor loading for the same 769 Q4 tensors.
+
+## Phase C++ Q4 Dequant SIMD / Pytest
+
+```text
+python -m pytest tests/ -q
+269 passed in 21.15s
+```

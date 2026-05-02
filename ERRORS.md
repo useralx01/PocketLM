@@ -219,3 +219,11 @@ Native Q4 dequant built and matched Python byte-for-byte on focused tensors, but
 Root cause: the first native kernel is scalar C++ invoked per tensor through ctypes. It removes Python tensor math but does not use SIMD/threading, and it is slower than the existing PyTorch vectorized Q4 fallback in a one-tensor microprofile (`0.17-0.30s` native vs `0.10s` Python vectorized for `model.layers.0.self_attn.q_proj.weight`).
 
 Next fix direction: replace scalar dequant with a SIMD/threaded fused unpack+dequant kernel, or move to a larger packed executor that amortizes calls and copies across tensor groups.
+
+## Phase C++ Q4 Dequant SIMD / target miss
+
+The SIMD/OpenMP kernel fixed the scalar-kernel problem but did not make the full Qwen 32B Q4 path fast enough. Native SIMD one-token runtime was `63.5385s/token`; Python fallback was `131.967s/token`; both produced `The` with `64/64` layers. The microbench target passed (`0.0037s` native vs `0.0729s` Python on `5120x5120`), so the remaining full-stack bottleneck is not raw dequant speed.
+
+Root cause: the layer bridge reports `56.8791s` in tensor loading, while a standalone grouped Q4 pass over all `771` tensors reports `12.629s` wall time. The gap points at runtime load/residency orchestration overhead rather than the SIMD kernel itself.
+
+Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/residency level, or build a packed executor that avoids per-layer/per-call tensor loading overhead.

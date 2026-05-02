@@ -612,3 +612,4 @@ Latest Phase Q4 Streaming outcome:
 - Correctness passed: Q4 generated `"The capital of France"` with full layers. Speed target failed: Q4 measured `119.0094s/token`, slower than same-phase fp16 `51.4145s/token`, because Python dequantization dominates.
 - Qwen 14B, Qwen3-30B-A3B, Qwen3 speculative K=20, and Mixtral fp16 regressions passed; full suite passed with `265` tests.
 Latest: Phase C++ Q4 Dequant stopped at STOP-4. MSVC Build Tools installed, ctypes smoke passed, native scalar Q4 dequant is byte-identical on focused tests, but real Qwen 32B Q4 regressed to 311.1491s/token because tensor loading still took 303.8371s.
+Latest: Phase C++ Q4 Dequant SIMD made the native kernel fast (`0.0037s` vs Python `0.0729s` on 5120x5120), and Qwen 32B Q4 improved to `63.5385s/token`, but the phase target is still not met because layer-loop tensor loading remains `56.8791s`.
