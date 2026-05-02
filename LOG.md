@@ -4502,3 +4502,67 @@ python -m pytest tests/test_native_q4_dequant.py tests/test_q4_quantizer.py test
 .................                                                        [100%]
 17 passed in 1.68s
 ```
+
+## Phase C++ Q4 Dequant / Stage 6 / STOP-4
+
+Native Q4 dequant is byte-identical to the Python fallback on focused tests, but the real Qwen 32B Q4 path stayed far above the `30s/token` STOP-4 threshold.
+
+```text
+command:
+python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-32b-instruct --slice full --source q4 --prompt "The capital of France is" --max-new-tokens 1
+
+exit:
+0
+
+verbatim:
+The
+
+elapsed_seconds:
+311.1491
+
+seconds_per_token:
+311.1491
+
+layers_executed:
+64/64
+
+q4_loaded:
+true
+
+q4_loads:
+769
+
+q4_loaded_mb:
+14880.53
+
+peak_working_set_mb:
+3244
+
+timing:
+prefill_stack_op_load_tensors=303.8371s
+prefill_stack_total=309.4831s
+```
+
+Microprofile on one large Qwen 32B Q4 tensor:
+
+```text
+tensor:
+model.layers.0.self_attn.q_proj.weight
+
+shape:
+[5120, 5120]
+
+packed_mb:
+12.5
+
+native_direct seconds:
+[0.3029, 0.1987, 0.1691]
+
+loader_native seconds:
+[0.2344, 0.1667, 0.1699]
+
+python_torch_vectorized seconds:
+[0.1094, 0.0987, 0.101]
+```
+
+STOP-4 verdict: the scalar C++ ctypes kernel is correct but slower than the existing PyTorch vectorized fallback. The next native phase needs a SIMD/threaded fused unpack+dequant kernel or a different packed executor, not this scalar loop.

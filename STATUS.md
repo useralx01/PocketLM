@@ -611,3 +611,4 @@ Latest Phase Q4 Streaming outcome:
 - Qwen2.5-32B-Instruct now has a separate Q4 streaming artifact (`15.27 GB`, compression ratio `0.250185`) and the loader can hydrate Q4 tensors back to bf16 with `q4_loaded=true`.
 - Correctness passed: Q4 generated `"The capital of France"` with full layers. Speed target failed: Q4 measured `119.0094s/token`, slower than same-phase fp16 `51.4145s/token`, because Python dequantization dominates.
 - Qwen 14B, Qwen3-30B-A3B, Qwen3 speculative K=20, and Mixtral fp16 regressions passed; full suite passed with `265` tests.
+Latest: Phase C++ Q4 Dequant stopped at STOP-4. MSVC Build Tools installed, ctypes smoke passed, native scalar Q4 dequant is byte-identical on focused tests, but real Qwen 32B Q4 regressed to 311.1491s/token because tensor loading still took 303.8371s.

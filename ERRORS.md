@@ -212,3 +212,10 @@ fix direction:
 - Keep the Q4 artifact format and correctness tests.
 - Do not call this a speed path until dequant is native/fused or the runtime keeps a larger fp16 dequantized window resident across decode steps.
 ```
+## Phase C++ Q4 Dequant / STOP-4
+
+Native Q4 dequant built and matched Python byte-for-byte on focused tensors, but real Qwen 32B Q4 speed regressed to `311.1491s/token`. The measured bottleneck remained tensor loading: `prefill_stack_op_load_tensors=303.8371s` for one generated token, `q4_loads=769`, `q4_loaded_mb=14880.53`.
+
+Root cause: the first native kernel is scalar C++ invoked per tensor through ctypes. It removes Python tensor math but does not use SIMD/threading, and it is slower than the existing PyTorch vectorized Q4 fallback in a one-tensor microprofile (`0.17-0.30s` native vs `0.10s` Python vectorized for `model.layers.0.self_attn.q_proj.weight`).
+
+Next fix direction: replace scalar dequant with a SIMD/threaded fused unpack+dequant kernel, or move to a larger packed executor that amortizes calls and copies across tensor groups.

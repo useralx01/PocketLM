@@ -118,3 +118,4 @@
 ## Phase Q4 Streaming Follow-Up
 
 - Replace Python Q4 dequant in the paged runtime with native/fused dequant or a larger persistent dequantized fp16 window; current Qwen 32B Q4 artifacts are correct and coherent but slower than fp16.
+- Replace the first scalar ctypes Q4 dequant kernel with SIMD/threaded fused unpack+dequant or a grouped packed executor; scalar native dequant is correct but slower than PyTorch vectorized dequant on Qwen 32B.

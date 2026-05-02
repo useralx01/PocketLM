@@ -994,3 +994,9 @@ Calling convention: a single cdecl `extern "C" __declspec(dllexport)` function w
 ```text
 q4_dequant_to_fp16(const uint8_t* packed, const uint16_t* scales, uint16_t* out_fp16, int64_t num_channels, int64_t channel_size)
 ```
+
+## Phase C++ Q4 Dequant / STOP-4 bottleneck
+
+The scalar native kernel is correct but not fast enough. A real Qwen 32B Q4 1-token run took `311.1491s/token`, with `303.8371s` inside tensor loading. A one-tensor microprofile showed the scalar native dequant at about `0.17-0.30s` for a `5120x5120` projection, while the existing PyTorch vectorized fallback took about `0.10s` on the same tensor.
+
+Decision: stop this phase per STOP-4. The next C++ path should not be a scalar loop called per tensor; it should use SIMD and/or threading, or fuse packed reads with dequant into the broader executor so dequant does not become another per-tensor bottleneck.
