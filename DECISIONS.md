@@ -1168,3 +1168,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / fused QKV projection
 - Fused Q/K/V projection inside the native decode attention kernel rather than adding another Python bridge boundary. The fused helper preserves the same row-major weight layout and fp32 accumulation but shares the hidden-vector conversion and OpenMP launch.
 - This is a safe micro-optimization because it does not reorder operations within any individual output row; it only schedules rows from Q, K, and V in one loop.
+
+## Phase Native fp16 Integration / native prefill attention convention
+- Standardized the standalone native prefill attention kernel on the same split-half RoPE convention as the production bridge. The previous adjacent-pair convention was only self-consistent with its old test and would have blocked safe prefill integration.
+- Kept this kernel separate from the production decode bridge until a full-layer prefill oracle test exists; the change is a correctness prerequisite, not a production dispatch change.

@@ -16,6 +16,20 @@ static inline uint16_t fp32_to_fp16(float value) {
     return static_cast<uint16_t>(_mm_cvtsi128_si32(half));
 }
 
+static inline __m256 load_fp16_as_ps(const uint16_t* values) {
+    const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values));
+    return _mm256_cvtph_ps(packed);
+}
+
+static inline float horizontal_sum_ps(__m256 values) {
+    const __m128 low = _mm256_castps256_ps128(values);
+    const __m128 high = _mm256_extractf128_ps(values, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
 static void linear(
     const uint16_t* hidden,
     const uint16_t* weight,
@@ -27,9 +41,18 @@ static void linear(
     #pragma omp parallel for schedule(static)
     for (int64_t token = 0; token < seq_len; ++token) {
         for (int64_t row = 0; row < out_features; ++row) {
-            float acc = 0.0f;
-            for (int64_t col = 0; col < in_features; ++col) {
-                acc += fp16_to_fp32(hidden[token * in_features + col]) * fp16_to_fp32(weight[row * in_features + col]);
+            const uint16_t* hidden_row = hidden + token * in_features;
+            const uint16_t* weight_row = weight + row * in_features;
+            __m256 acc_vec = _mm256_setzero_ps();
+            int64_t col = 0;
+            for (; col + 8 <= in_features; col += 8) {
+                const __m256 h = load_fp16_as_ps(hidden_row + col);
+                const __m256 w = load_fp16_as_ps(weight_row + col);
+                acc_vec = _mm256_fmadd_ps(h, w, acc_vec);
+            }
+            float acc = horizontal_sum_ps(acc_vec);
+            for (; col < in_features; ++col) {
+                acc += fp16_to_fp32(hidden_row[col]) * fp16_to_fp32(weight_row[col]);
             }
             out[token * out_features + row] = acc;
         }
@@ -48,15 +71,16 @@ static void apply_rope(
         const float position = static_cast<float>(position_offset + token);
         for (int64_t head = 0; head < head_count; ++head) {
             float* base = values + (token * head_count + head) * head_dim;
-            for (int64_t dim = 0; dim + 1 < head_dim; dim += 2) {
+            const int64_t half_dim = head_dim / 2;
+            for (int64_t dim = 0; dim < half_dim; ++dim) {
                 const float inv_freq = std::pow(rope_theta, -static_cast<float>(dim) / static_cast<float>(head_dim));
                 const float angle = position * inv_freq;
                 const float c = std::cos(angle);
                 const float s = std::sin(angle);
                 const float x0 = base[dim];
-                const float x1 = base[dim + 1];
+                const float x1 = base[dim + half_dim];
                 base[dim] = x0 * c - x1 * s;
-                base[dim + 1] = x1 * c + x0 * s;
+                base[dim + half_dim] = x1 * c + x0 * s;
             }
         }
     }

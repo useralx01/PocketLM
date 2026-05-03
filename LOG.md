@@ -4989,3 +4989,8 @@ Result: 297 passed in 21.83s
 - Focused tests after rebuild: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention -q` -> 11 passed in 3.77s.
 - 14B real row: prompt `The capital of France is`, max_new_tokens=4 -> ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=58.7086s, operation_seconds=60.202s. Timings: continuation_stack_op_native_layer=34.3785s, continuation_stack_op_load_tensors=2.7803s, continuation_decode_tail=2.6284s, prefill_stack_op_qkv_projection=2.0219s, prefill_stack_op_o_projection=1.3197s.
 - Full test suite: `python -m pytest tests/ -q` -> 300 passed in 21.78s.
+
+## Phase Native fp16 Integration / native prefill attention rope
+- Updated `fp16_attention.dll` prefill RoPE from adjacent-pair rotation to the production split-half convention used by `layer_bridge`.
+- Vectorized the prefill attention linear helper with AVX2/FMA while preserving fp32 accumulation.
+- Focused test: `python -m pytest tests\test_native_fp16_attention.py -q` -> 2 passed in 2.66s.

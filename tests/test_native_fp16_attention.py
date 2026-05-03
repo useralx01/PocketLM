@@ -9,15 +9,16 @@ def _apply_rope(values: torch.Tensor, position_offset: int, rope_theta: float) -
     out = values.clone()
     for token in range(seq_len):
         position = float(position_offset + token)
-        for dim in range(0, head_dim, 2):
+        half_dim = head_dim // 2
+        for dim in range(half_dim):
             inv_freq = rope_theta ** (-float(dim) / float(head_dim))
             angle = position * inv_freq
             c = math.cos(angle)
             s = math.sin(angle)
             x0 = out[token, :, dim].clone()
-            x1 = out[token, :, dim + 1].clone()
+            x1 = out[token, :, dim + half_dim].clone()
             out[token, :, dim] = x0 * c - x1 * s
-            out[token, :, dim + 1] = x1 * c + x0 * s
+            out[token, :, dim + half_dim] = x1 * c + x0 * s
     return out
 
 
