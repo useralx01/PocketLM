@@ -5046,3 +5046,4 @@ Result: 297 passed in 21.83s
 - Native DLL load checks after Windows Application Control rebuild/unblock: kv=true, moe=true, loader=true, q4=true, matmul=true.
 - Native-focused suite: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_moe.py tests\test_native_fp16_loader.py tests\test_native_fp16_matmul.py tests\test_runtime_layer_bridge.py -q` -> 62 passed in 5.84s.
 - Full test suite: `python -m pytest tests/ -q` -> 306 passed in 24.82s.
+- Current 14B regression prompt after all committed native changes: `hello world`, max_new_tokens=4 -> ready=true, anti_cheat=true, layers_executed=144/144, generated_text=`HelloWorld<|im_end|>`, total=57.1689s, continuation_stack_op_native_layer=27.7446s, continuation_decode_tail=2.2843s.
