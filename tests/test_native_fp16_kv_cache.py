@@ -461,3 +461,171 @@ def test_native_kv_prefill_decode_commit_decode_matches_python_full_context_atte
     assert session.committed_length(0) == 6
     assert session.tentative_length(0) == 1
     session.close()
+
+
+def test_native_dense_prefill_matches_sequential_decode_and_commits_kv() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(9753)
+    hidden_size = 8
+    intermediate_size = 16
+    num_heads = 2
+    num_kv_heads = 1
+    kv_width = hidden_size // num_heads * num_kv_heads
+    seq_len = 3
+    hidden = torch.randn((seq_len, hidden_size), dtype=torch.float16)
+    input_norm = (torch.rand((hidden_size,), dtype=torch.float32) + 0.5).to(torch.float16)
+    post_norm = (torch.rand((hidden_size,), dtype=torch.float32) + 0.5).to(torch.float16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    gate_weight = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    up_weight = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.float16)
+    down_weight = (torch.randn((hidden_size, intermediate_size), dtype=torch.float32) * 0.1).to(torch.float16)
+
+    prefill_session = NativeKvSession(layer_count=1, max_seq_len=16, kv_width=kv_width)
+    prefill_out = prefill_session.dense_layer_prefill_fp16(
+        0,
+        hidden,
+        input_norm,
+        post_norm,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        gate_weight,
+        up_weight,
+        down_weight,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rms_eps=1e-6,
+        rope_theta=10000.0,
+    )
+
+    decode_session = NativeKvSession(layer_count=1, max_seq_len=16, kv_width=kv_width)
+    decode_rows = []
+    for row in range(seq_len):
+        decoded = decode_session.dense_layer_decode_fp16(
+            0,
+            hidden[row],
+            input_norm,
+            post_norm,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_kv_heads,
+            rms_eps=1e-6,
+            rope_theta=10000.0,
+        )
+        decode_session.commit(1)
+        decode_rows.append(decoded)
+    decode_out = torch.stack(decode_rows, dim=0)
+
+    assert prefill_session.committed_length(0) == seq_len
+    assert prefill_session.tentative_length(0) == 0
+    assert torch.equal(prefill_out, decode_out)
+    prefill_k, prefill_v = prefill_session.copy_layer(0, include_tentative=False)
+    decode_k, decode_v = decode_session.copy_layer(0, include_tentative=False)
+    assert torch.equal(prefill_k, decode_k)
+    assert torch.equal(prefill_v, decode_v)
+    prefill_session.close()
+    decode_session.close()
+
+
+def test_native_dense_prefill_ext_matches_sequential_decode_with_biases() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(86420)
+    hidden_size = 16
+    intermediate_size = 24
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = hidden_size // num_heads
+    kv_width = num_kv_heads * head_dim
+    seq_len = 2
+    hidden = torch.randn((seq_len, hidden_size), dtype=torch.float32).to(torch.bfloat16)
+    input_norm = (torch.rand((hidden_size,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+    post_norm = (torch.rand((hidden_size,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    gate_weight = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    up_weight = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    down_weight = (torch.randn((hidden_size, intermediate_size), dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    q_bias = (torch.randn((hidden_size,), dtype=torch.float32) * 0.01).to(torch.bfloat16)
+    k_bias = (torch.randn((kv_width,), dtype=torch.float32) * 0.01).to(torch.bfloat16)
+    v_bias = (torch.randn((kv_width,), dtype=torch.float32) * 0.01).to(torch.bfloat16)
+    q_norm = (torch.rand((head_dim,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+    k_norm = (torch.rand((head_dim,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+
+    prefill_session = NativeKvSession(layer_count=1, max_seq_len=16, kv_width=kv_width, dtype=torch.bfloat16)
+    prefill_out = prefill_session.dense_layer_prefill_fp16(
+        0,
+        hidden,
+        input_norm,
+        post_norm,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        gate_weight,
+        up_weight,
+        down_weight,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rms_eps=1e-6,
+        rope_theta=10000.0,
+        q_bias=q_bias,
+        k_bias=k_bias,
+        v_bias=v_bias,
+        q_norm_weight=q_norm,
+        k_norm_weight=k_norm,
+    )
+
+    decode_session = NativeKvSession(layer_count=1, max_seq_len=16, kv_width=kv_width, dtype=torch.bfloat16)
+    decode_rows = []
+    for row in range(seq_len):
+        decoded = decode_session.dense_layer_decode_fp16(
+            0,
+            hidden[row],
+            input_norm,
+            post_norm,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_kv_heads,
+            rms_eps=1e-6,
+            rope_theta=10000.0,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            v_bias=v_bias,
+            q_norm_weight=q_norm,
+            k_norm_weight=k_norm,
+        )
+        decode_session.commit(1)
+        decode_rows.append(decoded)
+
+    assert torch.equal(prefill_out, torch.stack(decode_rows, dim=0))
+    assert prefill_session.committed_length(0) == seq_len
+    prefill_k, prefill_v = prefill_session.copy_layer(0, include_tentative=False)
+    decode_k, decode_v = decode_session.copy_layer(0, include_tentative=False)
+    assert torch.equal(prefill_k, decode_k)
+    assert torch.equal(prefill_v, decode_v)
+    prefill_session.close()
+    decode_session.close()

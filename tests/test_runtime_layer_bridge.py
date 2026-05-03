@@ -457,6 +457,81 @@ def test_native_attention_decode_can_leave_kv_tentative_for_speculation(monkeypa
         session.close()
 
 
+def test_native_dense_prefill_dispatch_commits_prompt_kv(monkeypatch) -> None:
+    hidden_size = 8
+    intermediate_size = 16
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = 4
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-dense-prefill-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=0,
+        num_experts_per_tok=0,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(24601)
+    tensors = {
+        "input_layernorm.weight": (torch.rand((hidden_size,)) + 0.5).to(torch.bfloat16),
+        "post_attention_layernorm.weight": (torch.rand((hidden_size,)) + 0.5).to(torch.bfloat16),
+        "self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.gate_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.up_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.down_proj.weight": (torch.randn((hidden_size, intermediate_size)) * 0.1).to(torch.bfloat16),
+    }
+
+    def fake_config(_model_id):
+        return config
+
+    def fake_exists(_model_id, tensor_name):
+        return any(tensor_name.endswith(suffix) for suffix in tensors)
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        loaded = {}
+        for name in tensor_names:
+            suffix = next(suffix for suffix in tensors if name.endswith(suffix))
+            loaded[name] = SimpleNamespace(ready=True, tensor=tensors[suffix], blockers=[])
+        return loaded
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_ATTENTION", raising=False)
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_DENSE_PREFILL", "1")
+    monkeypatch.setattr(layer_bridge_module, "load_layer_bridge_config", fake_config)
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+
+    result = layer_bridge_module.run_minimal_layer_forward_bridge(
+        "native-dense-prefill-test",
+        layer_index=0,
+        input_hidden=torch.randn((1, 3, hidden_size), dtype=torch.bfloat16),
+        return_kv_cache=True,
+    )
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert tuple(result.output_tensor.shape) == (1, 3, hidden_size)
+    assert result.cache_sequence_length == 3
+    assert result.native_kv_session is not None
+    try:
+        assert result.native_kv_session.committed_length(0) == 3
+        assert result.native_kv_session.tentative_length(0) == 0
+    finally:
+        result.native_kv_session.close()
+    assert result.timings.get("native_layer", 0.0) > 0.0
+
+
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
     text, marker = _trim_generated_text_at_stop_string("Hello<|im_end|>ignored", ["<|im_end|>"])
 

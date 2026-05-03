@@ -1185,3 +1185,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Normal decode commits native C KV inside the bridge because each generated token is final. Speculative verification cannot do that: candidate suffixes are tentative until accepted.
 - Added an explicit `native_kv_commit` bridge flag. The default remains `true`; `SpeculativeSession.verify_candidates` passes `false` and owns commit/rollback. This keeps the native session contract aligned with the existing Python KV speculative contract.
 - Added a bridge-level test at `_try_native_attention_decode_bridge` rather than only the higher-level speculative loop so future native attention changes cannot accidentally commit candidate KV before `SpeculativeSession` has accepted it.
+
+## Phase Native fp16 Integration / dense native prefill
+- Implemented dense native prefill as a correctness-proven opt-in path, not a default. It commits prompt KV C-side and supports the same bias/q-norm pointers as dense native decode.
+- Real 14B measurement showed the opt-in path is slower than the existing torch prefill on this machine: 64.3411s native prefill layer time vs about 19.8s default prefill stack. The likely cause is sequential token-by-token native decode inside prefill, which loses torch's small-batch matmul efficiency.
+- Kept `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1` for controlled profiling, but default production keeps torch prefill and native decode. This avoids a measured regression while preserving the C-owned KV prefill implementation and tests.

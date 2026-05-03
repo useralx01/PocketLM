@@ -1068,6 +1068,10 @@ def _native_layer_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_LAYER", "").strip().lower() not in {"1", "true", "yes", "on"}
 
 
+def _native_dense_prefill_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_DENSE_PREFILL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _layer_tensor_names(layer_index: int) -> list[str]:
     return [
         f"model.layers.{layer_index}.input_layernorm.weight",
@@ -1336,6 +1340,148 @@ def _try_native_dense_decode_bridge(
         timings=timings,
         output_tensor=layer_output,
         next_kv_cache=next_kv_cache,
+        native_kv_session=session,
+    )
+
+
+def _try_native_dense_prefill_bridge(
+    *,
+    model_id: str,
+    layer_index: int,
+    hidden_states: torch.Tensor,
+    past_key_value: tuple[torch.Tensor, torch.Tensor] | None,
+    native_kv_session: Any | None,
+    config: LayerBridgeModelConfig,
+    tensor_policy: TensorResidencyPolicy | None,
+    collect_metrics: bool,
+    timings: dict[str, float],
+) -> LayerBridgeResult | None:
+    if not _native_layer_enabled() or _is_moe_config(config):
+        return None
+    if not _native_dense_prefill_enabled():
+        return None
+    if hidden_states.ndim != 3 or hidden_states.shape[0] != 1 or hidden_states.shape[1] <= 1:
+        return None
+    math_dtype = _runtime_math_dtype()
+    if math_dtype not in {torch.float16, torch.bfloat16}:
+        return None
+    try:
+        from pcketlm.native import NativeKvSession, native_fp16_kv_available
+
+        if not native_fp16_kv_available():
+            return None
+    except Exception:
+        return None
+
+    head_dim = config.head_dim
+    kv_width = config.num_key_value_heads * head_dim
+    required_names = [
+        f"model.layers.{layer_index}.input_layernorm.weight",
+        f"model.layers.{layer_index}.post_attention_layernorm.weight",
+        f"model.layers.{layer_index}.self_attn.q_proj.weight",
+        f"model.layers.{layer_index}.self_attn.k_proj.weight",
+        f"model.layers.{layer_index}.self_attn.v_proj.weight",
+        f"model.layers.{layer_index}.self_attn.o_proj.weight",
+        f"model.layers.{layer_index}.mlp.gate_proj.weight",
+        f"model.layers.{layer_index}.mlp.up_proj.weight",
+        f"model.layers.{layer_index}.mlp.down_proj.weight",
+    ]
+    optional_names = [
+        f"model.layers.{layer_index}.self_attn.q_proj.bias",
+        f"model.layers.{layer_index}.self_attn.k_proj.bias",
+        f"model.layers.{layer_index}.self_attn.v_proj.bias",
+        f"model.layers.{layer_index}.self_attn.q_norm.weight",
+        f"model.layers.{layer_index}.self_attn.k_norm.weight",
+    ]
+    present_optional = [name for name in optional_names if _tensor_entry_exists(model_id, name)]
+    load_started = time.perf_counter()
+    loaded = load_resident_tensors(
+        model_id,
+        required_names + present_optional,
+        dtype=math_dtype,
+        policy=tensor_policy,
+    )
+    timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
+    tensors: dict[str, torch.Tensor] = {}
+    for tensor_name in required_names + present_optional:
+        loaded_slice = loaded[tensor_name]
+        if not loaded_slice.ready or loaded_slice.tensor is None:
+            return None
+        tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
+
+    session = None
+    try:
+        if native_kv_session is None:
+            past_k_native, past_v_native, past_length = _reshape_past_kv_for_native(past_key_value, config, math_dtype)
+            max_seq_len = max(config.max_position_embeddings, past_length + int(hidden_states.shape[1]), 1)
+            session = NativeKvSession(
+                layer_count=1,
+                max_seq_len=max_seq_len,
+                kv_width=kv_width,
+                dtype=math_dtype,
+            )
+            if past_length:
+                session.append_committed(0, past_k_native, past_v_native, count=past_length)
+        else:
+            session = native_kv_session
+            past_length = session.committed_length(0) + session.tentative_length(0)
+        native_started = time.perf_counter()
+        output = session.dense_layer_prefill_fp16(
+            0,
+            hidden_states.reshape(int(hidden_states.shape[1]), config.hidden_size).to(dtype=math_dtype),
+            tensors[f"model.layers.{layer_index}.input_layernorm.weight"],
+            tensors[f"model.layers.{layer_index}.post_attention_layernorm.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"],
+            tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"],
+            tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"],
+            tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"],
+            intermediate_size=config.intermediate_size,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            rms_eps=config.rms_norm_eps,
+            rope_theta=config.rope_theta,
+            q_bias=tensors.get(f"model.layers.{layer_index}.self_attn.q_proj.bias"),
+            k_bias=tensors.get(f"model.layers.{layer_index}.self_attn.k_proj.bias"),
+            v_bias=tensors.get(f"model.layers.{layer_index}.self_attn.v_proj.bias"),
+            q_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
+            k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
+        )
+        timings["native_layer"] = round(timings.get("native_layer", 0.0) + (time.perf_counter() - native_started), 4)
+    except Exception:
+        if native_kv_session is None and session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        return None
+
+    layer_output = output.view(1, int(hidden_states.shape[1]), config.hidden_size).to(dtype=math_dtype)
+    output_mean_abs = float(layer_output.abs().mean().item()) if collect_metrics else 0.0
+    output_l2_norm = float(torch.linalg.vector_norm(layer_output.float()).item()) if collect_metrics else 0.0
+    return LayerBridgeResult(
+        model_id=model_id,
+        layer_index=layer_index,
+        input_mode="provided",
+        input_shape=[int(value) for value in hidden_states.shape],
+        output_shape=[int(value) for value in layer_output.shape],
+        output_dtype=str(layer_output.dtype),
+        loaded_unit_ids=[
+            f"layer-{layer_index:02d}-layer_norm",
+            f"layer-{layer_index:02d}-attention",
+            f"layer-{layer_index:02d}-mlp",
+        ],
+        attention_head_dim=head_dim,
+        cache_sequence_length=past_length + int(hidden_states.shape[1]),
+        output_mean_abs=output_mean_abs,
+        output_l2_norm=output_l2_norm,
+        blockers=[],
+        ready=True,
+        timings=timings,
+        output_tensor=layer_output,
+        next_kv_cache=None,
         native_kv_session=session,
     )
 
@@ -1820,6 +1966,22 @@ def run_minimal_layer_forward_bridge(
         if not return_kv_cache:
             native_result.next_kv_cache = None
         return native_result
+
+    native_prefill_result = _try_native_dense_prefill_bridge(
+        model_id=model_id,
+        layer_index=layer_index,
+        hidden_states=hidden_states,
+        past_key_value=past_key_value,
+        native_kv_session=native_kv_session,
+        config=config,
+        tensor_policy=tensor_policy,
+        collect_metrics=collect_metrics,
+        timings=timings,
+    )
+    if native_prefill_result is not None:
+        if not return_kv_cache:
+            native_prefill_result.next_kv_cache = None
+        return native_prefill_result
 
     norm_tensor_names = [
         f"model.layers.{layer_index}.input_layernorm.weight",

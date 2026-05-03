@@ -5019,3 +5019,13 @@ Result: 297 passed in 21.83s
 - Focused test: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_attention_decode_can_leave_kv_tentative_for_speculation -q` -> 1 passed in 1.66s.
 - Broader tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_speculative.py tests\test_native_fp16_kv_cache.py -q` -> 61 passed in 3.30s.
 - Full test suite: `python -m pytest tests/ -q` -> 302 passed in 23.15s.
+
+## Phase Native fp16 Integration / dense native prefill probe
+- Added a native dense prefill kernel that runs sequential causal prefill through the C-owned KV session and commits each prompt token. Extended it through the same optional bias/q-norm ABI used by decode.
+- Build: `python tools\build_native.py --force` rebuilt `fp16_kv_cache.dll`.
+- Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py::test_native_dense_prefill_matches_sequential_decode_and_commits_kv tests\test_native_fp16_kv_cache.py::test_native_dense_prefill_ext_matches_sequential_decode_with_biases tests\test_runtime_layer_bridge.py::test_native_dense_prefill_dispatch_commits_prompt_kv -q` -> 3 passed in 1.55s.
+- Broader tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> 52 passed in 5.22s.
+- Full test suite: `python -m pytest tests/ -q` -> 305 passed in 34.48s.
+- 14B with native dense prefill opt-in on the real prompt regressed: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=111.3965s, prefill_stack_op_native_layer=64.3411s, continuation_stack_op_native_layer=36.3404s.
+- Gated production dense native prefill behind `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1` so the correct but slower path cannot regress default chat.
+- Default 14B re-run after the gate: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=65.4585s, prefill_stack=19.8109s, prefill_stack_op_native_layer absent, continuation_stack_op_native_layer=35.928s.

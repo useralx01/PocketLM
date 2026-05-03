@@ -582,6 +582,30 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_dense_layer_decode_fp16.restype = ctypes.c_int
+        if hasattr(lib, "kv_dense_layer_prefill_fp16"):
+            lib.kv_dense_layer_prefill_fp16.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_float,
+                ctypes.c_float,
+            ]
+            lib.kv_dense_layer_prefill_fp16.restype = ctypes.c_int
         lib.kv_dense_layer_decode_u16_ext.argtypes = [
             ctypes.c_void_p,
             ctypes.c_longlong,
@@ -609,6 +633,35 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_dense_layer_decode_u16_ext.restype = ctypes.c_int
+        if hasattr(lib, "kv_dense_layer_prefill_u16_ext"):
+            lib.kv_dense_layer_prefill_u16_ext.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_float,
+                ctypes.c_float,
+            ]
+            lib.kv_dense_layer_prefill_u16_ext.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP16_KV_ERROR = exc
         return None
@@ -869,6 +922,116 @@ class NativeKvSession:
         )
         if code != 0:
             raise RuntimeError(f"kv_dense_layer_decode_fp16 failed with code {code}")
+        return out
+
+    def dense_layer_prefill_fp16(
+        self,
+        layer: int,
+        hidden: torch.Tensor,
+        input_norm_weight: torch.Tensor,
+        post_norm_weight: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        v_weight: torch.Tensor,
+        o_weight: torch.Tensor,
+        gate_weight: torch.Tensor,
+        up_weight: torch.Tensor,
+        down_weight: torch.Tensor,
+        *,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        rms_eps: float,
+        rope_theta: float,
+        q_bias: torch.Tensor | None = None,
+        k_bias: torch.Tensor | None = None,
+        v_bias: torch.Tensor | None = None,
+        q_norm_weight: torch.Tensor | None = None,
+        k_norm_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        tensors = [
+            hidden,
+            input_norm_weight,
+            post_norm_weight,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+        ]
+        for optional in (q_bias, k_bias, v_bias, q_norm_weight, k_norm_weight):
+            if optional is not None:
+                tensors.append(optional)
+        if any(tensor.dtype != self.dtype for tensor in tensors):
+            raise TypeError(f"dense_layer_prefill_fp16 requires {self.dtype} tensors")
+        if hidden.ndim != 2:
+            raise ValueError("hidden must have shape [seq_len, hidden_size]")
+        cpu_tensors = [tensor.detach().cpu().contiguous() for tensor in tensors[:10]]
+        q_bias_cpu = None if q_bias is None else q_bias.detach().cpu().contiguous().reshape(-1)
+        k_bias_cpu = None if k_bias is None else k_bias.detach().cpu().contiguous().reshape(-1)
+        v_bias_cpu = None if v_bias is None else v_bias.detach().cpu().contiguous().reshape(-1)
+        q_norm_cpu = None if q_norm_weight is None else q_norm_weight.detach().cpu().contiguous().reshape(-1)
+        k_norm_cpu = None if k_norm_weight is None else k_norm_weight.detach().cpu().contiguous().reshape(-1)
+        seq_len = int(cpu_tensors[0].shape[0])
+        hidden_size = int(cpu_tensors[0].shape[1])
+        out = torch.empty((seq_len, hidden_size), dtype=self.dtype)
+        if hasattr(self._lib, "kv_dense_layer_prefill_u16_ext"):
+            code = self._lib.kv_dense_layer_prefill_u16_ext(
+                self._handle,
+                ctypes.c_longlong(int(layer)),
+                ctypes.c_void_p(int(cpu_tensors[0].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[1].reshape(-1).data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[2].reshape(-1).data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[3].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[4].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[5].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[6].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[7].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[8].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[9].data_ptr())),
+                ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
+                ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
+                ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),
+                ctypes.c_void_p(0 if q_norm_cpu is None else int(q_norm_cpu.data_ptr())),
+                ctypes.c_void_p(0 if k_norm_cpu is None else int(k_norm_cpu.data_ptr())),
+                ctypes.c_void_p(int(out.data_ptr())),
+                ctypes.c_longlong(seq_len),
+                ctypes.c_longlong(hidden_size),
+                ctypes.c_longlong(int(intermediate_size)),
+                ctypes.c_longlong(int(num_attention_heads)),
+                ctypes.c_longlong(int(num_key_value_heads)),
+                ctypes.c_float(float(rms_eps)),
+                ctypes.c_float(float(rope_theta)),
+            )
+        elif hasattr(self._lib, "kv_dense_layer_prefill_fp16"):
+            code = self._lib.kv_dense_layer_prefill_fp16(
+                self._handle,
+                ctypes.c_longlong(int(layer)),
+                ctypes.c_void_p(int(cpu_tensors[0].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[1].reshape(-1).data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[2].reshape(-1).data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[3].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[4].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[5].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[6].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[7].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[8].data_ptr())),
+                ctypes.c_void_p(int(cpu_tensors[9].data_ptr())),
+                ctypes.c_void_p(int(out.data_ptr())),
+                ctypes.c_longlong(seq_len),
+                ctypes.c_longlong(hidden_size),
+                ctypes.c_longlong(int(intermediate_size)),
+                ctypes.c_longlong(int(num_attention_heads)),
+                ctypes.c_longlong(int(num_key_value_heads)),
+                ctypes.c_float(float(rms_eps)),
+                ctypes.c_float(float(rope_theta)),
+            )
+        else:
+            raise RuntimeError("kv_dense_layer_prefill_fp16 is unavailable")
+        if code != 0:
+            raise RuntimeError(f"kv_dense_layer_prefill_fp16 failed with code {code}")
         return out
 
 

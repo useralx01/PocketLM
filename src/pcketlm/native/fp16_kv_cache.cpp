@@ -951,6 +951,82 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     return 0;
 }
 
+extern "C" __declspec(dllexport) int kv_dense_layer_prefill_fp16(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* input_norm_weight,
+    const uint16_t* post_norm_weight,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    const uint16_t* gate_weight,
+    const uint16_t* up_weight,
+    const uint16_t* down_weight,
+    uint16_t* out,
+    int64_t seq_len,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rms_eps,
+    float rope_theta
+) {
+    if (
+        handle == nullptr || hidden == nullptr || input_norm_weight == nullptr || post_norm_weight == nullptr ||
+        q_weight == nullptr || k_weight == nullptr || v_weight == nullptr || o_weight == nullptr ||
+        gate_weight == nullptr || up_weight == nullptr || down_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (seq_len <= 0 || hidden_size <= 0 || intermediate_size <= 0) {
+        return 2;
+    }
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (!valid_layer(session, layer)) {
+        return 3;
+    }
+    LayerKvState& state = session->layers[static_cast<size_t>(layer)];
+    if (state.committed_len + state.tentative_len + seq_len > session->max_seq_len) {
+        return 4;
+    }
+
+    for (int64_t token = 0; token < seq_len; ++token) {
+        const uint16_t* token_hidden = hidden + token * hidden_size;
+        uint16_t* token_out = out + token * hidden_size;
+        const int decode_code = kv_dense_layer_decode_fp16(
+            handle,
+            layer,
+            token_hidden,
+            input_norm_weight,
+            post_norm_weight,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+            token_out,
+            hidden_size,
+            intermediate_size,
+            num_attention_heads,
+            num_key_value_heads,
+            rms_eps,
+            rope_theta
+        );
+        if (decode_code != 0) {
+            return 100 + decode_code;
+        }
+        const int commit_code = kv_commit(handle, 1);
+        if (commit_code != 0) {
+            return 200 + commit_code;
+        }
+    }
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
     void* handle,
     int64_t layer,
@@ -1072,6 +1148,90 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
         out[dim] = write_u16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)], dtype_code);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int kv_dense_layer_prefill_u16_ext(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* input_norm_weight,
+    const uint16_t* post_norm_weight,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    const uint16_t* gate_weight,
+    const uint16_t* up_weight,
+    const uint16_t* down_weight,
+    const uint16_t* q_bias,
+    const uint16_t* k_bias,
+    const uint16_t* v_bias,
+    const uint16_t* q_norm_weight,
+    const uint16_t* k_norm_weight,
+    uint16_t* out,
+    int64_t seq_len,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rms_eps,
+    float rope_theta
+) {
+    if (
+        handle == nullptr || hidden == nullptr || input_norm_weight == nullptr || post_norm_weight == nullptr ||
+        q_weight == nullptr || k_weight == nullptr || v_weight == nullptr || o_weight == nullptr ||
+        gate_weight == nullptr || up_weight == nullptr || down_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (seq_len <= 0 || hidden_size <= 0 || intermediate_size <= 0) {
+        return 2;
+    }
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (!valid_layer(session, layer)) {
+        return 3;
+    }
+    LayerKvState& state = session->layers[static_cast<size_t>(layer)];
+    if (state.committed_len + state.tentative_len + seq_len > session->max_seq_len) {
+        return 4;
+    }
+
+    for (int64_t token = 0; token < seq_len; ++token) {
+        const int decode_code = kv_dense_layer_decode_u16_ext(
+            handle,
+            layer,
+            hidden + token * hidden_size,
+            input_norm_weight,
+            post_norm_weight,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+            q_bias,
+            k_bias,
+            v_bias,
+            q_norm_weight,
+            k_norm_weight,
+            out + token * hidden_size,
+            hidden_size,
+            intermediate_size,
+            num_attention_heads,
+            num_key_value_heads,
+            rms_eps,
+            rope_theta
+        );
+        if (decode_code != 0) {
+            return 100 + decode_code;
+        }
+        const int commit_code = kv_commit(handle, 1);
+        if (commit_code != 0) {
+            return 200 + commit_code;
+        }
     }
     return 0;
 }
