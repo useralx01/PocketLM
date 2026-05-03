@@ -4857,3 +4857,7 @@ Result: 10 passed in 2.29s
 ## Phase Native fp16 Integration / dense orchestrator option checkpoint
 Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q`
 Result: 11 passed in 2.17s
+
+## Phase Native fp16 Integration / RoPE checkpoint
+Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q`
+Result: 11 passed in 2.37s

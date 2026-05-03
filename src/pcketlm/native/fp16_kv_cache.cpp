@@ -91,17 +91,18 @@ static void apply_rope_one(
     int64_t position,
     float rope_theta
 ) {
+    const int64_t half_dim = head_dim / 2;
     for (int64_t head = 0; head < head_count; ++head) {
         float* base = values + head * head_dim;
-        for (int64_t dim = 0; dim + 1 < head_dim; dim += 2) {
+        for (int64_t dim = 0; dim < half_dim; ++dim) {
             const float inv_freq = std::pow(rope_theta, -static_cast<float>(dim) / static_cast<float>(head_dim));
             const float angle = static_cast<float>(position) * inv_freq;
             const float c = std::cos(angle);
             const float s = std::sin(angle);
             const float x0 = base[dim];
-            const float x1 = base[dim + 1];
+            const float x1 = base[dim + half_dim];
             base[dim] = x0 * c - x1 * s;
-            base[dim + 1] = x1 * c + x0 * s;
+            base[dim + half_dim] = x1 * c + x0 * s;
         }
     }
 }

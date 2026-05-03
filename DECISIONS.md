@@ -1079,3 +1079,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Extended dense native decode orchestrator with optional q/k/v projection biases and q_norm/k_norm.
 - This lets one native layer call cover Qwen2.5 dense attention bias and Qwen3-style normalized attention at the API boundary.
 - Focused tests cover BF16 dense layer decode with both options against Python reference math.
+
+## Phase Native fp16 Integration / RoPE convention fix
+- Corrected native decode RoPE from adjacent-pair rotation to the split-half rotation used by layer_bridge._apply_rotary_position_embedding.
+- Updated native tests to use the production RoPE convention.
+- This was a hard correctness blocker for routing real Qwen/Mixtral layers through native attention.
