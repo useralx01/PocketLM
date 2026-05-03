@@ -615,3 +615,5 @@ Latest: Phase C++ Q4 Dequant stopped at STOP-4. MSVC Build Tools installed, ctyp
 Latest: Phase C++ Q4 Dequant SIMD made the native kernel fast (`0.0037s` vs Python `0.0729s` on 5120x5120), and Qwen 32B Q4 improved to `63.5385s/token`, but the phase target is still not met because layer-loop tensor loading remains `56.8791s`.
 
 Phase Native fp16 Engine: partial native foundation landed; production native layer/KV path not integrated, speed targets not met.
+
+Phase Native fp16 Integration: partial; C-owned KV, decode attention, dense decode orchestrator, and GEMM tile attempt landed, but production native layer_bridge routing is blocked by BF16/fp16 precision mismatch and GEMM performance.

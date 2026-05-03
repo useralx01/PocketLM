@@ -4838,3 +4838,6 @@ python -m pytest tests/ -q
 ## Phase Native fp16 Integration / Validation V4 / KV decode sequence
 - Added stricter C-KV decode correctness: prefill 5 committed rows, decode token 6, commit, decode token 7, compare both outputs to Python full-context attention references.
 - Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 5 passed in 1.89s
+
+## Phase Native fp16 Integration / Full pytest checkpoint
+- python -m pytest tests/ -q -> 288 passed in 21.08s

@@ -233,3 +233,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Native attention is prefill-only and does not own KV cache or rollback.
 - Native matmul needs cache blocking or a better tiling strategy before model-scale routing; current 1024x1024 native=0.060882s vs torch=0.009111s.
 - Real 14B native-loader-only path is slower than runtime-pack/scoped-handle path: 37.051s for max_new_tokens=1.
+
+## Phase Native fp16 Integration / production routing blocker
+- Production routing through layer_bridge.py is not enabled because the deployed model sources are BF16 while the native orchestrator path is fp16. Direct routing would change precision and risks failing the identical greedy-token regression gate.
+- Native GEMM still loses to torch at 1024x1024 after the NR=16/FMA pass, so using it in production would likely slow model-scale layers.
+- C-owned KV/decode/orchestrator correctness is proven on isolated tiny tests, but not through the full native path in layer_bridge.py.
