@@ -1026,3 +1026,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Raw fp16/BF16 packed cache budget defaults to 50% of free RAM, capped by PCKETLM_FP16_PACKED_CACHE_CAP_MB (default 8192 MB), or explicitly by PCKETLM_FP16_PACKED_CACHE_MB.
 - Always-resident packed entries: attention tensors, router weights, embeddings, lm_head, and final norm. Other tensors evict LRU under budget.
 - The cache stores bytearray payloads rather than torch tensors so fp16/BF16 compute tensor residency remains independent.
+
+## Phase Native fp16 Engine / Deliverable C / matmul kernel
+- Native matmul uses row-major fp16 inputs and output, fp32 accumulation, AVX2/F16C conversion, and OpenMP parallelization over output rows.
+- Thread override: PCKETLM_NATIVE_THREADS controls omp_set_num_threads when set.
+- Kill switch: PCKETLM_DISABLE_NATIVE_MATMUL=1 disables the ctypes wrapper.
+- Current microbench shows the naive AVX2 row kernel beats torch at 256x256 but loses at 512x512; the next performance pass needs cache blocking/FMA or a different tiling strategy before routing real model matmuls through it.

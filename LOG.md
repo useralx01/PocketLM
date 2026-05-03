@@ -4750,3 +4750,10 @@ python -m pytest tests/ -q
 - Cache hit: no disk read; native memory-copy fills the torch tensor from cached raw bytes.
 - Kill switch: PCKETLM_DISABLE_FP16_PACKED_CACHE=1 forces per-call native disk reads.
 - Focused test: python -m pytest tests/test_tensor_residency.py tests/test_native_fp16_loader.py -q -> 39 passed in 1.86s
+
+## Phase Native fp16 Engine / Deliverable C / fp16 matmul
+- Build: python tools\build_native.py --force -> built fp16_matmul.dll with /arch:AVX2 and /openmp.
+- Focused test: python -m pytest tests/test_native_fp16_matmul.py -q -> 3 passed in 2.06s
+- Microbench smoke:
+  - size=256 native=0.000982s torch=0.002237s max_abs=0.03125
+  - size=512 native=0.005898s torch=0.002615s max_abs=0.03125

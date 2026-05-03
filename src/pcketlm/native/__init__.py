@@ -12,10 +12,13 @@ import torch
 _NATIVE_DIR = Path(__file__).resolve().parent
 _Q4_DLL = _NATIVE_DIR / "q4_dequant.dll"
 _FP16_LOADER_DLL = _NATIVE_DIR / "fp16_loader.dll"
+_FP16_MATMUL_DLL = _NATIVE_DIR / "fp16_matmul.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
 _FP16_LOADER_ERROR: Exception | None = None
+_FP16_MATMUL_LIB: ctypes.CDLL | None = None
+_FP16_MATMUL_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
@@ -24,6 +27,10 @@ def _native_disabled() -> bool:
 
 def _native_fp16_load_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP16_LOAD", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_matmul_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_MATMUL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_q4_lib() -> ctypes.CDLL | None:
@@ -108,6 +115,70 @@ def native_fp16_loader_available() -> bool:
 def native_fp16_loader_error() -> Exception | None:
     _load_fp16_loader_lib()
     return _FP16_LOADER_ERROR
+
+
+def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
+    global _FP16_MATMUL_LIB, _FP16_MATMUL_ERROR
+    if _native_matmul_disabled():
+        return None
+    if _FP16_MATMUL_LIB is not None:
+        return _FP16_MATMUL_LIB
+    if not _FP16_MATMUL_DLL.exists():
+        _FP16_MATMUL_ERROR = FileNotFoundError(str(_FP16_MATMUL_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_MATMUL_DLL))
+        lib.native_fp16_matmul.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.native_fp16_matmul.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_MATMUL_ERROR = exc
+        return None
+    _FP16_MATMUL_LIB = lib
+    _FP16_MATMUL_ERROR = None
+    return lib
+
+
+def native_fp16_matmul_available() -> bool:
+    return _load_fp16_matmul_lib() is not None
+
+
+def native_fp16_matmul_error() -> Exception | None:
+    _load_fp16_matmul_lib()
+    return _FP16_MATMUL_ERROR
+
+
+def fp16_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp16_matmul_lib()
+    if lib is None:
+        reason = "disabled" if _native_matmul_disabled() else _FP16_MATMUL_ERROR
+        raise RuntimeError(f"Native fp16 matmul is unavailable: {reason}")
+    if a.dtype != torch.float16 or b.dtype != torch.float16:
+        raise TypeError("fp16_matmul requires torch.float16 inputs")
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError("fp16_matmul requires 2D matrices")
+    if int(a.shape[1]) != int(b.shape[0]):
+        raise ValueError("fp16_matmul input shapes are incompatible")
+    a_cpu = a.detach().cpu().contiguous()
+    b_cpu = b.detach().cpu().contiguous()
+    out = torch.empty((int(a_cpu.shape[0]), int(b_cpu.shape[1])), dtype=torch.float16)
+    code = lib.native_fp16_matmul(
+        ctypes.c_void_p(int(a_cpu.data_ptr())),
+        ctypes.c_void_p(int(b_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(a_cpu.shape[0])),
+        ctypes.c_longlong(int(b_cpu.shape[1])),
+        ctypes.c_longlong(int(a_cpu.shape[1])),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_fp16_matmul failed with code {code}")
+    return out
 
 
 def native_read_tensor_bytes(path: str | Path, absolute_offset: int, nbytes: int, out: torch.Tensor) -> None:
