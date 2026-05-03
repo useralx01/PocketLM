@@ -13,12 +13,15 @@ _NATIVE_DIR = Path(__file__).resolve().parent
 _Q4_DLL = _NATIVE_DIR / "q4_dequant.dll"
 _FP16_LOADER_DLL = _NATIVE_DIR / "fp16_loader.dll"
 _FP16_MATMUL_DLL = _NATIVE_DIR / "fp16_matmul.dll"
+_FP16_ATTENTION_DLL = _NATIVE_DIR / "fp16_attention.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
 _FP16_LOADER_ERROR: Exception | None = None
 _FP16_MATMUL_LIB: ctypes.CDLL | None = None
 _FP16_MATMUL_ERROR: Exception | None = None
+_FP16_ATTENTION_LIB: ctypes.CDLL | None = None
+_FP16_ATTENTION_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
@@ -31,6 +34,10 @@ def _native_fp16_load_disabled() -> bool:
 
 def _native_matmul_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_MATMUL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_attention_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_q4_lib() -> ctypes.CDLL | None:
@@ -178,6 +185,97 @@ def fp16_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     )
     if code != 0:
         raise RuntimeError(f"native_fp16_matmul failed with code {code}")
+    return out
+
+
+def _load_fp16_attention_lib() -> ctypes.CDLL | None:
+    global _FP16_ATTENTION_LIB, _FP16_ATTENTION_ERROR
+    if _native_attention_disabled():
+        return None
+    if _FP16_ATTENTION_LIB is not None:
+        return _FP16_ATTENTION_LIB
+    if not _FP16_ATTENTION_DLL.exists():
+        _FP16_ATTENTION_ERROR = FileNotFoundError(str(_FP16_ATTENTION_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_ATTENTION_DLL))
+        lib.native_attention_prefill_fp16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_float,
+        ]
+        lib.native_attention_prefill_fp16.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_ATTENTION_ERROR = exc
+        return None
+    _FP16_ATTENTION_LIB = lib
+    _FP16_ATTENTION_ERROR = None
+    return lib
+
+
+def native_fp16_attention_available() -> bool:
+    return _load_fp16_attention_lib() is not None
+
+
+def native_fp16_attention_error() -> Exception | None:
+    _load_fp16_attention_lib()
+    return _FP16_ATTENTION_ERROR
+
+
+def attention_prefill_fp16(
+    hidden: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
+    o_weight: torch.Tensor,
+    *,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    position_offset: int = 0,
+    rope_theta: float = 10000.0,
+) -> torch.Tensor:
+    lib = _load_fp16_attention_lib()
+    if lib is None:
+        reason = "disabled" if _native_attention_disabled() else _FP16_ATTENTION_ERROR
+        raise RuntimeError(f"Native fp16 attention is unavailable: {reason}")
+    tensors = [hidden, q_weight, k_weight, v_weight, o_weight]
+    if any(tensor.dtype != torch.float16 for tensor in tensors):
+        raise TypeError("attention_prefill_fp16 requires torch.float16 tensors")
+    if hidden.ndim != 2:
+        raise ValueError("hidden must have shape [seq_len, hidden_size]")
+    seq_len = int(hidden.shape[0])
+    hidden_size = int(hidden.shape[1])
+    hidden_cpu = hidden.detach().cpu().contiguous()
+    q_cpu = q_weight.detach().cpu().contiguous()
+    k_cpu = k_weight.detach().cpu().contiguous()
+    v_cpu = v_weight.detach().cpu().contiguous()
+    o_cpu = o_weight.detach().cpu().contiguous()
+    out = torch.empty((seq_len, hidden_size), dtype=torch.float16)
+    code = lib.native_attention_prefill_fp16(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(q_cpu.data_ptr())),
+        ctypes.c_void_p(int(k_cpu.data_ptr())),
+        ctypes.c_void_p(int(v_cpu.data_ptr())),
+        ctypes.c_void_p(int(o_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(seq_len),
+        ctypes.c_longlong(hidden_size),
+        ctypes.c_longlong(int(num_attention_heads)),
+        ctypes.c_longlong(int(num_key_value_heads)),
+        ctypes.c_longlong(int(position_offset)),
+        ctypes.c_float(float(rope_theta)),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_attention_prefill_fp16 failed with code {code}")
     return out
 
 

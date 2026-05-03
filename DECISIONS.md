@@ -1035,3 +1035,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Engine / fixture source selection
 - runtime_diagnose_cli treats explicit --model-path fixture runs as fp16 by default when --source=auto. This keeps local derived q4 artifacts from unrelated real-model phases out of oracle tests.
+
+## Phase Native fp16 Engine / Deliverable D / attention boundary
+- The first native attention boundary is prefill-only and row-major fp16. It is intentionally isolated from production until decode-mode KV ownership and rollback are implemented and byte-checked.

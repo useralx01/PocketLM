@@ -4770,3 +4770,9 @@ python -m pytest tests/ -q
 - Added fp16_packed_cache_stats to full/speculative diagnostic payloads.
 - Fixture diagnostics with --model-path now force fp16 when --source=auto so stale q4 artifacts under models/<id>/artifacts/q4 do not poison tiny oracle comparisons.
 - Focused test: python -m pytest tests/test_runtime_diagnose_cli.py tests/test_native_fp16_loader.py tests/test_tensor_residency.py tests/test_native_fp16_matmul.py -q -> 53 passed in 2.81s
+
+## Phase Native fp16 Engine / Deliverable D / attention prefill kernel
+- Built fp16_attention.dll.
+- Implemented native fp16 prefill attention for tiny fixtures: Q/K/V projections, RoPE, causal softmax, context combine, output projection.
+- Focused test: python -m pytest tests/test_native_fp16_attention.py -q -> 2 passed in 2.06s
+- Limitation: this is not yet the production KV-owning attention path; decode mode and C-side KV rollback remain open.
