@@ -4900,3 +4900,9 @@ Result: 297 passed in 21.83s
 - Mixtral after exclusion did not exit early, but the one-token diagnostic exceeded the 300s command timeout.
 - Regression test: `python -m pytest tests\test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b -q` -> 1 passed in 6.33s.
 - Full test suite after guard: `python -m pytest tests/ -q` -> 297 passed in 21.76s.
+
+## Phase Native fp16 Integration / 14B four-token measurement
+- Command: `python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "The capital of France is" --max-new-tokens 4`
+- Result: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=93.8222s, avg=23.4556s/token.
+- Timings: prefill_stack_op_load_tensors=15.9863s, continuation_stack_op_load_tensors=58.2073s, continuation_stack_op_native_layer=9.5048s, continuation_decode_tail=4.5173s.
+- Full test suite after measurement/doc update: `python -m pytest tests/ -q` -> 297 passed in 26.21s.

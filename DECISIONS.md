@@ -1111,3 +1111,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Kept the existing explicit exclusions for Qwen 32B and Qwen3-30B-A3B until separate measurements prove the larger-model memory behavior is safe.
 - Added Mixtral to the explicit auto-exclusion set after a forced scoped-handle run exited after the diagnostic `before` row with no Python traceback.
 - Evidence: 14B two-token smoke dropped from 101.7645s to 39.1632s with identical `Hello!` output and 96/96 layer execution.
+
+## Phase Native fp16 Integration / remaining dense bottleneck
+- 14B four-token measurement with scoped handles and native dense decode still averages 23.4556s/token.
+- Continuation native layer compute for three continuation tokens was 9.5048s total, but continuation tensor loading was 58.2073s.
+- The next required speed fix is not more C KV plumbing; it is eliminating repeated per-token fp16 weight materialization for dense layers, or switching dense models to a speculative/quantized path.
