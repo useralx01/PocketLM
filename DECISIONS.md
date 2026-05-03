@@ -1093,3 +1093,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / fp16 packed cache budget
 - Fixed fp16 packed-cache budget to be computed once per cache lifetime instead of shrinking as RAM is consumed by the cache itself.
 - Real 14B smoke after fix: budget stayed at 4627167232 bytes instead of shrinking during fill. Load time still dominates because the default budget cannot hold all dense MLP weights.
+
+## Phase Native fp16 Integration / selected MoE boundary
+- Full native router+all-expert MoE is not a good production boundary for paged MoE because it would require materializing every expert.
+- Chosen boundary: Python computes router/top-k and loads only selected experts; native selected-MoE computes the selected FFNs and weighted combine.
+- This keeps the paged runtime's IO savings while moving expert math out of Python for decode.

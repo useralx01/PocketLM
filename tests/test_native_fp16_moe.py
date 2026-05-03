@@ -87,3 +87,31 @@ def test_native_moe_kill_switch(monkeypatch) -> None:
         assert "unavailable" in str(exc)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("PCKETLM_DISABLE_NATIVE_MOE did not disable MoE")
+
+
+def test_native_moe_selected_forward_matches_python_bfloat16() -> None:
+    from pcketlm.native import moe_selected_forward_u16, native_fp16_moe_available
+
+    assert native_fp16_moe_available() is True
+    torch.manual_seed(888)
+    seq_len = 2
+    hidden_size = 8
+    selected = 3
+    intermediate_size = 12
+    hidden = (torch.randn((seq_len, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    gate = (torch.randn((selected, intermediate_size, hidden_size), dtype=torch.float32) * 0.15).to(torch.bfloat16)
+    up = (torch.randn((selected, intermediate_size, hidden_size), dtype=torch.float32) * 0.15).to(torch.bfloat16)
+    down = (torch.randn((selected, hidden_size, intermediate_size), dtype=torch.float32) * 0.15).to(torch.bfloat16)
+    route = torch.softmax(torch.randn((seq_len, selected), dtype=torch.float32), dim=-1)
+
+    native = moe_selected_forward_u16(hidden, gate, up, down, route)
+    expected = torch.zeros((seq_len, hidden_size), dtype=torch.float32)
+    for token in range(seq_len):
+        for rank in range(selected):
+            gate_out = F.linear(hidden[token : token + 1].float(), gate[rank].float())
+            up_out = F.linear(hidden[token : token + 1].float(), up[rank].float())
+            down_out = F.linear(F.silu(gate_out) * up_out, down[rank].float()).reshape(-1)
+            expected[token] += route[token, rank] * down_out
+
+    assert native.dtype == torch.bfloat16
+    assert torch.allclose(native.float(), expected.to(torch.bfloat16).float(), atol=3e-2, rtol=3e-2)

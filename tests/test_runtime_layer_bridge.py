@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -333,6 +334,50 @@ def test_run_moe_mlp_routes_top_k_experts_with_real_math() -> None:
     assert touched == [0, 1]
     assert selected.tolist() == [[[1, 0]]]
     assert torch.allclose(output, expected, atol=1e-6)
+
+
+def test_run_moe_mlp_native_selected_path_matches_python_bfloat16() -> None:
+    torch.manual_seed(222)
+    hidden = (torch.randn((1, 1, 4), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    router_weight = torch.tensor(
+        [
+            [4.0, 0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.bfloat16,
+    )
+    expert_tensors = {}
+    for expert in (0, 1, 2):
+        expert_tensors[expert] = {
+            "gate_proj": (torch.randn((6, 4), dtype=torch.float32) * 0.15).to(torch.bfloat16),
+            "up_proj": (torch.randn((6, 4), dtype=torch.float32) * 0.15).to(torch.bfloat16),
+            "down_proj": (torch.randn((4, 6), dtype=torch.float32) * 0.15).to(torch.bfloat16),
+        }
+
+    native_output, touched, selected = _run_moe_mlp(
+        hidden_states=hidden,
+        router_weight=router_weight,
+        expert_tensors=expert_tensors,
+        top_k=2,
+        norm_topk_prob=True,
+    )
+
+    router_probs = torch.softmax(F.linear(hidden.float(), router_weight.float()), dim=-1)
+    weights, expected_selected = torch.topk(router_probs, 2, dim=-1)
+    weights = weights / weights.sum(dim=-1, keepdim=True)
+    expected = torch.zeros_like(hidden.float())
+    for rank, expert in enumerate(expected_selected.reshape(-1).tolist()):
+        tensors = expert_tensors[int(expert)]
+        expert_hidden = F.silu(F.linear(hidden.float(), tensors["gate_proj"].float())) * F.linear(
+            hidden.float(),
+            tensors["up_proj"].float(),
+        )
+        expected += F.linear(expert_hidden, tensors["down_proj"].float()) * weights[..., rank : rank + 1]
+
+    assert touched == sorted({int(value) for value in expected_selected.reshape(-1).tolist()})
+    assert torch.equal(selected, expected_selected)
+    assert torch.allclose(native_output.float(), expected.to(torch.bfloat16).float(), atol=3e-2, rtol=3e-2)
 
 
 def _bootstrap_layer_bridge_fixture(

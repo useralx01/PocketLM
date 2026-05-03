@@ -329,6 +329,20 @@ def _load_fp16_moe_lib() -> ctypes.CDLL | None:
             ctypes.c_int,
         ]
         lib.native_moe_forward_fp16.restype = ctypes.c_int
+        lib.native_moe_selected_forward_u16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_int,
+        ]
+        lib.native_moe_selected_forward_u16.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP16_MOE_ERROR = exc
         return None
@@ -398,6 +412,55 @@ def moe_forward_fp16(
     if code != 0:
         raise RuntimeError(f"native_moe_forward_fp16 failed with code {code}")
     return out, selected_experts, selected_weights
+
+
+def moe_selected_forward_u16(
+    hidden: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp16_moe_lib()
+    if lib is None:
+        reason = "disabled" if _native_moe_disabled() else _FP16_MOE_ERROR
+        raise RuntimeError(f"Native fp16 MoE is unavailable: {reason}")
+    dtype_code = _u16_storage_dtype_code(hidden.dtype)
+    tensors = [hidden, gate_weight, up_weight, down_weight]
+    if any(tensor.dtype != hidden.dtype for tensor in tensors):
+        raise TypeError(f"moe_selected_forward_u16 requires all model tensors to share dtype {hidden.dtype}")
+    if hidden.ndim != 2:
+        raise ValueError("hidden must have shape [seq_len, hidden_size]")
+    if gate_weight.ndim != 3 or up_weight.ndim != 3 or down_weight.ndim != 3:
+        raise ValueError("selected expert weights must be rank-3")
+    seq_len = int(hidden.shape[0])
+    hidden_size = int(hidden.shape[1])
+    selected_count = int(gate_weight.shape[0])
+    intermediate_size = int(gate_weight.shape[1])
+    if route_weights.shape != (seq_len, selected_count):
+        raise ValueError("route_weights must have shape [seq_len, selected_count]")
+    hidden_cpu = hidden.detach().cpu().contiguous()
+    gate_cpu = gate_weight.detach().cpu().contiguous()
+    up_cpu = up_weight.detach().cpu().contiguous()
+    down_cpu = down_weight.detach().cpu().contiguous()
+    route_cpu = route_weights.detach().cpu().contiguous().to(torch.float32)
+    out = torch.empty((seq_len, hidden_size), dtype=hidden.dtype)
+    code = lib.native_moe_selected_forward_u16(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(gate_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_cpu.data_ptr())),
+        ctypes.c_void_p(int(route_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(seq_len),
+        ctypes.c_longlong(hidden_size),
+        ctypes.c_longlong(selected_count),
+        ctypes.c_longlong(intermediate_size),
+        ctypes.c_int(dtype_code),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_moe_selected_forward_u16 failed with code {code}")
+    return out
 
 
 def _load_fp16_kv_lib() -> ctypes.CDLL | None:

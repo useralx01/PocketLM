@@ -841,6 +841,40 @@ def _run_moe_mlp(
     if norm_topk_prob:
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
+    if (
+        hidden_states.ndim == 3
+        and list(hidden_states.shape[:2]) == [1, 1]
+        and output_dtype in {torch.float16, torch.bfloat16}
+        and os.environ.get("PCKETLM_DISABLE_NATIVE_MOE", "").strip().lower() not in {"1", "true", "yes", "on"}
+    ):
+        selected_ids = [int(value) for value in selected_experts.reshape(-1).tolist()]
+        if all(expert_id in expert_tensors for expert_id in selected_ids):
+            try:
+                from pcketlm.native import moe_selected_forward_u16
+
+                gate_stack = torch.stack(
+                    [expert_tensors[expert_id]["gate_proj"].to(dtype=output_dtype) for expert_id in selected_ids],
+                    dim=0,
+                )
+                up_stack = torch.stack(
+                    [expert_tensors[expert_id]["up_proj"].to(dtype=output_dtype) for expert_id in selected_ids],
+                    dim=0,
+                )
+                down_stack = torch.stack(
+                    [expert_tensors[expert_id]["down_proj"].to(dtype=output_dtype) for expert_id in selected_ids],
+                    dim=0,
+                )
+                native_out = moe_selected_forward_u16(
+                    hidden_states.reshape(1, -1).to(dtype=output_dtype),
+                    gate_stack,
+                    up_stack,
+                    down_stack,
+                    routing_weights.reshape(1, -1).float(),
+                )
+                return native_out.view_as(hidden_states), sorted(set(selected_ids)), selected_experts
+            except Exception:
+                pass
+
     combined = torch.zeros_like(hidden_states.float())
     touched: set[int] = set()
     for expert_index, tensors in expert_tensors.items():
