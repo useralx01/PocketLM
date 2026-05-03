@@ -126,6 +126,31 @@ static void rms_norm_one(
     }
 }
 
+static void rms_norm_heads_inplace(
+    float* values,
+    const uint16_t* weight,
+    int64_t head_count,
+    int64_t head_dim,
+    float eps,
+    int dtype_code
+) {
+    if (weight == nullptr) {
+        return;
+    }
+    for (int64_t head = 0; head < head_count; ++head) {
+        float* base = values + head * head_dim;
+        float mean_square = 0.0f;
+        for (int64_t dim = 0; dim < head_dim; ++dim) {
+            mean_square += base[dim] * base[dim];
+        }
+        mean_square /= static_cast<float>(head_dim);
+        const float scale = 1.0f / std::sqrt(mean_square + eps);
+        for (int64_t dim = 0; dim < head_dim; ++dim) {
+            base[dim] = base[dim] * scale * read_u16(weight[dim], dtype_code);
+        }
+    }
+}
+
 static uint16_t* floats_to_u16_buffer(const std::vector<float>& values, std::vector<uint16_t>& storage, int dtype_code) {
     storage.resize(values.size());
     for (size_t index = 0; index < values.size(); ++index) {
@@ -442,11 +467,14 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
     const uint16_t* q_bias,
     const uint16_t* k_bias,
     const uint16_t* v_bias,
+    const uint16_t* q_norm_weight,
+    const uint16_t* k_norm_weight,
     uint16_t* out,
     int64_t hidden_size,
     int64_t num_attention_heads,
     int64_t num_key_value_heads,
-    float rope_theta
+    float rope_theta,
+    float rms_eps
 ) {
     KvSession* session = reinterpret_cast<KvSession*>(handle);
     if (
@@ -479,6 +507,8 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
     linear_one(hidden, q_weight, q_bias, q.data(), hidden_size, hidden_size, session->dtype_code);
     linear_one(hidden, k_weight, k_bias, k.data(), hidden_size, kv_width, session->dtype_code);
     linear_one(hidden, v_weight, v_bias, v.data(), hidden_size, kv_width, session->dtype_code);
+    rms_norm_heads_inplace(q.data(), q_norm_weight, num_attention_heads, head_dim, rms_eps, session->dtype_code);
+    rms_norm_heads_inplace(k.data(), k_norm_weight, num_key_value_heads, head_dim, rms_eps, session->dtype_code);
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 

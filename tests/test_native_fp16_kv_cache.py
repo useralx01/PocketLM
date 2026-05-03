@@ -31,6 +31,9 @@ def _reference_decode(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
+    q_norm_weight: torch.Tensor | None = None,
+    k_norm_weight: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hidden_size = hidden.numel()
     head_dim = hidden_size // num_heads
@@ -38,6 +41,10 @@ def _reference_decode(
     q = F.linear(hidden.float().reshape(1, -1), q_weight.float(), None if q_bias is None else q_bias.float()).reshape(num_heads, head_dim)
     k_new = F.linear(hidden.float().reshape(1, -1), k_weight.float(), None if k_bias is None else k_bias.float()).reshape(num_kv_heads, head_dim)
     v_new = F.linear(hidden.float().reshape(1, -1), v_weight.float(), None if v_bias is None else v_bias.float()).reshape(num_kv_heads, head_dim)
+    if q_norm_weight is not None:
+        q = q * torch.rsqrt(q.pow(2).mean(dim=-1, keepdim=True) + rms_eps) * q_norm_weight.float().view(1, -1)
+    if k_norm_weight is not None:
+        k_new = k_new * torch.rsqrt(k_new.pow(2).mean(dim=-1, keepdim=True) + rms_eps) * k_norm_weight.float().view(1, -1)
     q = _rope_one(q, position, num_heads, head_dim, rope_theta)
     k_new = _rope_one(k_new, position, num_kv_heads, head_dim, rope_theta)
     all_k = torch.cat([prefix_k.float().reshape(-1, num_kv_heads, head_dim), k_new.reshape(1, num_kv_heads, head_dim)])
@@ -261,6 +268,64 @@ def test_native_attention_decode_matches_python_with_projection_biases() -> None
     )
     k_all, v_all = session.copy_layer(0)
     assert native.dtype == torch.bfloat16
+    assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=3e-2, rtol=3e-2)
+    assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=3e-2, rtol=3e-2)
+    assert torch.allclose(native.float(), expected.float(), atol=3e-2, rtol=3e-2)
+    session.close()
+
+
+def test_native_attention_decode_matches_python_with_qk_norm() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(8642)
+    hidden_size = 16
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = hidden_size // num_heads
+    kv_width = head_dim * num_kv_heads
+    session = NativeKvSession(layer_count=1, max_seq_len=8, kv_width=kv_width, dtype=torch.bfloat16)
+    prefix_k = torch.randn((2, kv_width), dtype=torch.float32).to(torch.bfloat16)
+    prefix_v = torch.randn((2, kv_width), dtype=torch.float32).to(torch.bfloat16)
+    hidden = torch.randn((hidden_size,), dtype=torch.float32).to(torch.bfloat16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    q_norm = (torch.rand((head_dim,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+    k_norm = (torch.rand((head_dim,), dtype=torch.float32) + 0.5).to(torch.bfloat16)
+    session.append_committed(0, prefix_k, prefix_v, count=2)
+
+    native = session.attention_decode_fp16(
+        0,
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rope_theta=10000.0,
+        q_norm_weight=q_norm,
+        k_norm_weight=k_norm,
+        rms_eps=1e-6,
+    )
+    expected, k_new, v_new = _reference_decode(
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        prefix_k,
+        prefix_v,
+        position=2,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rope_theta=10000.0,
+        q_norm_weight=q_norm,
+        k_norm_weight=k_norm,
+        rms_eps=1e-6,
+    )
+    k_all, v_all = session.copy_layer(0)
     assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=3e-2, rtol=3e-2)
     assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=3e-2, rtol=3e-2)
     assert torch.allclose(native.float(), expected.float(), atol=3e-2, rtol=3e-2)

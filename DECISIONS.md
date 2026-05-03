@@ -1069,3 +1069,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Added optional q/k/v projection bias pointers to the native KV decode attention path.
 - Qwen2.5 dense models require these biases; production routing without them would be mathematically wrong.
 - Focused tests cover BF16 native decode with projection biases against the Python reference.
+
+## Phase Native fp16 Integration / qk norm unblocker
+- Added optional q_norm/k_norm pointers to the native decode attention path.
+- Qwen3 attention requires per-head RMS normalization before RoPE; without this, native Qwen3/MoE routing would diverge at attention.
+- Focused tests cover BF16 decode with q/k norm against the Python reference.

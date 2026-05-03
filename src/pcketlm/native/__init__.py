@@ -465,9 +465,12 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
             ctypes.c_longlong,
             ctypes.c_longlong,
             ctypes.c_longlong,
+            ctypes.c_float,
             ctypes.c_float,
         ]
         lib.kv_attention_decode_u16_ext.restype = ctypes.c_int
@@ -620,9 +623,12 @@ class NativeKvSession:
         q_bias: torch.Tensor | None = None,
         k_bias: torch.Tensor | None = None,
         v_bias: torch.Tensor | None = None,
+        q_norm_weight: torch.Tensor | None = None,
+        k_norm_weight: torch.Tensor | None = None,
+        rms_eps: float = 1e-6,
     ) -> torch.Tensor:
         tensors = [hidden, q_weight, k_weight, v_weight, o_weight]
-        for optional in (q_bias, k_bias, v_bias):
+        for optional in (q_bias, k_bias, v_bias, q_norm_weight, k_norm_weight):
             if optional is not None:
                 tensors.append(optional)
         if any(tensor.dtype != self.dtype for tensor in tensors):
@@ -635,6 +641,8 @@ class NativeKvSession:
         q_bias_cpu = None if q_bias is None else q_bias.detach().cpu().contiguous().reshape(-1)
         k_bias_cpu = None if k_bias is None else k_bias.detach().cpu().contiguous().reshape(-1)
         v_bias_cpu = None if v_bias is None else v_bias.detach().cpu().contiguous().reshape(-1)
+        q_norm_cpu = None if q_norm_weight is None else q_norm_weight.detach().cpu().contiguous().reshape(-1)
+        k_norm_cpu = None if k_norm_weight is None else k_norm_weight.detach().cpu().contiguous().reshape(-1)
         hidden_size = int(hidden_cpu.numel())
         out = torch.empty((hidden_size,), dtype=self.dtype)
         code = self._lib.kv_attention_decode_u16_ext(
@@ -648,11 +656,14 @@ class NativeKvSession:
             ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
             ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
             ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if q_norm_cpu is None else int(q_norm_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_norm_cpu is None else int(k_norm_cpu.data_ptr())),
             ctypes.c_void_p(int(out.data_ptr())),
             ctypes.c_longlong(hidden_size),
             ctypes.c_longlong(int(num_attention_heads)),
             ctypes.c_longlong(int(num_key_value_heads)),
             ctypes.c_float(float(rope_theta)),
+            ctypes.c_float(float(rms_eps)),
         )
         if code != 0:
             raise RuntimeError(f"kv_attention_decode_fp16 failed with code {code}")
