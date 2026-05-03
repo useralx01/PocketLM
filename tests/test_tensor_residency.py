@@ -129,6 +129,24 @@ def test_fp16_packed_cache_lru_evicts_under_budget(tmp_path: Path, monkeypatch) 
     assert stats.resident_count <= 1
 
 
+def test_fp16_packed_cache_budget_is_fixed_for_cache_lifetime(monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.delenv("PCKETLM_FP16_PACKED_CACHE_MB", raising=False)
+    monkeypatch.setenv("PCKETLM_FP16_PACKED_CACHE_CAP_MB", "8192")
+    free_values = iter([8 * 1024**3, 2 * 1024**3])
+    monkeypatch.setattr(
+        "pcketlm.core.runtime.tensor_residency._free_memory_bytes",
+        lambda: next(free_values),
+    )
+    from pcketlm.core.runtime import tensor_residency as residency_module
+
+    first = residency_module._fp16_packed_cache_budget_bytes()
+    second = residency_module._fp16_packed_cache_budget_bytes()
+
+    assert first == 4 * 1024**3
+    assert second == first
+
+
 def test_fp16_packed_cache_kill_switch_forces_disk_read(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.setenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", "1")

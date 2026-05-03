@@ -1084,3 +1084,12 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Corrected native decode RoPE from adjacent-pair rotation to the split-half rotation used by layer_bridge._apply_rotary_position_embedding.
 - Updated native tests to use the production RoPE convention.
 - This was a hard correctness blocker for routing real Qwen/Mixtral layers through native attention.
+
+## Phase Native fp16 Integration / dense bridge dispatch
+- The first production routing slice is dense single-token decode. It falls back to Python for prefill, MoE, non-BF16/FP16 math, and missing native modules.
+- 14B smoke proved the path executes: diagnostic timings include continuation_stack_op_native_layer.
+- Remaining dominant bottleneck after routing is tensor load orchestration, not native layer math.
+
+## Phase Native fp16 Integration / fp16 packed cache budget
+- Fixed fp16 packed-cache budget to be computed once per cache lifetime instead of shrinking as RAM is consumed by the cache itself.
+- Real 14B smoke after fix: budget stayed at 4627167232 bytes instead of shrinking during fill. Load time still dominates because the default budget cannot hold all dense MLP weights.

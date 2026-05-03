@@ -296,6 +296,7 @@ _stats = TensorResidencyStats()
 _fp16_packed_stats = Fp16PackedCacheStats()
 _resident_bytes = 0
 _fp16_packed_cache_bytes = 0
+_fp16_packed_cache_budget_cached: int | None = None
 _resident_expert_bytes = 0
 _residency_step = 0
 _expert_activation_counts: dict[tuple[int, int], int] = {}
@@ -419,14 +420,19 @@ def _fp16_packed_cache_enabled() -> bool:
 
 
 def _fp16_packed_cache_budget_bytes() -> int:
+    global _fp16_packed_cache_budget_cached
     explicit_mb = _env_int("PCKETLM_FP16_PACKED_CACHE_MB", -1)
     if explicit_mb >= 0:
         return max(0, explicit_mb) * 1024 * 1024
+    if _fp16_packed_cache_budget_cached is not None:
+        return _fp16_packed_cache_budget_cached
     cap_mb = max(0, _env_int("PCKETLM_FP16_PACKED_CACHE_CAP_MB", DEFAULT_FP16_PACKED_CACHE_CAP_MB))
     free_bytes = _free_memory_bytes()
     if free_bytes is None:
-        return cap_mb * 1024 * 1024
-    return min(int(free_bytes * 0.5), cap_mb * 1024 * 1024)
+        _fp16_packed_cache_budget_cached = cap_mb * 1024 * 1024
+    else:
+        _fp16_packed_cache_budget_cached = min(int(free_bytes * 0.5), cap_mb * 1024 * 1024)
+    return _fp16_packed_cache_budget_cached
 
 
 def _is_fp16_packed_always_resident(entry: TensorCatalogEntry) -> bool:
@@ -503,11 +509,12 @@ def fp16_packed_cache_get_or_read(
 
 def clear_fp16_packed_cache() -> None:
     """Release raw fp16/BF16 packed bytes and reset packed-cache counters."""
-    global _fp16_packed_cache_bytes, _fp16_packed_stats
+    global _fp16_packed_cache_bytes, _fp16_packed_stats, _fp16_packed_cache_budget_cached
     with _cache_lock:
         _fp16_packed_cache.clear()
         _fp16_packed_cache_bytes = 0
         _fp16_packed_stats = Fp16PackedCacheStats()
+        _fp16_packed_cache_budget_cached = None
 
 
 def fp16_packed_cache_stats() -> Fp16PackedCacheStats:

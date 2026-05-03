@@ -208,6 +208,82 @@ def test_layer_prefetch_starts_next_load_before_current_compute_finishes(monkeyp
     assert load_start < compute_end
 
 
+def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) -> None:
+    hidden_size = 8
+    intermediate_size = 16
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = hidden_size // num_heads
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-dense-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=0,
+        num_experts_per_tok=0,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(321)
+    tensors = {
+        "input_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "post_attention_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.gate_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.up_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "mlp.down_proj.weight": (torch.randn((hidden_size, intermediate_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.q_proj.bias": (torch.randn((hidden_size,)) * 0.01).to(torch.bfloat16),
+        "self_attn.k_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
+        "self_attn.v_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
+    }
+
+    def fake_exists(_model_id, tensor_name):
+        return any(tensor_name.endswith(suffix) for suffix in tensors)
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        loaded = {}
+        for name in tensor_names:
+            suffix = next(suffix for suffix in tensors if name.endswith(suffix))
+            loaded[name] = SimpleNamespace(ready=True, tensor=tensors[suffix], blockers=[])
+        return loaded
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+
+    timings: dict[str, float] = {}
+    result = layer_bridge_module._try_native_dense_decode_bridge(
+        "native-dense-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        (
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+        ),
+        config,
+        tensor_policy=None,
+        collect_metrics=True,
+        timings=timings,
+    )
+
+    assert result is not None
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert result.output_tensor.shape == (1, 1, hidden_size)
+    assert result.next_kv_cache is not None
+    assert result.next_kv_cache[0].shape == (1, num_kv_heads, 3, head_dim)
+    assert "native_layer" in result.timings
+
+
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
     text, marker = _trim_generated_text_at_stop_string("Hello<|im_end|>ignored", ["<|im_end|>"])
 

@@ -4861,3 +4861,8 @@ Result: 11 passed in 2.17s
 ## Phase Native fp16 Integration / RoPE checkpoint
 Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q`
 Result: 11 passed in 2.37s
+
+## Phase Native fp16 Integration / dense bridge dispatch checkpoint
+- Added guarded production dispatch for dense single-token layer calls: native layer path is used only for dense configs, BF16/FP16 runtime dtype, batch=1, seq=1, and available native KV module.
+- Fixed native past-KV reshape for Python cache shape [1, num_kv_heads, seq, head_dim] -> native [seq, kv_width].
+- Real 14B smoke: `--slice=full`, prompt `Hello`, max_new_tokens=2. Result ready=true, layers_executed=96/96, generated_text=`Hello!`, continuation_stack_op_native_layer=3.8646s, continuation_stack_op_load_tensors=39.1401s, total=98.4868s. Native layer path is active but load remains dominant.

@@ -617,3 +617,5 @@ Latest: Phase C++ Q4 Dequant SIMD made the native kernel fast (`0.0037s` vs Pyth
 Phase Native fp16 Engine: partial native foundation landed; production native layer/KV path not integrated, speed targets not met.
 
 Phase Native fp16 Integration: partial; C-owned KV, decode attention, dense decode orchestrator, and GEMM tile attempt landed, but production native layer_bridge routing is blocked by BF16/fp16 precision mismatch and GEMM performance.
+
+Phase Native fp16 Integration: partial; dense single-token native layer routing active for Qwen2.5 BF16, 14B smoke coherent with 96/96 layers, but load orchestration still dominates and MoE/speculative native routing remains incomplete.
