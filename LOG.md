@@ -4783,3 +4783,6 @@ python -m pytest tests/ -q
 - Wrapper returns selected_experts and selected_weights for telemetry wiring.
 - Focused test: python -m pytest tests/test_native_fp16_moe.py -q -> 2 passed in 2.15s
 - Limitation: not yet wired into the production layer bridge.
+
+## Phase Native fp16 Engine / Full pytest checkpoint
+- python -m pytest tests/ -q -> 282 passed in 21.10s
