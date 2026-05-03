@@ -667,3 +667,119 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     }
     return 0;
 }
+
+extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* input_norm_weight,
+    const uint16_t* post_norm_weight,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    const uint16_t* gate_weight,
+    const uint16_t* up_weight,
+    const uint16_t* down_weight,
+    const uint16_t* q_bias,
+    const uint16_t* k_bias,
+    const uint16_t* v_bias,
+    const uint16_t* q_norm_weight,
+    const uint16_t* k_norm_weight,
+    uint16_t* out,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rms_eps,
+    float rope_theta
+) {
+    if (
+        handle == nullptr || hidden == nullptr || input_norm_weight == nullptr || post_norm_weight == nullptr ||
+        q_weight == nullptr || k_weight == nullptr || v_weight == nullptr || o_weight == nullptr ||
+        gate_weight == nullptr || up_weight == nullptr || down_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (hidden_size <= 0 || intermediate_size <= 0) {
+        return 2;
+    }
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (session == nullptr) {
+        return 3;
+    }
+    const int dtype_code = session->dtype_code;
+
+    std::vector<float> input_norm(static_cast<size_t>(hidden_size), 0.0f);
+    rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps, dtype_code);
+    std::vector<uint16_t> input_norm_storage;
+    std::vector<uint16_t> attention_out(static_cast<size_t>(hidden_size), 0);
+    const int attention_code = kv_attention_decode_u16_ext(
+        handle,
+        layer,
+        floats_to_u16_buffer(input_norm, input_norm_storage, dtype_code),
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        q_bias,
+        k_bias,
+        v_bias,
+        q_norm_weight,
+        k_norm_weight,
+        attention_out.data(),
+        hidden_size,
+        num_attention_heads,
+        num_key_value_heads,
+        rope_theta,
+        rms_eps
+    );
+    if (attention_code != 0) {
+        return 100 + attention_code;
+    }
+
+    std::vector<float> residual_after_attention(static_cast<size_t>(hidden_size), 0.0f);
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        residual_after_attention[static_cast<size_t>(dim)] =
+            read_u16(hidden[dim], dtype_code) + read_u16(attention_out[static_cast<size_t>(dim)], dtype_code);
+    }
+
+    std::vector<uint16_t> residual_storage;
+    std::vector<float> post_norm(static_cast<size_t>(hidden_size), 0.0f);
+    rms_norm_one(
+        floats_to_u16_buffer(residual_after_attention, residual_storage, dtype_code),
+        post_norm_weight,
+        post_norm.data(),
+        hidden_size,
+        rms_eps,
+        dtype_code
+    );
+
+    std::vector<uint16_t> post_norm_storage;
+    uint16_t* post_norm_ptr = floats_to_u16_buffer(post_norm, post_norm_storage, dtype_code);
+    std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
+    linear_one(post_norm_ptr, gate_weight, nullptr, gate.data(), hidden_size, intermediate_size, dtype_code);
+    linear_one(post_norm_ptr, up_weight, nullptr, up.data(), hidden_size, intermediate_size, dtype_code);
+
+    std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
+    for (int64_t dim = 0; dim < intermediate_size; ++dim) {
+        const float g = gate[static_cast<size_t>(dim)];
+        activated[static_cast<size_t>(dim)] = (g / (1.0f + std::exp(-g))) * up[static_cast<size_t>(dim)];
+    }
+
+    std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < hidden_size; ++row) {
+        float acc = 0.0f;
+        for (int64_t col = 0; col < intermediate_size; ++col) {
+            acc += activated[static_cast<size_t>(col)] * read_u16(down_weight[row * intermediate_size + col], dtype_code);
+        }
+        mlp_out[static_cast<size_t>(row)] = acc;
+    }
+
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        out[dim] = write_u16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)], dtype_code);
+    }
+    return 0;
+}

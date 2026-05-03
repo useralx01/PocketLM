@@ -1074,3 +1074,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Added optional q_norm/k_norm pointers to the native decode attention path.
 - Qwen3 attention requires per-head RMS normalization before RoPE; without this, native Qwen3/MoE routing would diverge at attention.
 - Focused tests cover BF16 decode with q/k norm against the Python reference.
+
+## Phase Native fp16 Integration / dense orchestrator option unblocker
+- Extended dense native decode orchestrator with optional q/k/v projection biases and q_norm/k_norm.
+- This lets one native layer call cover Qwen2.5 dense attention bias and Qwen3-style normalized attention at the API boundary.
+- Focused tests cover BF16 dense layer decode with both options against Python reference math.
