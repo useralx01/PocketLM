@@ -277,7 +277,7 @@ def test_live_handle_tensor_can_skip_hot_path_clone(tmp_path: Path, monkeypatch)
     )
 
     monkeypatch.delenv("PCKETLM_DISABLE_ZERO_COPY_TENSORS", raising=False)
-    monkeypatch.setenv("PCKETLM_ENABLE_ZERO_COPY_TENSORS", "1")
+    monkeypatch.delenv("PCKETLM_ENABLE_ZERO_COPY_TENSORS", raising=False)
     monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
     monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", lambda *_args: loaded)
 

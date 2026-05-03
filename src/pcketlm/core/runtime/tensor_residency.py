@@ -596,7 +596,7 @@ def _loaded_slice_with_tensor(loaded: LoadedTensorSlice, tensor: torch.Tensor) -
 def _zero_copy_hot_tensors_enabled() -> bool:
     if os.environ.get("PCKETLM_DISABLE_ZERO_COPY_TENSORS", "0").strip().lower() in {"1", "true", "yes"}:
         return False
-    return os.environ.get("PCKETLM_ENABLE_ZERO_COPY_TENSORS", "0").strip().lower() in {"1", "true", "yes"}
+    return os.environ.get("PCKETLM_ENABLE_ZERO_COPY_TENSORS", "1").strip().lower() in {"1", "true", "yes"}
 
 
 def _hot_tensor_for_compute(loaded: LoadedTensorSlice, dtype: torch.dtype) -> torch.Tensor:

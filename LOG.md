@@ -4906,3 +4906,10 @@ Result: 297 passed in 21.83s
 - Result: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=93.8222s, avg=23.4556s/token.
 - Timings: prefill_stack_op_load_tensors=15.9863s, continuation_stack_op_load_tensors=58.2073s, continuation_stack_op_native_layer=9.5048s, continuation_decode_tail=4.5173s.
 - Full test suite after measurement/doc update: `python -m pytest tests/ -q` -> 297 passed in 26.21s.
+
+## Phase Native fp16 Integration / zero-copy hot tensors default
+- Changed live-handle borrowed tensors to skip hot-path clone by default; `PCKETLM_DISABLE_ZERO_COPY_TENSORS=1` remains the kill switch.
+- Focused tests: `python -m pytest tests\test_tensor_residency.py::test_live_handle_tensor_can_skip_hot_path_clone tests\test_tensor_residency.py::test_zero_copy_kill_switch_restores_clone_for_live_handle_tensor -q` -> 2 passed in 2.55s.
+- Real 14B four-token rerun: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=85.5693s, avg=21.3923s/token.
+- Timing shift: continuation_stack_op_load_tensors=4.5166s, continuation_stack_op_native_layer=49.6078s. The clone/page-touch cost moved from load timing into layer execution; total improved by 8.2529s vs the previous four-token row.
+- Full test suite: `python -m pytest tests/ -q` -> 297 passed in 25.64s.
