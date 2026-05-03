@@ -4776,3 +4776,10 @@ python -m pytest tests/ -q
 - Implemented native fp16 prefill attention for tiny fixtures: Q/K/V projections, RoPE, causal softmax, context combine, output projection.
 - Focused test: python -m pytest tests/test_native_fp16_attention.py -q -> 2 passed in 2.06s
 - Limitation: this is not yet the production KV-owning attention path; decode mode and C-side KV rollback remain open.
+
+## Phase Native fp16 Engine / Deliverable E / MoE kernel
+- Built fp16_moe.dll.
+- Implemented isolated native fp16 MoE forward for tiny tensors: router logits, softmax, top-k expert selection, optional top-k normalization, expert gate/up/down FFN, weighted combine.
+- Wrapper returns selected_experts and selected_weights for telemetry wiring.
+- Focused test: python -m pytest tests/test_native_fp16_moe.py -q -> 2 passed in 2.15s
+- Limitation: not yet wired into the production layer bridge.

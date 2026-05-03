@@ -14,6 +14,7 @@ _Q4_DLL = _NATIVE_DIR / "q4_dequant.dll"
 _FP16_LOADER_DLL = _NATIVE_DIR / "fp16_loader.dll"
 _FP16_MATMUL_DLL = _NATIVE_DIR / "fp16_matmul.dll"
 _FP16_ATTENTION_DLL = _NATIVE_DIR / "fp16_attention.dll"
+_FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
@@ -22,6 +23,8 @@ _FP16_MATMUL_LIB: ctypes.CDLL | None = None
 _FP16_MATMUL_ERROR: Exception | None = None
 _FP16_ATTENTION_LIB: ctypes.CDLL | None = None
 _FP16_ATTENTION_ERROR: Exception | None = None
+_FP16_MOE_LIB: ctypes.CDLL | None = None
+_FP16_MOE_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
@@ -38,6 +41,10 @@ def _native_matmul_disabled() -> bool:
 
 def _native_attention_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_moe_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_MOE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_q4_lib() -> ctypes.CDLL | None:
@@ -277,6 +284,105 @@ def attention_prefill_fp16(
     if code != 0:
         raise RuntimeError(f"native_attention_prefill_fp16 failed with code {code}")
     return out
+
+
+def _load_fp16_moe_lib() -> ctypes.CDLL | None:
+    global _FP16_MOE_LIB, _FP16_MOE_ERROR
+    if _native_moe_disabled():
+        return None
+    if _FP16_MOE_LIB is not None:
+        return _FP16_MOE_LIB
+    if not _FP16_MOE_DLL.exists():
+        _FP16_MOE_ERROR = FileNotFoundError(str(_FP16_MOE_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_MOE_DLL))
+        lib.native_moe_forward_fp16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_int,
+        ]
+        lib.native_moe_forward_fp16.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_MOE_ERROR = exc
+        return None
+    _FP16_MOE_LIB = lib
+    _FP16_MOE_ERROR = None
+    return lib
+
+
+def native_fp16_moe_available() -> bool:
+    return _load_fp16_moe_lib() is not None
+
+
+def native_fp16_moe_error() -> Exception | None:
+    _load_fp16_moe_lib()
+    return _FP16_MOE_ERROR
+
+
+def moe_forward_fp16(
+    hidden: torch.Tensor,
+    router_weight: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    *,
+    top_k: int,
+    normalize_topk: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lib = _load_fp16_moe_lib()
+    if lib is None:
+        reason = "disabled" if _native_moe_disabled() else _FP16_MOE_ERROR
+        raise RuntimeError(f"Native fp16 MoE is unavailable: {reason}")
+    tensors = [hidden, router_weight, gate_weight, up_weight, down_weight]
+    if any(tensor.dtype != torch.float16 for tensor in tensors):
+        raise TypeError("moe_forward_fp16 requires torch.float16 tensors")
+    if hidden.ndim != 2:
+        raise ValueError("hidden must have shape [seq_len, hidden_size]")
+    if gate_weight.ndim != 3 or up_weight.ndim != 3 or down_weight.ndim != 3:
+        raise ValueError("expert weights must be rank-3 [num_experts, rows, cols]")
+    seq_len = int(hidden.shape[0])
+    hidden_size = int(hidden.shape[1])
+    num_experts = int(router_weight.shape[0])
+    intermediate_size = int(gate_weight.shape[1])
+    hidden_cpu = hidden.detach().cpu().contiguous()
+    router_cpu = router_weight.detach().cpu().contiguous()
+    gate_cpu = gate_weight.detach().cpu().contiguous()
+    up_cpu = up_weight.detach().cpu().contiguous()
+    down_cpu = down_weight.detach().cpu().contiguous()
+    out = torch.empty((seq_len, hidden_size), dtype=torch.float16)
+    selected_experts = torch.empty((seq_len, int(top_k)), dtype=torch.int64)
+    selected_weights = torch.empty((seq_len, int(top_k)), dtype=torch.float32)
+    code = lib.native_moe_forward_fp16(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(router_cpu.data_ptr())),
+        ctypes.c_void_p(int(gate_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_void_p(int(selected_experts.data_ptr())),
+        ctypes.c_void_p(int(selected_weights.data_ptr())),
+        ctypes.c_longlong(seq_len),
+        ctypes.c_longlong(hidden_size),
+        ctypes.c_longlong(num_experts),
+        ctypes.c_longlong(int(top_k)),
+        ctypes.c_longlong(intermediate_size),
+        ctypes.c_int(1 if normalize_topk else 0),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_moe_forward_fp16 failed with code {code}")
+    return out, selected_experts, selected_weights
 
 
 def native_read_tensor_bytes(path: str | Path, absolute_offset: int, nbytes: int, out: torch.Tensor) -> None:

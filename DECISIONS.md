@@ -1038,3 +1038,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Engine / Deliverable D / attention boundary
 - The first native attention boundary is prefill-only and row-major fp16. It is intentionally isolated from production until decode-mode KV ownership and rollback are implemented and byte-checked.
+
+## Phase Native fp16 Engine / Deliverable E / MoE boundary
+- Native MoE currently uses packed rank-3 expert tensors [num_experts, rows, cols]. It is test-verified as an isolated kernel and returns routing decisions for later telemetry integration.
