@@ -1191,3 +1191,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Real 14B measurement showed the opt-in path is slower than the existing torch prefill on this machine: 64.3411s native prefill layer time vs about 19.8s default prefill stack. The likely cause is sequential token-by-token native decode inside prefill, which loses torch's small-batch matmul efficiency.
 - Kept `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1` for controlled profiling, but default production keeps torch prefill and native decode. This avoids a measured regression while preserving the C-owned KV prefill implementation and tests.
 - Rejected a fused gate/up dot-product change after a real 14B row regressed. Keeping the separate dot-product loops is faster on the measured production shape, likely because the fused loop increased register pressure without reducing the memory-bandwidth bottleneck enough.
+
+## Phase Native fp16 Integration / dot-kernel unroll
+- Kept the four-accumulator AVX2 dot helper because it passed the full suite and was neutral/slightly positive on the real 14B row. It is not enough to move the phase speed target; the dense fp16 path remains dominated by memory-bandwidth-scale matvec work.

@@ -5031,3 +5031,9 @@ Result: 297 passed in 21.83s
 - Default 14B re-run after the gate: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=65.4585s, prefill_stack=19.8109s, prefill_stack_op_native_layer absent, continuation_stack_op_native_layer=35.928s.
 - Rejected fused gate/up dot-product micro-optimization: focused tests passed, but real 14B row regressed to total=66.8171s and continuation_stack_op_native_layer=37.8945s. Reverted before commit.
 - Post-revert tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> 52 passed in 6.98s; `python -m pytest tests/ -q` -> 305 passed in 23.20s.
+
+## Phase Native fp16 Integration / dot-kernel unroll
+- Unrolled the native KV module's fp16/bf16 dot helper to four AVX2 accumulators over 32 values to reduce FMA dependency latency in projection matvecs.
+- Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> 52 passed in 5.63s.
+- Real 14B row: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=65.423s, continuation_stack_op_native_layer=35.8638s, continuation_stack_op_load_tensors=3.221s. This is effectively neutral vs the gated-prefill default row (`35.928s` native layer) but not a regression.
+- Full test suite: `python -m pytest tests/ -q` -> 305 passed in 26.97s.

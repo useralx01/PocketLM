@@ -103,13 +103,27 @@ static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t
 }
 
 static inline float dot_float_u16(const float* left, const uint16_t* right, int64_t count, int dtype_code) {
-    __m256 acc_vec = _mm256_setzero_ps();
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
     int64_t index = 0;
+    for (; index + 32 <= count; index += 32) {
+        const __m256 l0 = _mm256_loadu_ps(left + index);
+        const __m256 l1 = _mm256_loadu_ps(left + index + 8);
+        const __m256 l2 = _mm256_loadu_ps(left + index + 16);
+        const __m256 l3 = _mm256_loadu_ps(left + index + 24);
+        acc0 = _mm256_fmadd_ps(l0, load_u16_as_ps(right + index, dtype_code), acc0);
+        acc1 = _mm256_fmadd_ps(l1, load_u16_as_ps(right + index + 8, dtype_code), acc1);
+        acc2 = _mm256_fmadd_ps(l2, load_u16_as_ps(right + index + 16, dtype_code), acc2);
+        acc3 = _mm256_fmadd_ps(l3, load_u16_as_ps(right + index + 24, dtype_code), acc3);
+    }
     for (; index + 8 <= count; index += 8) {
         const __m256 l = _mm256_loadu_ps(left + index);
         const __m256 r = load_u16_as_ps(right + index, dtype_code);
-        acc_vec = _mm256_fmadd_ps(l, r, acc_vec);
+        acc0 = _mm256_fmadd_ps(l, r, acc0);
     }
+    const __m256 acc_vec = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
     float acc = horizontal_sum_ps(acc_vec);
     for (; index < count; ++index) {
         acc += left[index] * read_u16(right[index], dtype_code);
