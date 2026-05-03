@@ -1180,3 +1180,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / matmul blocking
 - Chose a 32-column output block for the standalone fp16 matmul kernel. It keeps register pressure low on AVX2 while reusing each A scalar across four output vectors; this is a safer increment than a full packed-B microkernel.
 - Did not route production dense decode through this GEMM because the production decode shape is a set of row-major matrix-vector products inside the C-owned KV module, not a general matrix-matrix call.
+
+## Phase Native fp16 Integration / speculative native KV boundary
+- Normal decode commits native C KV inside the bridge because each generated token is final. Speculative verification cannot do that: candidate suffixes are tentative until accepted.
+- Added an explicit `native_kv_commit` bridge flag. The default remains `true`; `SpeculativeSession.verify_candidates` passes `false` and owns commit/rollback. This keeps the native session contract aligned with the existing Python KV speculative contract.

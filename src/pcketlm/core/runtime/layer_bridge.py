@@ -1204,6 +1204,7 @@ def _try_native_dense_decode_bridge(
     tensor_policy: TensorResidencyPolicy | None,
     collect_metrics: bool,
     timings: dict[str, float],
+    native_kv_commit: bool = True,
 ) -> LayerBridgeResult | None:
     if not _native_layer_enabled() or _is_moe_config(config):
         return None
@@ -1296,7 +1297,8 @@ def _try_native_dense_decode_bridge(
             q_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
             k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
         )
-        session.commit(1)
+        if native_kv_commit:
+            session.commit(1)
         timings["native_layer"] = round(timings.get("native_layer", 0.0) + (time.perf_counter() - native_started), 4)
         if native_kv_session is None:
             next_kv_cache = None
@@ -1347,6 +1349,7 @@ def _try_native_attention_decode_bridge(
     config: LayerBridgeModelConfig,
     tensor_policy: TensorResidencyPolicy | None,
     timings: dict[str, float],
+    native_kv_commit: bool = True,
 ) -> tuple[torch.Tensor, int, Any] | None:
     if not _native_layer_enabled() or os.environ.get("PCKETLM_DISABLE_NATIVE_ATTENTION", "").strip().lower() in {
         "1",
@@ -1434,7 +1437,8 @@ def _try_native_attention_decode_bridge(
             k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
             rms_eps=config.rms_norm_eps,
         )
-        session.commit(1)
+        if native_kv_commit:
+            session.commit(1)
         timings["native_attention"] = round(
             timings.get("native_attention", 0.0) + (time.perf_counter() - native_started),
             4,
@@ -1693,6 +1697,7 @@ def run_minimal_layer_forward_bridge(
     tensor_policy: TensorResidencyPolicy | None = None,
     prefetched_tensors: dict[str, torch.Tensor] | None = None,
     native_kv_session: Any | None = None,
+    native_kv_commit: bool = True,
 ) -> LayerBridgeResult:
     """Run one real CPU-only layer slice using real loaded layer tensors."""
     timings: dict[str, float] = {}
@@ -1809,6 +1814,7 @@ def run_minimal_layer_forward_bridge(
         tensor_policy=tensor_policy,
         collect_metrics=collect_metrics,
         timings=timings,
+        native_kv_commit=native_kv_commit,
     )
     if native_result is not None:
         if not return_kv_cache:
@@ -1853,6 +1859,7 @@ def run_minimal_layer_forward_bridge(
             config=config,
             tensor_policy=tensor_policy,
             timings=timings,
+            native_kv_commit=native_kv_commit,
         )
     if native_attention_payload is not None:
         attention_output, cache_sequence_length, attention_native_session = native_attention_payload
@@ -2355,6 +2362,7 @@ def run_layer_bridge_stack(
     collect_step_summaries: bool = True,
     collect_metrics: bool = True,
     native_kv_sessions: dict[int, Any] | None = None,
+    native_kv_commit: bool = True,
 ) -> LayerBridgeStackResult:
     """Run multiple minimal layer-forward bridge steps in sequence."""
     total_started = time.perf_counter()
@@ -2474,6 +2482,7 @@ def run_layer_bridge_stack(
                 tensor_policy=tensor_policy,
                 prefetched_tensors=prefetched_tensors,
                 native_kv_session=None if native_kv_sessions is None else native_kv_sessions.get(layer_index),
+                native_kv_commit=native_kv_commit,
             )
             layer_times[layer_index] = time.perf_counter() - layer_started
             for key, value in result.timings.items():

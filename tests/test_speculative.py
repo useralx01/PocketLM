@@ -244,6 +244,73 @@ def test_session_rollback_undoes_uncommitted_verify(monkeypatch) -> None:
     assert calls[-1] == {"seq_len": 1, "past_len": 5, "position_offset": 5}
 
 
+def test_session_native_kv_commit_and_rollback_are_explicit(monkeypatch) -> None:
+    class FakeNativeSession:
+        def __init__(self) -> None:
+            self.commits: list[int] = []
+            self.rollbacks = 0
+            self.closed = 0
+
+        def commit(self, count: int) -> None:
+            self.commits.append(int(count))
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed += 1
+
+    native_session = FakeNativeSession()
+    calls = []
+    tail_tokens = iter([70, 71])
+
+    monkeypatch.setattr(
+        speculative,
+        "load_layer_bridge_config",
+        lambda _model_id: SimpleNamespace(ready=True, blockers=[], num_hidden_layers=1),
+    )
+    monkeypatch.setattr(
+        speculative,
+        "load_token_entry_hidden_state",
+        lambda _model_id, token_ids: (torch.zeros((1, len(token_ids), 4)), []),
+    )
+    monkeypatch.setattr(
+        speculative,
+        "run_decode_tail",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True, top_token_ids=[next(tail_tokens)], blockers=[]),
+    )
+
+    def fake_stack(_model_id, *, input_hidden, past_key_values=None, native_kv_commit=True, **_kwargs):
+        total_len = _kv_length({} if past_key_values is None else past_key_values) + int(input_hidden.shape[1])
+        calls.append({"seq_len": int(input_hidden.shape[1]), "native_kv_commit": native_kv_commit})
+        kv = {0: (torch.zeros((1, 1, total_len, 2)), torch.zeros((1, 1, total_len, 2)))}
+        next_native = {0: native_session} if int(input_hidden.shape[1]) == 1 else {}
+        return SimpleNamespace(
+            ready=True,
+            output_tensor=torch.zeros((1, int(input_hidden.shape[1]), 4)),
+            executed_layers=[0],
+            next_kv_caches=kv,
+            next_native_kv_sessions=next_native,
+            blockers=[],
+        )
+
+    monkeypatch.setattr(speculative, "run_layer_bridge_stack", fake_stack)
+
+    session = speculative.SpeculativeSession("qwen3-30b-a3b")
+    session.prefill([1, 2, 3, 4, 5])
+    verified = session.verify_candidates([70])
+    assert verified.ready is True
+    assert calls[-1] == {"seq_len": 1, "native_kv_commit": False}
+
+    session.commit(1)
+    assert native_session.commits == [1]
+    assert session.native_kv_sessions == {0: native_session}
+
+    session.rollback()
+    assert native_session.rollbacks == 1
+    assert native_session.closed == 0
+
+
 def test_verify_candidates_once_runs_one_stack_pass_and_returns_k_plus_one(monkeypatch) -> None:
     calls = {"stack": 0, "tail_positions": []}
 

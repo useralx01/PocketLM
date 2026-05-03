@@ -5006,3 +5006,10 @@ Result: 297 passed in 21.83s
 - Focused test: `python -m pytest tests\test_native_fp16_matmul.py -q` -> 3 passed in 1.93s.
 - Microbench smoke: 256x256 native=0.0002s, torch=0.0013s, max_abs=0.015625; 512x512 native=0.0011s, torch=0.0014s, max_abs=0.03125. This validates the block path but does not change production dense decode, which uses the KV module's matvec helpers.
 - Full test suite: `python -m pytest tests/ -q` -> 300 passed in 19.91s.
+
+## Phase Native fp16 Integration / speculative native KV rollback
+- Added `native_kv_commit` through `run_layer_bridge_stack` and `run_minimal_layer_forward_bridge`. Normal decode keeps the default `true`; speculative verifier calls pass `false` so native C KV remains tentative until the speculative session commits or rolls back.
+- `SpeculativeSession` now tracks tentative native KV sessions, calls native `commit(accepted_count)` on accepted prefixes, and calls native `rollback()` on rejected suffixes. Newly created uncommitted native sessions are closed on rollback.
+- Focused tests: `python -m pytest tests\test_speculative.py::test_session_native_kv_commit_and_rollback_are_explicit tests\test_speculative.py::test_session_prefill_then_single_verify_uses_existing_kv tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention -q` -> 4 passed in 1.66s.
+- Broader tests: `python -m pytest tests\test_speculative.py tests\test_runtime_layer_bridge.py tests\test_native_fp16_kv_cache.py -q` -> 60 passed in 3.76s.
+- Full test suite: `python -m pytest tests/ -q` -> 301 passed in 22.69s.

@@ -245,6 +245,7 @@ class SpeculativeSession:
         self.prompt_token_ids: list[int] = []
         self.committed_token_ids: list[int] = []
         self.kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.native_kv_sessions: dict[int, object] = {}
         self.next_token_id: int | None = None
         self.blockers: list[str] = list(self.config.blockers)
         self.layers_executed = 0
@@ -253,6 +254,7 @@ class SpeculativeSession:
         self._tentative_candidate_token_ids: list[int] = []
         self._tentative_verifier_token_ids: list[int] = []
         self._tentative_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None
+        self._tentative_native_kv_sessions: dict[int, object] | None = None
 
     @property
     def ready(self) -> bool:
@@ -303,6 +305,7 @@ class SpeculativeSession:
             return self._result([], len(stack.executed_layers), int(self.config.num_hidden_layers), started)
 
         self.kv_caches = dict(stack.next_kv_caches)
+        self.native_kv_sessions = dict(getattr(stack, "next_native_kv_sessions", {}))
         self.next_token_id = int(tail.top_token_ids[0])
         return self._result([self.next_token_id], len(stack.executed_layers), int(self.config.num_hidden_layers), started)
 
@@ -332,6 +335,8 @@ class SpeculativeSession:
             return_kv_cache=True,
             collect_step_summaries=False,
             collect_metrics=False,
+            native_kv_sessions=self.native_kv_sessions,
+            native_kv_commit=False,
         )
         self.layers_executed += len(stack.executed_layers)
         self.expected_layers_executed += int(self.config.num_hidden_layers)
@@ -357,6 +362,7 @@ class SpeculativeSession:
         self._tentative_candidate_token_ids = list(candidate_token_ids)
         self._tentative_verifier_token_ids = list(verifier_token_ids)
         self._tentative_kv_caches = dict(stack.next_kv_caches)
+        self._tentative_native_kv_sessions = dict(getattr(stack, "next_native_kv_sessions", {}))
         return VerifierBatchResult(
             model_id=self.verifier_model_id,
             prompt_token_count=len(self.committed_token_ids),
@@ -377,6 +383,7 @@ class SpeculativeSession:
         self.prompt_token_ids = list(prompt_token_ids)
         self.committed_token_ids = list(prompt_token_ids)
         self.kv_caches = {}
+        self.native_kv_sessions = {}
         self.next_token_id = None
         if not prompt_token_ids:
             self.blockers.append("Verifier prompt token ids must not be empty.")
@@ -429,6 +436,7 @@ class SpeculativeSession:
         self._tentative_candidate_token_ids = list(candidate_token_ids)
         self._tentative_verifier_token_ids = list(verifier_token_ids)
         self._tentative_kv_caches = dict(stack.next_kv_caches)
+        self._tentative_native_kv_sessions = dict(getattr(stack, "next_native_kv_sessions", {}))
         return VerifierBatchResult(
             model_id=self.verifier_model_id,
             prompt_token_count=len(prompt_token_ids),
@@ -453,6 +461,12 @@ class SpeculativeSession:
         accepted_count = min(int(accepted_count), len(self._tentative_candidate_token_ids))
         target_length = len(self.committed_token_ids) + accepted_count
         self.kv_caches = _slice_kv_caches(self._tentative_kv_caches, target_length)
+        if self._tentative_native_kv_sessions is not None:
+            for session in self._tentative_native_kv_sessions.values():
+                commit = getattr(session, "commit", None)
+                if callable(commit) and accepted_count > 0:
+                    commit(accepted_count)
+            self.native_kv_sessions = dict(self._tentative_native_kv_sessions)
         self.committed_token_ids.extend(self._tentative_candidate_token_ids[:accepted_count])
         if len(self._tentative_verifier_token_ids) > accepted_count:
             self.next_token_id = int(self._tentative_verifier_token_ids[accepted_count])
@@ -465,9 +479,20 @@ class SpeculativeSession:
         return verification
 
     def rollback(self) -> None:
+        if self._tentative_native_kv_sessions is not None:
+            committed_ids = {id(session) for session in self.native_kv_sessions.values()}
+            for session in self._tentative_native_kv_sessions.values():
+                rollback = getattr(session, "rollback", None)
+                if callable(rollback):
+                    rollback()
+                if id(session) not in committed_ids:
+                    close = getattr(session, "close", None)
+                    if callable(close):
+                        close()
         self._tentative_candidate_token_ids = []
         self._tentative_verifier_token_ids = []
         self._tentative_kv_caches = None
+        self._tentative_native_kv_sessions = None
 
     def _result(
         self,
