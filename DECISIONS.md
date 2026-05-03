@@ -1098,3 +1098,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Full native router+all-expert MoE is not a good production boundary for paged MoE because it would require materializing every expert.
 - Chosen boundary: Python computes router/top-k and loads only selected experts; native selected-MoE computes the selected FFNs and weighted combine.
 - This keeps the paged runtime's IO savings while moving expert math out of Python for decode.
+
+## Phase Native fp16 Integration / persistent C KV carry
+- Dense native decode now carries opaque `NativeKvSession` handles in `KVDecodeState`.
+- The first native decode after Python prefill seeds the C session once from Python KV; later decode steps reuse committed C-side KV and do not copy full KV back to Python.
+- Fallback still keeps Python prefill as the source of truth for the first continuation; native session carry is only used when the native dense layer path succeeds.
+- Real 14B timing after this change shows the bottleneck is tensor loading: continuation native layer time was 3.9095s, continuation tensor-load time was 41.3811s.

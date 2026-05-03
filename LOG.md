@@ -4879,3 +4879,11 @@ Result: 295 passed in 22.79s
 ## Phase Native fp16 Integration / full pytest after selected MoE
 Command: `python -m pytest tests/ -q`
 Result: 297 passed in 21.83s
+
+## Phase Native fp16 Integration / persistent native KV sessions
+- Changed dense native decode bridge to carry a `NativeKvSession` through `KVDecodeState` instead of closing it after every layer call.
+- First native decode for a layer seeds C KV from Python prefill once; subsequent decode steps reuse the same C-owned committed KV and commit one new row per step.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_speculative.py tests\test_native_fp16_kv_cache.py -q` -> 58 passed in 3.03s.
+- Bridge/KV/orchestrator tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q` -> 49 passed in 2.91s.
+- Full test suite: `python -m pytest tests/ -q` -> 297 passed in 22.39s.
+- Real 14B smoke after persistent C KV: prompt `Hello`, max_new_tokens=2, ready=true, layers_executed=96/96, generated_text=`Hello!`, total=101.7645s, continuation_stack_op_native_layer=3.9095s, continuation_stack_op_load_tensors=41.3811s.

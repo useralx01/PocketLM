@@ -270,6 +270,7 @@ def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) ->
             torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
             torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
         ),
+        None,
         config,
         tensor_policy=None,
         collect_metrics=True,
@@ -280,9 +281,29 @@ def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) ->
     assert result.ready is True
     assert result.output_tensor is not None
     assert result.output_tensor.shape == (1, 1, hidden_size)
-    assert result.next_kv_cache is not None
-    assert result.next_kv_cache[0].shape == (1, num_kv_heads, 3, head_dim)
+    assert result.next_kv_cache is None
+    assert result.native_kv_session is not None
+    assert result.native_kv_session.committed_length(0) == 3
     assert "native_layer" in result.timings
+    second = layer_bridge_module._try_native_dense_decode_bridge(
+        "native-dense-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        None,
+        result.native_kv_session,
+        config,
+        tensor_policy=None,
+        collect_metrics=True,
+        timings=timings,
+    )
+    try:
+        assert second is not None
+        assert second.ready is True
+        assert second.native_kv_session is result.native_kv_session
+        assert second.native_kv_session.committed_length(0) == 4
+        assert second.next_kv_cache is None
+    finally:
+        result.native_kv_session.close()
 
 
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:

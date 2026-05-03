@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 import torch.nn.functional as F
@@ -162,6 +162,7 @@ class LayerBridgeResult:
     timings: dict[str, float] = field(default_factory=dict)
     output_tensor: torch.Tensor | None = None
     next_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    native_kv_session: Any | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -227,6 +228,7 @@ class LayerBridgeStackResult:
     timings: dict[str, float] = field(default_factory=dict)
     output_tensor: torch.Tensor | None = None
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    next_native_kv_sessions: dict[int, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -652,6 +654,7 @@ class KVDecodeState:
     generated_token_ids: list[int] = field(default_factory=list)
     cache_sequence_lengths: dict[str, int] = field(default_factory=dict)
     kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    native_kv_sessions: dict[int, Any] = field(default_factory=dict)
     finished: bool = False
     stop_reason: str | None = None
     ready: bool = False
@@ -1186,6 +1189,7 @@ def _try_native_dense_decode_bridge(
     layer_index: int,
     hidden_states: torch.Tensor,
     past_key_value: tuple[torch.Tensor, torch.Tensor] | None,
+    native_kv_session: Any | None,
     config: LayerBridgeModelConfig,
     tensor_policy: TensorResidencyPolicy | None,
     collect_metrics: bool,
@@ -1242,17 +1246,22 @@ def _try_native_dense_decode_bridge(
             return None
         tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
 
+    session = None
     try:
-        past_k_native, past_v_native, past_length = _reshape_past_kv_for_native(past_key_value, config, math_dtype)
-        max_seq_len = max(config.max_position_embeddings, past_length + 1, 1)
-        session = NativeKvSession(
-            layer_count=1,
-            max_seq_len=max_seq_len,
-            kv_width=kv_width,
-            dtype=math_dtype,
-        )
-        if past_length:
-            session.append_committed(0, past_k_native, past_v_native, count=past_length)
+        if native_kv_session is None:
+            past_k_native, past_v_native, past_length = _reshape_past_kv_for_native(past_key_value, config, math_dtype)
+            max_seq_len = max(config.max_position_embeddings, past_length + 1, 1)
+            session = NativeKvSession(
+                layer_count=1,
+                max_seq_len=max_seq_len,
+                kv_width=kv_width,
+                dtype=math_dtype,
+            )
+            if past_length:
+                session.append_committed(0, past_k_native, past_v_native, count=past_length)
+        else:
+            session = native_kv_session
+            past_length = session.committed_length(0) + session.tentative_length(0)
         native_started = time.perf_counter()
         output = session.dense_layer_decode_fp16(
             0,
@@ -1277,15 +1286,18 @@ def _try_native_dense_decode_bridge(
             q_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
             k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
         )
+        session.commit(1)
         timings["native_layer"] = round(timings.get("native_layer", 0.0) + (time.perf_counter() - native_started), 4)
-        k_native, v_native = session.copy_layer(0, include_tentative=True)
-        next_kv_cache = _reshape_native_kv_for_python(k_native, v_native, config)
-        session.close()
+        if native_kv_session is None:
+            next_kv_cache = None
+        else:
+            next_kv_cache = None
     except Exception:
-        try:
-            session.close()  # type: ignore[name-defined]
-        except Exception:
-            pass
+        if native_kv_session is None and session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
         return None
 
     layer_output = output.view(1, 1, config.hidden_size).to(dtype=math_dtype)
@@ -1312,6 +1324,7 @@ def _try_native_dense_decode_bridge(
         timings=timings,
         output_tensor=layer_output,
         next_kv_cache=next_kv_cache,
+        native_kv_session=session,
     )
 
 
@@ -1557,6 +1570,7 @@ def run_minimal_layer_forward_bridge(
     collect_metrics: bool = True,
     tensor_policy: TensorResidencyPolicy | None = None,
     prefetched_tensors: dict[str, torch.Tensor] | None = None,
+    native_kv_session: Any | None = None,
 ) -> LayerBridgeResult:
     """Run one real CPU-only layer slice using real loaded layer tensors."""
     timings: dict[str, float] = {}
@@ -1668,6 +1682,7 @@ def run_minimal_layer_forward_bridge(
         layer_index=layer_index,
         hidden_states=hidden_states,
         past_key_value=past_key_value,
+        native_kv_session=native_kv_session,
         config=config,
         tensor_policy=tensor_policy,
         collect_metrics=collect_metrics,
@@ -2093,6 +2108,7 @@ def run_layer_bridge_stack(
     should_cancel: Callable[[], bool] | None = None,
     collect_step_summaries: bool = True,
     collect_metrics: bool = True,
+    native_kv_sessions: dict[int, Any] | None = None,
 ) -> LayerBridgeStackResult:
     """Run multiple minimal layer-forward bridge steps in sequence."""
     total_started = time.perf_counter()
@@ -2143,6 +2159,7 @@ def run_layer_bridge_stack(
     output_dtype = "unknown"
     cache_sequence_lengths: dict[str, int] = {}
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    next_native_kv_sessions: dict[int, Any] = {}
     tensor_policy = TensorResidencyPolicy.from_environment(model_id)
     prefetch_enabled = _layer_prefetch_enabled() and layer_count > 1
     prefetch_executor: ThreadPoolExecutor | None = None
@@ -2188,6 +2205,7 @@ def run_layer_bridge_stack(
                     timings=finish_timings(),
                     output_tensor=current_hidden if executed_layers else None,
                     next_kv_caches=next_kv_caches,
+                    next_native_kv_sessions=next_native_kv_sessions,
                 )
             prefetched_tensors: dict[str, torch.Tensor] | None = None
             if prefetch_future is not None:
@@ -2209,6 +2227,7 @@ def run_layer_bridge_stack(
                 collect_metrics=collect_metrics,
                 tensor_policy=tensor_policy,
                 prefetched_tensors=prefetched_tensors,
+                native_kv_session=None if native_kv_sessions is None else native_kv_sessions.get(layer_index),
             )
             layer_times[layer_index] = time.perf_counter() - layer_started
             for key, value in result.timings.items():
@@ -2247,6 +2266,7 @@ def run_layer_bridge_stack(
                     blockers=blockers or [f"Layer {layer_index} bridge failed."],
                     ready=False,
                     timings=finish_timings(),
+                    next_native_kv_sessions=next_native_kv_sessions,
                 )
 
             current_hidden = result.output_tensor
@@ -2255,6 +2275,8 @@ def run_layer_bridge_stack(
             output_dtype = result.output_dtype
             if return_kv_cache and result.next_kv_cache is not None:
                 next_kv_caches[layer_index] = result.next_kv_cache
+            if return_kv_cache and result.native_kv_session is not None:
+                next_native_kv_sessions[layer_index] = result.native_kv_session
     finally:
         if prefetch_executor is not None:
             prefetch_executor.shutdown(wait=False, cancel_futures=True)
@@ -2275,6 +2297,7 @@ def run_layer_bridge_stack(
         timings=finish_timings(),
         output_tensor=current_hidden,
         next_kv_caches=next_kv_caches,
+        next_native_kv_sessions=next_native_kv_sessions,
     )
 
 
@@ -2719,6 +2742,7 @@ def run_kv_decode_step(
     effective_model_id = model_id if decode_state is None else decode_state.model_id
     effective_input_token_id = input_token_id if decode_state is None else decode_state.next_token_id
     effective_kv_caches = kv_caches if decode_state is None else decode_state.kv_caches
+    effective_native_kv_sessions = {} if decode_state is None else decode_state.native_kv_sessions
     position_offset = None if decode_state is None else decode_state.next_position
 
     if decode_state is not None and not decode_state.ready:
@@ -2809,6 +2833,7 @@ def run_kv_decode_step(
         past_key_values=effective_kv_caches,
         position_offset=position_offset,
         return_kv_cache=True,
+        native_kv_sessions=effective_native_kv_sessions,
         should_cancel=should_cancel,
         collect_step_summaries=collect_layer_details,
         collect_metrics=collect_layer_details,
@@ -2919,6 +2944,7 @@ def run_kv_decode_step(
         generated_token_ids=generated_token_ids,
         cache_sequence_lengths=dict(stack_result.cache_sequence_lengths),
         kv_caches=dict(stack_result.next_kv_caches),
+        native_kv_sessions=dict(stack_result.next_native_kv_sessions),
         finished=reached_eos,
         stop_reason=stop_reason,
         ready=decode_result.ready and selection_result.ready,
@@ -3531,6 +3557,7 @@ def _run_prompt_decode_loop(
                 past_key_values=current_state.kv_caches,
                 position_offset=current_state.next_position,
                 return_kv_cache=True,
+                native_kv_sessions=current_state.native_kv_sessions,
                 should_cancel=should_cancel,
                 collect_step_summaries=False,
                 collect_metrics=False,
@@ -3547,6 +3574,7 @@ def _run_prompt_decode_loop(
                     generated_token_ids=list(current_token_ids),
                     cache_sequence_lengths=dict(stack_result.cache_sequence_lengths),
                     kv_caches=dict(stack_result.next_kv_caches),
+                    native_kv_sessions=dict(stack_result.next_native_kv_sessions),
                     ready=True,
                 )
         record_phase("prefix_append", phase_started)
@@ -3748,6 +3776,7 @@ def _run_prompt_decode_loop(
         generated_token_ids=first_generated_chain,
         cache_sequence_lengths=dict(prefill_stack.cache_sequence_lengths),
         kv_caches=dict(prefill_stack.next_kv_caches),
+        native_kv_sessions=dict(prefill_stack.next_native_kv_sessions),
         finished=reached_stop,
         stop_reason=first_stop_reason,
         ready=True,
