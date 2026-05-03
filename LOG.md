@@ -4893,3 +4893,10 @@ Result: 297 passed in 21.83s
 - Auto-default run after code change: 14B prompt `Hello`, max_new_tokens=2 -> ready=true, layers_executed=96/96, generated_text=`Hello!`, total=39.1632s, continuation_stack_op_load_tensors=15.8806s, scoped_handle_reuses=245, shard_opens=8.
 - Regression test: `python -m pytest tests\test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b -q` -> 1 passed in 3.13s.
 - Full test suite: `python -m pytest tests/ -q` -> 297 passed in 21.88s.
+
+## Phase Native fp16 Integration / Mixtral scoped-handle guard
+- Mixtral forced by the short-run scoped-handle policy exited after the diagnostic `before` row with process exit code 1 and no Python traceback.
+- Re-added Mixtral to the auto-exclusion set for scoped safetensor handles.
+- Mixtral after exclusion did not exit early, but the one-token diagnostic exceeded the 300s command timeout.
+- Regression test: `python -m pytest tests\test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b -q` -> 1 passed in 6.33s.
+- Full test suite after guard: `python -m pytest tests/ -q` -> 297 passed in 21.76s.

@@ -1109,4 +1109,5 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - For dense 14B, scoped safetensor handles are materially faster than the native raw-byte loader for short multi-token runs because they reuse shard mappings across the whole prompt request.
 - Changed auto policy from `effective_steps <= 1` to `effective_steps <= 4` for non-excluded models.
 - Kept the existing explicit exclusions for Qwen 32B and Qwen3-30B-A3B until separate measurements prove the larger-model memory behavior is safe.
+- Added Mixtral to the explicit auto-exclusion set after a forced scoped-handle run exited after the diagnostic `before` row with no Python traceback.
 - Evidence: 14B two-token smoke dropped from 101.7645s to 39.1632s with identical `Hello!` output and 96/96 layer execution.
