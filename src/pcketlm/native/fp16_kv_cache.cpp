@@ -92,6 +92,31 @@ static inline float horizontal_sum_ps(__m256 values) {
     return _mm_cvtss_f32(sum);
 }
 
+static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t count, int dtype_code) {
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        _mm256_storeu_ps(out + index, load_u16_as_ps(values + index, dtype_code));
+    }
+    for (; index < count; ++index) {
+        out[index] = read_u16(values[index], dtype_code);
+    }
+}
+
+static inline float dot_float_u16(const float* left, const uint16_t* right, int64_t count, int dtype_code) {
+    __m256 acc_vec = _mm256_setzero_ps();
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        const __m256 l = _mm256_loadu_ps(left + index);
+        const __m256 r = load_u16_as_ps(right + index, dtype_code);
+        acc_vec = _mm256_fmadd_ps(l, r, acc_vec);
+    }
+    float acc = horizontal_sum_ps(acc_vec);
+    for (; index < count; ++index) {
+        acc += left[index] * read_u16(right[index], dtype_code);
+    }
+    return acc;
+}
+
 static inline bool valid_layer(KvSession* session, int64_t layer) {
     return session != nullptr && layer >= 0 && layer < session->layer_count;
 }
@@ -106,28 +131,36 @@ static void linear_one(
     int dtype_code
 ) {
     std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
-    for (int64_t col = 0; col < in_features; ++col) {
-        hidden_f[static_cast<size_t>(col)] = read_u16(hidden[col], dtype_code);
-    }
+    load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
 
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < out_features; ++row) {
-        __m256 acc_vec = _mm256_setzero_ps();
-        int64_t col = 0;
         const uint16_t* weight_row = weight + row * in_features;
-        for (; col + 8 <= in_features; col += 8) {
-            const __m256 hidden_vec = _mm256_loadu_ps(hidden_f.data() + col);
-            const __m256 weight_vec = load_u16_as_ps(weight_row + col, dtype_code);
-            acc_vec = _mm256_fmadd_ps(hidden_vec, weight_vec, acc_vec);
-        }
-        float acc = horizontal_sum_ps(acc_vec);
-        for (; col < in_features; ++col) {
-            acc += hidden_f[static_cast<size_t>(col)] * read_u16(weight_row[col], dtype_code);
-        }
+        float acc = dot_float_u16(hidden_f.data(), weight_row, in_features, dtype_code);
         if (bias != nullptr) {
             acc += read_u16(bias[row], dtype_code);
         }
         out[row] = acc;
+    }
+}
+
+static void linear_two_same_input(
+    const uint16_t* hidden,
+    const uint16_t* weight_a,
+    const uint16_t* weight_b,
+    float* out_a,
+    float* out_b,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
+    load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
+
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < out_features; ++row) {
+        out_a[row] = dot_float_u16(hidden_f.data(), weight_a + row * in_features, in_features, dtype_code);
+        out_b[row] = dot_float_u16(hidden_f.data(), weight_b + row * in_features, in_features, dtype_code);
     }
 }
 
@@ -496,10 +529,7 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
 
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < hidden_size; ++row) {
-        float acc = 0.0f;
-        for (int64_t col = 0; col < hidden_size; ++col) {
-            acc += context[static_cast<size_t>(col)] * read_u16(o_weight[row * hidden_size + col], session->dtype_code);
-        }
+        const float acc = dot_float_u16(context.data(), o_weight + row * hidden_size, hidden_size, session->dtype_code);
         out[row] = write_u16(acc, session->dtype_code);
     }
     return 0;
@@ -610,10 +640,7 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
 
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < hidden_size; ++row) {
-        float acc = 0.0f;
-        for (int64_t col = 0; col < hidden_size; ++col) {
-            acc += context[static_cast<size_t>(col)] * read_u16(o_weight[row * hidden_size + col], session->dtype_code);
-        }
+        const float acc = dot_float_u16(context.data(), o_weight + row * hidden_size, hidden_size, session->dtype_code);
         out[row] = write_u16(acc, session->dtype_code);
     }
     return 0;
@@ -725,11 +752,8 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
 
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < hidden_size; ++row) {
-        float acc = 0.0f;
         const uint16_t* weight_row = o_weight + row * attention_width;
-        for (int64_t col = 0; col < attention_width; ++col) {
-            acc += context[static_cast<size_t>(col)] * read_u16(weight_row[col], session->dtype_code);
-        }
+        const float acc = dot_float_u16(context.data(), weight_row, attention_width, session->dtype_code);
         out[row] = write_u16(acc, session->dtype_code);
     }
     return 0;
@@ -809,8 +833,16 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     std::vector<float> hidden_half_source = post_norm;
     std::vector<uint16_t> post_norm_half;
     uint16_t* post_norm_half_ptr = floats_to_u16_buffer(hidden_half_source, post_norm_half, dtype_code);
-    linear_one(post_norm_half_ptr, gate_weight, nullptr, gate.data(), hidden_size, intermediate_size, dtype_code);
-    linear_one(post_norm_half_ptr, up_weight, nullptr, up.data(), hidden_size, intermediate_size, dtype_code);
+    linear_two_same_input(
+        post_norm_half_ptr,
+        gate_weight,
+        up_weight,
+        gate.data(),
+        up.data(),
+        hidden_size,
+        intermediate_size,
+        dtype_code
+    );
     std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
         const float g = gate[static_cast<size_t>(dim)];
@@ -820,11 +852,12 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < hidden_size; ++row) {
-        float acc = 0.0f;
-        for (int64_t col = 0; col < intermediate_size; ++col) {
-            acc += activated[static_cast<size_t>(col)] * read_u16(down_weight[row * intermediate_size + col], dtype_code);
-        }
-        mlp_out[static_cast<size_t>(row)] = acc;
+        mlp_out[static_cast<size_t>(row)] = dot_float_u16(
+            activated.data(),
+            down_weight + row * intermediate_size,
+            intermediate_size,
+            dtype_code
+        );
     }
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
@@ -924,8 +957,16 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
     uint16_t* post_norm_ptr = floats_to_u16_buffer(post_norm, post_norm_storage, dtype_code);
     std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
     std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
-    linear_one(post_norm_ptr, gate_weight, nullptr, gate.data(), hidden_size, intermediate_size, dtype_code);
-    linear_one(post_norm_ptr, up_weight, nullptr, up.data(), hidden_size, intermediate_size, dtype_code);
+    linear_two_same_input(
+        post_norm_ptr,
+        gate_weight,
+        up_weight,
+        gate.data(),
+        up.data(),
+        hidden_size,
+        intermediate_size,
+        dtype_code
+    );
 
     std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
@@ -936,11 +977,12 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
     std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < hidden_size; ++row) {
-        float acc = 0.0f;
-        for (int64_t col = 0; col < intermediate_size; ++col) {
-            acc += activated[static_cast<size_t>(col)] * read_u16(down_weight[row * intermediate_size + col], dtype_code);
-        }
-        mlp_out[static_cast<size_t>(row)] = acc;
+        mlp_out[static_cast<size_t>(row)] = dot_float_u16(
+            activated.data(),
+            down_weight + row * intermediate_size,
+            intermediate_size,
+            dtype_code
+        );
     }
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {

@@ -638,6 +638,11 @@ def _open_scoped_shard_handle(path: Path, *, open_counter: str = "shard_opens"):
     return handle
 
 
+def open_scoped_tensor_handle(path: Path, *, open_counter: str = "shard_opens"):
+    """Return a request-scoped safetensors handle when a scoped cache is active."""
+    return _open_scoped_shard_handle(path, open_counter=open_counter)
+
+
 def _open_shard_handle(path: Path):
     if not _handle_cache_enabled():
         _update_load_stats(shard_opens=1)

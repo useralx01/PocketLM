@@ -1154,3 +1154,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / explicit attention head dim
 - Native attention decode must use config `head_dim`, not `hidden_size / num_attention_heads`.
 - Qwen2.5 and Mixtral happen to have `head_dim == hidden_size / heads`; Qwen3-30B-A3B does not (`2048 / 32 = 64`, configured `head_dim = 128`). Added a separate explicit-head-dim native entry point so existing dense models keep the old ABI while Qwen3 routes through the correct attention width.
+
+## Phase Native fp16 Integration / dense decode follow-up
+- Reused the AVX2/FMA dot-product helper for dense `o_proj` and `down_proj` instead of scalar row loops. This keeps fp32 accumulation and fp16/bf16 output conversion unchanged while reducing the inner-loop cost.
+- Fused dense gate/up projections inside the native dense layer because both consume the same post-attention normalized hidden vector and have the same row count. This avoids one hidden-vector conversion and one OpenMP launch per layer.
+- Routed decode-tail `lm_head.weight` through the request-scoped safetensors handle cache. This does not alter logits math; it removes repeated shard opens during short `--slice=full` runs where scoped handles are already enabled.

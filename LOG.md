@@ -4965,3 +4965,13 @@ Result: 297 passed in 21.83s
 - Real layer-0 reproduction: Qwen3 layer 0 native attention with 35-token BF16 KV returned `torch.Size([2048])`, dtype `torch.bfloat16`, committed_length=35.
 - Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention tests\test_native_fp16_kv_cache.py -q` -> 10 passed in 2.28s.
 - Qwen3 fp16 two-token diagnostic after fix: ready=true, layers_executed=96/96, generated_text=`<think>\n`, total=97.7164s. Continuation timing: continuation_stack=17.6914s, continuation_stack_op_load_tensors=16.2635s, continuation_stack_op_native_attention=0.1244s, continuation_stack_op_mlp=0.82s. This replaces the previous Python attention/qkv/rope/o-projection continuation rows.
+
+## Phase Native fp16 Integration / dense decode inner-loop follow-up
+- Added AVX2/FMA dot helper reuse inside `fp16_kv_cache.cpp` for dense `o_proj` and `down_proj`; fused dense gate/up projections so one hidden conversion and one OpenMP region feed both FFN inputs.
+- Rebuilt native modules: `python tools\build_native.py` -> `fp16_kv_cache.dll` rebuilt.
+- Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py -q` -> 9 passed in 3.37s.
+- Focused bridge test: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer -q` -> 1 passed in 3.29s.
+- Added scoped-handle reuse for `lm_head.weight` decode tail. Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_run_decode_tail_can_stream_topk_without_full_logits tests\test_runtime_layer_bridge.py::test_run_decode_tail_streams_lm_head_and_returns_logits -q` -> 2 passed in 3.37s; `python -m pytest tests\test_runtime_tensor_loader.py -q` -> 9 passed in 3.41s.
+- Full test suite: `python -m pytest tests/ -q` -> 299 passed in 21.67s.
+- 14B real row before lm_head scoped reuse: prompt `The capital of France is`, max_new_tokens=4 -> ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=62.496s, continuation_stack_op_native_layer=33.7011s, continuation_decode_tail=3.6821s.
+- 14B real row after lm_head scoped reuse: prompt `The capital of France is`, max_new_tokens=4 -> ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=61.415s, continuation_stack_op_native_layer=32.9419s, continuation_decode_tail=2.6516s, prefill_decode_tail=0.9139s.

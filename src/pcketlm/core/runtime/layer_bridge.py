@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from pcketlm.core.runtime.tensor_loader import scoped_tensor_handle_cache
+from pcketlm.core.runtime.tensor_loader import open_scoped_tensor_handle, scoped_tensor_handle_cache
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
     expert_residency_snapshot,
@@ -2647,22 +2647,14 @@ def run_decode_tail(
     chunk_count = math.ceil(vocab_size / lm_head_chunk_rows)
     k = min(top_k, vocab_size)
 
-    with safe_open(lm_head_entry.shard_path, framework="pt", device="cpu") as handle:
+    canceled_during_lm_head = False
+
+    def stream_lm_head(handle) -> bool:
+        nonlocal streamed_top_logits, streamed_top_token_ids
         lm_head_slice = handle.get_slice(lm_head_entry.tensor_name)
         for start in range(0, vocab_size, lm_head_chunk_rows):
             if _cancel_requested(should_cancel):
-                return DecodeTailResult(
-                    model_id=model_id,
-                    input_shape=[int(value) for value in hidden_state.shape],
-                    normalized_shape=[int(value) for value in normalized.shape],
-                    logits_shape=[],
-                    logits_dtype="unknown",
-                    vocab_size=vocab_size,
-                    chunk_rows=lm_head_chunk_rows,
-                    chunk_count=chunk_count,
-                    blockers=[CANCEL_BLOCKER],
-                    ready=False,
-                )
+                return False
             end = min(start + lm_head_chunk_rows, vocab_size)
             weight_chunk = lm_head_slice[start:end].to(dtype=math_dtype)
             logits_chunk = F.linear(hidden_vector, weight_chunk)
@@ -2688,6 +2680,28 @@ def run_decode_tail(
                     merged_top_logits, merged_indices = torch.topk(merged_logits, k=min(k, merged_logits.shape[0]))
                     streamed_top_logits = merged_top_logits
                     streamed_top_token_ids = merged_token_ids[merged_indices]
+        return True
+
+    scoped_lm_head_handle = open_scoped_tensor_handle(lm_head_entry.shard_path)
+    if scoped_lm_head_handle is not None:
+        canceled_during_lm_head = not stream_lm_head(scoped_lm_head_handle)
+    else:
+        with safe_open(lm_head_entry.shard_path, framework="pt", device="cpu") as handle:
+            canceled_during_lm_head = not stream_lm_head(handle)
+
+    if canceled_during_lm_head:
+        return DecodeTailResult(
+            model_id=model_id,
+            input_shape=[int(value) for value in hidden_state.shape],
+            normalized_shape=[int(value) for value in normalized.shape],
+            logits_shape=[],
+            logits_dtype="unknown",
+            vocab_size=vocab_size,
+            chunk_rows=lm_head_chunk_rows,
+            chunk_count=chunk_count,
+            blockers=[CANCEL_BLOCKER],
+            ready=False,
+        )
 
     if return_logits:
         logits = torch.cat(logits_chunks, dim=-1).view(1, 1, vocab_size)
