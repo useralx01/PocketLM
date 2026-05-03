@@ -4804,3 +4804,14 @@ python -m pytest tests/ -q
 - Landed: native fp16/BF16 byte loader, raw fp16 packed cache, isolated AVX2/OpenMP fp16 matmul, isolated native fp16 attention prefill, isolated native fp16 MoE forward, diagnostic telemetry.
 - Not landed: production native layer orchestrator, C-owned KV cache with rollback, decode-mode native attention, production routing through native attention/MoE/matmul.
 - Speed targets not measured as native production because full native layer path is not integrated; 14B native-loader-only smoke was 37.051s for 1 token and therefore not target-met.
+
+## Phase Native fp16 Integration / Setup
+- git checkout phase-native-fp16-engine
+- git checkout -b phase-native-fp16-integration
+- git branch --show-current -> phase-native-fp16-integration
+
+## Phase Native fp16 Integration / Deliverable A / C-owned KV cache
+- Built fp16_kv_cache.dll.
+- KV layout: per session -> per layer -> committed_k/v and tentative_k/v vectors, row-major [seq, kv_width] fp16.
+- Methods exposed through ctypes NativeKvSession: append_committed, append_tentative, commit, rollback, committed_length, tentative_length, copy_layer.
+- Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 3 passed in 3.19s

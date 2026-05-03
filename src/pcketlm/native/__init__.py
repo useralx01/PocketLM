@@ -15,6 +15,7 @@ _FP16_LOADER_DLL = _NATIVE_DIR / "fp16_loader.dll"
 _FP16_MATMUL_DLL = _NATIVE_DIR / "fp16_matmul.dll"
 _FP16_ATTENTION_DLL = _NATIVE_DIR / "fp16_attention.dll"
 _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
+_FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
@@ -25,6 +26,8 @@ _FP16_ATTENTION_LIB: ctypes.CDLL | None = None
 _FP16_ATTENTION_ERROR: Exception | None = None
 _FP16_MOE_LIB: ctypes.CDLL | None = None
 _FP16_MOE_ERROR: Exception | None = None
+_FP16_KV_LIB: ctypes.CDLL | None = None
+_FP16_KV_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
@@ -45,6 +48,10 @@ def _native_attention_disabled() -> bool:
 
 def _native_moe_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_MOE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_kv_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_KV", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_q4_lib() -> ctypes.CDLL | None:
@@ -383,6 +390,152 @@ def moe_forward_fp16(
     if code != 0:
         raise RuntimeError(f"native_moe_forward_fp16 failed with code {code}")
     return out, selected_experts, selected_weights
+
+
+def _load_fp16_kv_lib() -> ctypes.CDLL | None:
+    global _FP16_KV_LIB, _FP16_KV_ERROR
+    if _native_kv_disabled():
+        return None
+    if _FP16_KV_LIB is not None:
+        return _FP16_KV_LIB
+    if not _FP16_KV_DLL.exists():
+        _FP16_KV_ERROR = FileNotFoundError(str(_FP16_KV_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_KV_DLL))
+        lib.kv_prefill_init.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_longlong]
+        lib.kv_prefill_init.restype = ctypes.c_void_p
+        lib.kv_free.argtypes = [ctypes.c_void_p]
+        lib.kv_free.restype = None
+        for name in ("kv_append_committed", "kv_append_tentative"):
+            fn = getattr(lib, name)
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_longlong, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong]
+            fn.restype = ctypes.c_int
+        lib.kv_commit.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.kv_commit.restype = ctypes.c_int
+        lib.kv_rollback.argtypes = [ctypes.c_void_p]
+        lib.kv_rollback.restype = ctypes.c_int
+        lib.kv_committed_length.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.kv_committed_length.restype = ctypes.c_longlong
+        lib.kv_tentative_length.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.kv_tentative_length.restype = ctypes.c_longlong
+        lib.kv_copy_layer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_int,
+        ]
+        lib.kv_copy_layer.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_KV_ERROR = exc
+        return None
+    _FP16_KV_LIB = lib
+    _FP16_KV_ERROR = None
+    return lib
+
+
+def native_fp16_kv_available() -> bool:
+    return _load_fp16_kv_lib() is not None
+
+
+def native_fp16_kv_error() -> Exception | None:
+    _load_fp16_kv_lib()
+    return _FP16_KV_ERROR
+
+
+class NativeKvSession:
+    def __init__(self, layer_count: int, max_seq_len: int, kv_width: int):
+        lib = _load_fp16_kv_lib()
+        if lib is None:
+            reason = "disabled" if _native_kv_disabled() else _FP16_KV_ERROR
+            raise RuntimeError(f"Native fp16 KV cache is unavailable: {reason}")
+        handle = lib.kv_prefill_init(
+            ctypes.c_longlong(int(layer_count)),
+            ctypes.c_longlong(int(max_seq_len)),
+            ctypes.c_longlong(int(kv_width)),
+        )
+        if not handle:
+            raise RuntimeError("kv_prefill_init failed")
+        self._lib = lib
+        self._handle = ctypes.c_void_p(handle)
+        self.layer_count = int(layer_count)
+        self.max_seq_len = int(max_seq_len)
+        self.kv_width = int(kv_width)
+
+    @property
+    def handle(self) -> int:
+        if not self._handle:
+            raise RuntimeError("NativeKvSession is closed")
+        return int(self._handle.value)
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._lib.kv_free(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC safety net
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _append(self, fn_name: str, layer: int, k_new: torch.Tensor, v_new: torch.Tensor, count: int) -> None:
+        if k_new.dtype != torch.float16 or v_new.dtype != torch.float16:
+            raise TypeError("KV cache append requires torch.float16 tensors")
+        k_cpu = k_new.detach().cpu().contiguous().reshape(-1)
+        v_cpu = v_new.detach().cpu().contiguous().reshape(-1)
+        expected = int(count) * self.kv_width
+        if k_cpu.numel() != expected or v_cpu.numel() != expected:
+            raise ValueError("KV tensor size does not match count * kv_width")
+        code = getattr(self._lib, fn_name)(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(k_cpu.data_ptr())),
+            ctypes.c_void_p(int(v_cpu.data_ptr())),
+            ctypes.c_longlong(int(count)),
+        )
+        if code != 0:
+            raise RuntimeError(f"{fn_name} failed with code {code}")
+
+    def append_committed(self, layer: int, k_new: torch.Tensor, v_new: torch.Tensor, count: int) -> None:
+        self._append("kv_append_committed", layer, k_new, v_new, count)
+
+    def append_tentative(self, layer: int, k_new: torch.Tensor, v_new: torch.Tensor, count: int) -> None:
+        self._append("kv_append_tentative", layer, k_new, v_new, count)
+
+    def commit(self, count: int) -> None:
+        code = self._lib.kv_commit(self._handle, ctypes.c_longlong(int(count)))
+        if code != 0:
+            raise RuntimeError(f"kv_commit failed with code {code}")
+
+    def rollback(self) -> None:
+        code = self._lib.kv_rollback(self._handle)
+        if code != 0:
+            raise RuntimeError(f"kv_rollback failed with code {code}")
+
+    def committed_length(self, layer: int) -> int:
+        return int(self._lib.kv_committed_length(self._handle, ctypes.c_longlong(int(layer))))
+
+    def tentative_length(self, layer: int) -> int:
+        return int(self._lib.kv_tentative_length(self._handle, ctypes.c_longlong(int(layer))))
+
+    def copy_layer(self, layer: int, *, include_tentative: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+        count = self.committed_length(layer) + (self.tentative_length(layer) if include_tentative else 0)
+        k_out = torch.empty((count, self.kv_width), dtype=torch.float16)
+        v_out = torch.empty((count, self.kv_width), dtype=torch.float16)
+        code = self._lib.kv_copy_layer(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(k_out.data_ptr())),
+            ctypes.c_void_p(int(v_out.data_ptr())),
+            ctypes.c_longlong(int(count)),
+            ctypes.c_int(1 if include_tentative else 0),
+        )
+        if code != 0:
+            raise RuntimeError(f"kv_copy_layer failed with code {code}")
+        return k_out, v_out
 
 
 def native_read_tensor_bytes(path: str | Path, absolute_offset: int, nbytes: int, out: torch.Tensor) -> None:

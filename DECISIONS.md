@@ -1044,3 +1044,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Engine / native loader real-model result
 - Real 14B confirms the native loader should not supersede runtime packs by default: native raw reads avoid safetensors handle opens but are slower when they force per-tensor file IO without pack/scoped reuse.
+
+## Phase Native fp16 Integration / Deliverable A / KV layout
+- C-owned KV cache stores fp16 K/V per layer as row-major [seq, kv_width] buffers.
+- Committed and tentative regions are isolated. commit(N) moves up to N tentative rows per layer into committed; rollback clears tentative rows only.
+- Python receives NativeKvSession as an opaque handle wrapper; tests use copy_layer only for verification.
