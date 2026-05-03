@@ -4826,3 +4826,11 @@ python -m pytest tests/ -q
 - Orchestrator path: input RMS norm -> native decode attention with tentative KV append -> attention residual -> post-attention RMS norm -> dense gate/up/down FFN -> final residual.
 - Focused test: python -m pytest tests/test_native_fp16_layer_orchestrator.py tests/test_native_fp16_kv_cache.py -q -> 5 passed in 2.25s
 - Limitation: dense decode only, not MoE orchestrator, and not yet routed through production layer_bridge.
+
+## Phase Native fp16 Integration / Deliverable D / GEMM tile attempt
+- Changed native fp16 matmul inner loop from 8 columns to 16 columns with two AVX2/FMA accumulators.
+- Focused test: python -m pytest tests/test_native_fp16_matmul.py -q -> 3 passed in 2.01s
+- Microbench:
+  - size=512 native=0.002286s torch=0.003189s max_abs=0.03125
+  - size=1024 native=0.033356s torch=0.009961s max_abs=0.0625
+- Verdict: 16-column tile improves small/medium shapes but still loses badly at 1024, so it will not meet the required 5120x5120 2x-over-torch target. Production GEMM remains on torch fallback.

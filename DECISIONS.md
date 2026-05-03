@@ -1055,3 +1055,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Integration / Deliverable C / dense orchestrator boundary
 - First native layer orchestrator targets dense single-token decode only. This avoids changing prefill semantics while proving the C-owned KV decode boundary.
+
+## Phase Native fp16 Integration / Deliverable D / GEMM verdict
+- Tried wider NR=16 AVX2/FMA tiling. It improves 512x512 but scales poorly by 1024x1024 versus torch. This kernel should remain isolated until a real packed/blocking strategy is implemented.

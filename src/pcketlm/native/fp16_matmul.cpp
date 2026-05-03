@@ -46,6 +46,21 @@ extern "C" __declspec(dllexport) int native_fp16_matmul(
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < m; ++row) {
         int64_t col = 0;
+        for (; col + 16 <= n; col += 16) {
+            __m256 acc0 = _mm256_setzero_ps();
+            __m256 acc1 = _mm256_setzero_ps();
+            for (int64_t inner = 0; inner < k; ++inner) {
+                const float av = fp16_to_fp32(a[row * k + inner]);
+                const __m256 avec = _mm256_set1_ps(av);
+                const uint16_t* b_base = b + inner * n + col;
+                const __m128i b_half0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b_base));
+                const __m128i b_half1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b_base + 8));
+                acc0 = _mm256_fmadd_ps(avec, _mm256_cvtph_ps(b_half0), acc0);
+                acc1 = _mm256_fmadd_ps(avec, _mm256_cvtph_ps(b_half1), acc1);
+            }
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(c + row * n + col), _mm256_cvtps_ph(acc0, 0));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(c + row * n + col + 8), _mm256_cvtps_ph(acc1, 0));
+        }
         for (; col + 8 <= n; col += 8) {
             __m256 acc = _mm256_setzero_ps();
             for (int64_t inner = 0; inner < k; ++inner) {
