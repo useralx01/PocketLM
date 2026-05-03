@@ -4875,3 +4875,7 @@ Result: 295 passed in 22.79s
 - Added `native_moe_selected_forward_u16` for BF16/FP16 selected-expert FFN combine.
 - Production MoE path now keeps Python router/top-k and paged expert selection, then uses native selected expert compute for single-token BF16/FP16 decode when available.
 - Focused tests: `python -m pytest tests\test_native_fp16_moe.py tests\test_runtime_layer_bridge.py -q` -> 41 passed in 3.55s.
+
+## Phase Native fp16 Integration / full pytest after selected MoE
+Command: `python -m pytest tests/ -q`
+Result: 297 passed in 21.83s
