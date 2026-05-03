@@ -537,6 +537,29 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_attention_decode_u16_ext.restype = ctypes.c_int
+        if hasattr(lib, "kv_attention_decode_u16_ext_hd"):
+            lib.kv_attention_decode_u16_ext_hd.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_float,
+                ctypes.c_float,
+            ]
+            lib.kv_attention_decode_u16_ext_hd.restype = ctypes.c_int
         lib.kv_dense_layer_decode_fp16.argtypes = [
             ctypes.c_void_p,
             ctypes.c_longlong,
@@ -710,6 +733,7 @@ class NativeKvSession:
         num_attention_heads: int,
         num_key_value_heads: int,
         rope_theta: float,
+        head_dim: int | None = None,
         q_bias: torch.Tensor | None = None,
         k_bias: torch.Tensor | None = None,
         v_bias: torch.Tensor | None = None,
@@ -735,7 +759,9 @@ class NativeKvSession:
         k_norm_cpu = None if k_norm_weight is None else k_norm_weight.detach().cpu().contiguous().reshape(-1)
         hidden_size = int(hidden_cpu.numel())
         out = torch.empty((hidden_size,), dtype=self.dtype)
-        code = self._lib.kv_attention_decode_u16_ext(
+        explicit_head_dim = int(head_dim or 0)
+        fn = self._lib.kv_attention_decode_u16_ext
+        args = [
             self._handle,
             ctypes.c_longlong(int(layer)),
             ctypes.c_void_p(int(hidden_cpu.data_ptr())),
@@ -752,9 +778,15 @@ class NativeKvSession:
             ctypes.c_longlong(hidden_size),
             ctypes.c_longlong(int(num_attention_heads)),
             ctypes.c_longlong(int(num_key_value_heads)),
+        ]
+        if explicit_head_dim > 0 and hasattr(self._lib, "kv_attention_decode_u16_ext_hd"):
+            fn = self._lib.kv_attention_decode_u16_ext_hd
+            args.append(ctypes.c_longlong(explicit_head_dim))
+        args.extend([
             ctypes.c_float(float(rope_theta)),
             ctypes.c_float(float(rms_eps)),
-        )
+        ])
+        code = fn(*args)
         if code != 0:
             raise RuntimeError(f"kv_attention_decode_fp16 failed with code {code}")
         return out

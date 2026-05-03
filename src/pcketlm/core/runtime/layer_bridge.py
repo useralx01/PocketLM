@@ -1416,6 +1416,7 @@ def _try_native_attention_decode_bridge(
             num_attention_heads=config.num_attention_heads,
             num_key_value_heads=config.num_key_value_heads,
             rope_theta=config.rope_theta,
+            head_dim=config.head_dim,
             q_bias=tensors.get(f"model.layers.{layer_index}.self_attn.q_proj.bias"),
             k_bias=tensors.get(f"model.layers.{layer_index}.self_attn.k_proj.bias"),
             v_bias=tensors.get(f"model.layers.{layer_index}.self_attn.v_proj.bias"),

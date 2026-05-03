@@ -1150,3 +1150,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / selected MoE SIMD boundary
 - Kept the production MoE boundary at selected experts only, but replaced scalar selected-expert dot products with AVX2/FMA helpers inside `fp16_moe.dll`.
 - This avoids materializing non-selected experts while making the top-k expert FFN path faster. The Qwen3-shaped BF16 selected-FFN microbench is 2.0x faster than the torch reference with max_abs=0.0.
+
+## Phase Native fp16 Integration / explicit attention head dim
+- Native attention decode must use config `head_dim`, not `hidden_size / num_attention_heads`.
+- Qwen2.5 and Mixtral happen to have `head_dim == hidden_size / heads`; Qwen3-30B-A3B does not (`2048 / 32 = 64`, configured `head_dim = 128`). Added a separate explicit-head-dim native entry point so existing dense models keep the old ABI while Qwen3 routes through the correct attention width.

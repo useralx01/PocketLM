@@ -314,7 +314,8 @@ def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypat
     hidden_size = 8
     num_heads = 2
     num_kv_heads = 1
-    head_dim = hidden_size // num_heads
+    head_dim = 6
+    attention_width = num_heads * head_dim
     kv_width = num_kv_heads * head_dim
     config = SimpleNamespace(
         model_id="native-moe-attention-test",
@@ -333,11 +334,11 @@ def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypat
     )
     torch.manual_seed(654)
     tensors = {
-        "self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.q_proj.weight": (torch.randn((attention_width, hidden_size)) * 0.1).to(torch.bfloat16),
         "self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
         "self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
-        "self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
-        "self_attn.q_proj.bias": (torch.randn((hidden_size,)) * 0.01).to(torch.bfloat16),
+        "self_attn.o_proj.weight": (torch.randn((hidden_size, attention_width)) * 0.1).to(torch.bfloat16),
+        "self_attn.q_proj.bias": (torch.randn((attention_width,)) * 0.01).to(torch.bfloat16),
         "self_attn.k_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
         "self_attn.v_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
     }

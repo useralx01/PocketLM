@@ -4958,3 +4958,10 @@ Result: 297 passed in 21.83s
 - Build: `python tools\build_native.py --force` rebuilt `fp16_moe.dll`.
 - Focused tests: `python -m pytest tests\test_native_fp16_moe.py -q` -> 3 passed in 1.97s.
 - Qwen3-shaped selected expert microbench (`seq=1`, `hidden=2048`, `selected=8`, `intermediate=768`, BF16): native=0.005126s, torch reference=0.010266s, speedup=2.0x, max_abs=0.0.
+
+## Phase Native fp16 Integration / Qwen3 explicit head-dim native attention
+- Found production native MoE attention fallback cause: Qwen3 config uses hidden_size=2048, num_attention_heads=32, head_dim=128, so q_proj width is 4096. The native decoder inferred head_dim=hidden_size/heads=64 and returned code 4 before dispatch.
+- Added `kv_attention_decode_u16_ext_hd` with explicit `head_dim` and attention width separate from hidden size; `NativeKvSession.attention_decode_fp16` now passes config head_dim when available.
+- Real layer-0 reproduction: Qwen3 layer 0 native attention with 35-token BF16 KV returned `torch.Size([2048])`, dtype `torch.bfloat16`, committed_length=35.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention tests\test_native_fp16_kv_cache.py -q` -> 10 passed in 2.28s.
+- Qwen3 fp16 two-token diagnostic after fix: ready=true, layers_executed=96/96, generated_text=`<think>\n`, total=97.7164s. Continuation timing: continuation_stack=17.6914s, continuation_stack_op_load_tensors=16.2635s, continuation_stack_op_native_attention=0.1244s, continuation_stack_op_mlp=0.82s. This replaces the previous Python attention/qkv/rope/o-projection continuation rows.
