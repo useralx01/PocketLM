@@ -4919,3 +4919,10 @@ Result: 297 passed in 21.83s
 - Result: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=98.3019s, avg=24.5755s/token.
 - Verdict: native dense layer remains faster than torch fallback under zero-copy scoped handles (85.5693s vs 98.3019s for the same four-token prompt).
 - Full test suite after fallback comparison: `python -m pytest tests/ -q` -> 297 passed in 25.20s.
+
+## Phase Native fp16 Integration / AVX2 dense linear helper
+- Vectorized `fp16_kv_cache.cpp::linear_one` for fp16/bf16 weights: preconvert hidden vector once, load 8 uint16 weights per AVX2 block, FMA, horizontal reduce.
+- Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q` -> 11 passed in 3.90s.
+- Real 14B four-token rerun: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=82.1057s, avg=20.5264s/token.
+- Timing change vs previous native+zero-copy row: continuation_stack_op_native_layer=46.7155s from 49.6078s; total=82.1057s from 85.5693s.
+- Full test suite: `python -m pytest tests/ -q` -> 297 passed in 25.62s.

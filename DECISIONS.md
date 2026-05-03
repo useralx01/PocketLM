@@ -1126,3 +1126,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Tested torch fallback with `PCKETLM_DISABLE_NATIVE_LAYER=1` on the same 14B four-token prompt.
 - Torch fallback took 98.3019s vs 85.5693s native-enabled.
 - Keep native dense dispatch active; the blocker is improving the native dense layer implementation, not disabling it.
+
+## Phase Native fp16 Integration / AVX2 dense matvec
+- The production dense orchestrator was still using scalar matrix-vector inner loops for q/k/v, o, gate, and up projections.
+- Added AVX2/FMA vectorization to `linear_one` for fp16 and bf16 weights.
+- Real impact is positive but limited: 14B four-token total dropped from 85.5693s to 82.1057s. The unvectorized down projection and broader memory bandwidth/page-touch now dominate the dense native layer.

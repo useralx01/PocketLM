@@ -58,6 +58,25 @@ static inline uint16_t write_u16(float value, int dtype_code) {
     return dtype_code == 1 ? fp32_to_bf16(value) : fp32_to_fp16(value);
 }
 
+static inline __m256 load_u16_as_ps(const uint16_t* values, int dtype_code) {
+    const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values));
+    if (dtype_code == 1) {
+        __m256i widened = _mm256_cvtepu16_epi32(packed);
+        widened = _mm256_slli_epi32(widened, 16);
+        return _mm256_castsi256_ps(widened);
+    }
+    return _mm256_cvtph_ps(packed);
+}
+
+static inline float horizontal_sum_ps(__m256 values) {
+    const __m128 low = _mm256_castps256_ps128(values);
+    const __m128 high = _mm256_extractf128_ps(values, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
 static inline bool valid_layer(KvSession* session, int64_t layer) {
     return session != nullptr && layer >= 0 && layer < session->layer_count;
 }
@@ -71,11 +90,24 @@ static void linear_one(
     int64_t out_features,
     int dtype_code
 ) {
+    std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
+    for (int64_t col = 0; col < in_features; ++col) {
+        hidden_f[static_cast<size_t>(col)] = read_u16(hidden[col], dtype_code);
+    }
+
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < out_features; ++row) {
-        float acc = 0.0f;
-        for (int64_t col = 0; col < in_features; ++col) {
-            acc += read_u16(hidden[col], dtype_code) * read_u16(weight[row * in_features + col], dtype_code);
+        __m256 acc_vec = _mm256_setzero_ps();
+        int64_t col = 0;
+        const uint16_t* weight_row = weight + row * in_features;
+        for (; col + 8 <= in_features; col += 8) {
+            const __m256 hidden_vec = _mm256_loadu_ps(hidden_f.data() + col);
+            const __m256 weight_vec = load_u16_as_ps(weight_row + col, dtype_code);
+            acc_vec = _mm256_fmadd_ps(hidden_vec, weight_vec, acc_vec);
+        }
+        float acc = horizontal_sum_ps(acc_vec);
+        for (; col < in_features; ++col) {
+            acc += hidden_f[static_cast<size_t>(col)] * read_u16(weight_row[col], dtype_code);
         }
         if (bias != nullptr) {
             acc += read_u16(bias[row], dtype_code);
