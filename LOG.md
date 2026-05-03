@@ -4765,3 +4765,8 @@ python -m pytest tests/ -q
   - size=512 native=0.004827s torch=0.002223s max_abs=0.03125
   - size=1024 native=0.060882s torch=0.009111s max_abs=0.0625
 - Verdict: native matmul remains isolated; it is not routed into production because torch is still faster at model-scale square matrices.
+
+## Phase Native fp16 Engine / CLI telemetry
+- Added fp16_packed_cache_stats to full/speculative diagnostic payloads.
+- Fixture diagnostics with --model-path now force fp16 when --source=auto so stale q4 artifacts under models/<id>/artifacts/q4 do not poison tiny oracle comparisons.
+- Focused test: python -m pytest tests/test_runtime_diagnose_cli.py tests/test_native_fp16_loader.py tests/test_tensor_residency.py tests/test_native_fp16_matmul.py -q -> 53 passed in 2.81s

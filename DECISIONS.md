@@ -1032,3 +1032,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Thread override: PCKETLM_NATIVE_THREADS controls omp_set_num_threads when set.
 - Kill switch: PCKETLM_DISABLE_NATIVE_MATMUL=1 disables the ctypes wrapper.
 - Current microbench shows the naive AVX2 row kernel beats torch at 256x256 but loses at 512x512; the next performance pass needs cache blocking/FMA or a different tiling strategy before routing real model matmuls through it.
+
+## Phase Native fp16 Engine / fixture source selection
+- runtime_diagnose_cli treats explicit --model-path fixture runs as fp16 by default when --source=auto. This keeps local derived q4 artifacts from unrelated real-model phases out of oracle tests.

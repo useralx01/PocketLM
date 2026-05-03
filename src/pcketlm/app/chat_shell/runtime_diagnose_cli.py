@@ -41,6 +41,7 @@ from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
     expert_residency_snapshot,
+    fp16_packed_cache_stats,
     load_resident_tensors,
     record_expert_activation,
 )
@@ -791,6 +792,7 @@ def _full_forward(model_id: str, max_new_tokens: int = 1, prompt: str = "hello w
     payload = result.to_dict()
     payload.pop("final_decode_state", None)
     payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
+    payload["fp16_packed_cache_stats"] = fp16_packed_cache_stats().to_dict()
     return payload
 
 
@@ -811,6 +813,7 @@ def _speculative_forward(
     )
     payload = result.to_dict()
     payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
+    payload["fp16_packed_cache_stats"] = fp16_packed_cache_stats().to_dict()
     payload["expert_telemetry"] = expert_residency_snapshot()
     return payload
 
@@ -1113,7 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
     max_new_tokens = max(1, int(args.max_new_tokens))
     repeat = max(1, int(args.repeat))
     previous_tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE")
-    os.environ["PCKETLM_TENSOR_SOURCE"] = str(args.source)
+    effective_source = "fp16" if args.model_path and str(args.source) == "auto" else str(args.source)
+    os.environ["PCKETLM_TENSOR_SOURCE"] = effective_source
     previous_model_roots = None
     if args.model_path:
         previous_model_roots = (
@@ -1136,7 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
         started_at=started_at,
         pid=os.getpid(),
         model_dir=str(original_model_root(model_id)),
-        tensor_source=str(args.source),
+        tensor_source=effective_source,
         q4_source=q4_source_status(model_id),
     )
     operation, callback = _operation_for_slice(slice_name)
