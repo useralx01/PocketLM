@@ -443,6 +443,28 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_attention_decode_fp16.restype = ctypes.c_int
+        lib.kv_dense_layer_decode_fp16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_float,
+            ctypes.c_float,
+        ]
+        lib.kv_dense_layer_decode_fp16.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP16_KV_ERROR = exc
         return None
@@ -591,6 +613,68 @@ class NativeKvSession:
         )
         if code != 0:
             raise RuntimeError(f"kv_attention_decode_fp16 failed with code {code}")
+        return out
+
+    def dense_layer_decode_fp16(
+        self,
+        layer: int,
+        hidden: torch.Tensor,
+        input_norm_weight: torch.Tensor,
+        post_norm_weight: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        v_weight: torch.Tensor,
+        o_weight: torch.Tensor,
+        gate_weight: torch.Tensor,
+        up_weight: torch.Tensor,
+        down_weight: torch.Tensor,
+        *,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        rms_eps: float,
+        rope_theta: float,
+    ) -> torch.Tensor:
+        tensors = [
+            hidden,
+            input_norm_weight,
+            post_norm_weight,
+            q_weight,
+            k_weight,
+            v_weight,
+            o_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+        ]
+        if any(tensor.dtype != torch.float16 for tensor in tensors):
+            raise TypeError("dense_layer_decode_fp16 requires torch.float16 tensors")
+        cpu_tensors = [tensor.detach().cpu().contiguous() for tensor in tensors]
+        hidden_size = int(cpu_tensors[0].numel())
+        out = torch.empty((hidden_size,), dtype=torch.float16)
+        code = self._lib.kv_dense_layer_decode_fp16(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(cpu_tensors[0].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[1].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[2].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[3].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[4].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[5].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[6].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[7].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[8].data_ptr())),
+            ctypes.c_void_p(int(cpu_tensors[9].data_ptr())),
+            ctypes.c_void_p(int(out.data_ptr())),
+            ctypes.c_longlong(hidden_size),
+            ctypes.c_longlong(int(intermediate_size)),
+            ctypes.c_longlong(int(num_attention_heads)),
+            ctypes.c_longlong(int(num_key_value_heads)),
+            ctypes.c_float(float(rms_eps)),
+            ctypes.c_float(float(rope_theta)),
+        )
+        if code != 0:
+            raise RuntimeError(f"kv_dense_layer_decode_fp16 failed with code {code}")
         return out
 
 

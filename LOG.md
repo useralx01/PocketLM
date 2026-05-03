@@ -4820,3 +4820,9 @@ python -m pytest tests/ -q
 - Extended fp16_kv_cache.dll with kv_attention_decode_fp16.
 - Decode path: project one-token Q/K/V, apply RoPE at committed_len+tentative_len, append K/V as tentative, attend over committed+tentative KV, apply output projection.
 - Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 4 passed in 2.24s
+
+## Phase Native fp16 Integration / Deliverable C / dense native layer decode orchestrator
+- Extended fp16_kv_cache.dll with kv_dense_layer_decode_fp16.
+- Orchestrator path: input RMS norm -> native decode attention with tentative KV append -> attention residual -> post-attention RMS norm -> dense gate/up/down FFN -> final residual.
+- Focused test: python -m pytest tests/test_native_fp16_layer_orchestrator.py tests/test_native_fp16_kv_cache.py -q -> 5 passed in 2.25s
+- Limitation: dense decode only, not MoE orchestrator, and not yet routed through production layer_bridge.

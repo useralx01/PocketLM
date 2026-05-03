@@ -77,6 +77,33 @@ static void apply_rope_one(
     }
 }
 
+static void rms_norm_one(
+    const uint16_t* hidden,
+    const uint16_t* weight,
+    float* out,
+    int64_t hidden_size,
+    float eps
+) {
+    float mean_square = 0.0f;
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        const float value = fp16_to_fp32(hidden[dim]);
+        mean_square += value * value;
+    }
+    mean_square /= static_cast<float>(hidden_size);
+    const float scale = 1.0f / std::sqrt(mean_square + eps);
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        out[dim] = fp16_to_fp32(hidden[dim]) * scale * fp16_to_fp32(weight[dim]);
+    }
+}
+
+static uint16_t* floats_to_half_buffer(const std::vector<float>& values, std::vector<uint16_t>& storage) {
+    storage.resize(values.size());
+    for (size_t index = 0; index < values.size(); ++index) {
+        storage[index] = fp32_to_fp16(values[index]);
+    }
+    return storage.data();
+}
+
 extern "C" __declspec(dllexport) void* kv_prefill_init(
     int64_t layer_count,
     int64_t max_seq_len,
@@ -360,6 +387,99 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
             acc += context[static_cast<size_t>(col)] * fp16_to_fp32(o_weight[row * hidden_size + col]);
         }
         out[row] = fp32_to_fp16(acc);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* input_norm_weight,
+    const uint16_t* post_norm_weight,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    const uint16_t* gate_weight,
+    const uint16_t* up_weight,
+    const uint16_t* down_weight,
+    uint16_t* out,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rms_eps,
+    float rope_theta
+) {
+    if (
+        handle == nullptr || hidden == nullptr || input_norm_weight == nullptr || post_norm_weight == nullptr ||
+        q_weight == nullptr || k_weight == nullptr || v_weight == nullptr || o_weight == nullptr ||
+        gate_weight == nullptr || up_weight == nullptr || down_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (hidden_size <= 0 || intermediate_size <= 0) {
+        return 2;
+    }
+
+    std::vector<float> input_norm(static_cast<size_t>(hidden_size), 0.0f);
+    rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps);
+    std::vector<uint16_t> input_norm_half;
+    std::vector<uint16_t> attention_out(static_cast<size_t>(hidden_size), 0);
+    const int attention_code = kv_attention_decode_fp16(
+        handle,
+        layer,
+        floats_to_half_buffer(input_norm, input_norm_half),
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        attention_out.data(),
+        hidden_size,
+        num_attention_heads,
+        num_key_value_heads,
+        rope_theta
+    );
+    if (attention_code != 0) {
+        return 100 + attention_code;
+    }
+
+    std::vector<float> residual_after_attention(static_cast<size_t>(hidden_size), 0.0f);
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        residual_after_attention[static_cast<size_t>(dim)] =
+            fp16_to_fp32(hidden[dim]) + fp16_to_fp32(attention_out[static_cast<size_t>(dim)]);
+    }
+
+    std::vector<uint16_t> residual_half;
+    std::vector<float> post_norm(static_cast<size_t>(hidden_size), 0.0f);
+    rms_norm_one(floats_to_half_buffer(residual_after_attention, residual_half), post_norm_weight, post_norm.data(), hidden_size, rms_eps);
+
+    std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float> hidden_half_source = post_norm;
+    std::vector<uint16_t> post_norm_half;
+    uint16_t* post_norm_half_ptr = floats_to_half_buffer(hidden_half_source, post_norm_half);
+    linear_one(post_norm_half_ptr, gate_weight, gate.data(), hidden_size, intermediate_size);
+    linear_one(post_norm_half_ptr, up_weight, up.data(), hidden_size, intermediate_size);
+    std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
+    for (int64_t dim = 0; dim < intermediate_size; ++dim) {
+        const float g = gate[static_cast<size_t>(dim)];
+        activated[static_cast<size_t>(dim)] = (g / (1.0f + std::exp(-g))) * up[static_cast<size_t>(dim)];
+    }
+
+    std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < hidden_size; ++row) {
+        float acc = 0.0f;
+        for (int64_t col = 0; col < intermediate_size; ++col) {
+            acc += activated[static_cast<size_t>(col)] * fp16_to_fp32(down_weight[row * intermediate_size + col]);
+        }
+        mlp_out[static_cast<size_t>(row)] = acc;
+    }
+
+    for (int64_t dim = 0; dim < hidden_size; ++dim) {
+        out[dim] = fp32_to_fp16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)]);
     }
     return 0;
 }

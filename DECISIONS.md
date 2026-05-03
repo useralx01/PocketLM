@@ -1052,3 +1052,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Integration / Deliverable B / decode attention position
 - Decode RoPE position is computed C-side as committed_len + tentative_len for the target layer before appending the new tentative K/V row.
+
+## Phase Native fp16 Integration / Deliverable C / dense orchestrator boundary
+- First native layer orchestrator targets dense single-token decode only. This avoids changing prefill semantics while proving the C-owned KV decode boundary.
