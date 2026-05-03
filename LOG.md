@@ -4791,3 +4791,10 @@ python -m pytest tests/ -q
 - Batch shard loads now try the native raw-byte loader and fp16 packed cache before falling back to safetensors handles.
 - Focused test: python -m pytest tests/test_runtime_tensor_loader.py tests/test_native_fp16_loader.py tests/test_tensor_residency.py -q -> 48 passed in 3.33s
 - Real smoke before batch integration: Qwen 14B fp16 --slice=full max_new_tokens=1 -> generated_text "Hello", layers_executed=48/48, operation_seconds=23.741, tensor_load_stats native_fp16_loads=0 because runtime pack/scoped handles won precedence.
+
+## Phase Native fp16 Engine / Real 14B native-loader smoke
+- Command env: PCKETLM_RUNTIME_PACK=0, PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=0, PCKETLM_SAFETENSOR_HANDLE_CACHE=0, PCKETLM_DISABLE_FP16_PACKED_CACHE=1
+- Command: python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --source fp16 --slice full --prompt "hello world" --max-new-tokens 1
+- Result: ready=true, generated_text="Hello", layers_executed=48/48, operation_seconds=37.051
+- tensor_load_stats: native_fp16_loads=577, native_fp16_loaded_mb=25201.6, shard_opens=0, q4_loaded=false
+- Verdict: native raw loader is functionally correct on real 14B, but slower than the runtime-pack/scoped-handle Python path for this workload; keep default precedence on runtime packs.

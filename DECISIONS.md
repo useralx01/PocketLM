@@ -1041,3 +1041,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Engine / Deliverable E / MoE boundary
 - Native MoE currently uses packed rank-3 expert tensors [num_experts, rows, cols]. It is test-verified as an isolated kernel and returns routing decisions for later telemetry integration.
+
+## Phase Native fp16 Engine / native loader real-model result
+- Real 14B confirms the native loader should not supersede runtime packs by default: native raw reads avoid safetensors handle opens but are slower when they force per-tensor file IO without pack/scoped reuse.
