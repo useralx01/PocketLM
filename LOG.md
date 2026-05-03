@@ -4798,3 +4798,9 @@ python -m pytest tests/ -q
 - Result: ready=true, generated_text="Hello", layers_executed=48/48, operation_seconds=37.051
 - tensor_load_stats: native_fp16_loads=577, native_fp16_loaded_mb=25201.6, shard_opens=0, q4_loaded=false
 - Verdict: native raw loader is functionally correct on real 14B, but slower than the runtime-pack/scoped-handle Python path for this workload; keep default precedence on runtime packs.
+
+## Phase Native fp16 Engine / Final checkpoint
+- Full test suite: python -m pytest tests/ -q -> 282 passed in 21.73s
+- Landed: native fp16/BF16 byte loader, raw fp16 packed cache, isolated AVX2/OpenMP fp16 matmul, isolated native fp16 attention prefill, isolated native fp16 MoE forward, diagnostic telemetry.
+- Not landed: production native layer orchestrator, C-owned KV cache with rollback, decode-mode native attention, production routing through native attention/MoE/matmul.
+- Speed targets not measured as native production because full native layer path is not integrated; 14B native-loader-only smoke was 37.051s for 1 token and therefore not target-met.

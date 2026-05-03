@@ -227,3 +227,9 @@ The SIMD/OpenMP kernel fixed the scalar-kernel problem but did not make the full
 Root cause: the layer bridge reports `56.8791s` in tensor loading, while a standalone grouped Q4 pass over all `771` tensors reports `12.629s` wall time. The gap points at runtime load/residency orchestration overhead rather than the SIMD kernel itself.
 
 Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/residency level, or build a packed executor that avoids per-layer/per-call tensor loading overhead.
+
+## Phase Native fp16 Engine / unresolved blockers
+- Production native layer orchestrator is missing.
+- Native attention is prefill-only and does not own KV cache or rollback.
+- Native matmul needs cache blocking or a better tiling strategy before model-scale routing; current 1024x1024 native=0.060882s vs torch=0.009111s.
+- Real 14B native-loader-only path is slower than runtime-pack/scoped-handle path: 37.051s for max_new_tokens=1.
