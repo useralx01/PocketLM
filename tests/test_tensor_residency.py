@@ -13,6 +13,7 @@ from pcketlm.core.runtime.tensor_residency import (
     expert_residency_snapshot,
     fp16_packed_cache_get_or_read,
     fp16_packed_cache_stats,
+    fp16_packed_expert_cache_scope,
     load_resident_tensor,
     load_resident_tensors,
     record_expert_activation,
@@ -200,6 +201,32 @@ def test_fp16_packed_expert_cache_is_opt_in(tmp_path: Path, monkeypatch) -> None
 
     assert cached_first is cached_second
     assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.stores == 1
+
+
+def test_fp16_packed_expert_cache_scope_enables_selected_decode_cache(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_FP16_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", raising=False)
+    monkeypatch.delenv("PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE", raising=False)
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.7.down_proj.weight")
+    entry.component_group = "expert_mlp"
+    calls = {"count": 0}
+
+    def reader() -> bytearray:
+        calls["count"] += 1
+        return bytearray(b"abcdefgh")
+
+    with fp16_packed_expert_cache_scope(enabled=True):
+        first = fp16_packed_cache_get_or_read("fp16-packed-expert-scope", entry, reader)
+        second = fp16_packed_cache_get_or_read("fp16-packed-expert-scope", entry, reader)
+    third = fp16_packed_cache_get_or_read("fp16-packed-expert-scope-off", entry, reader)
+    stats = fp16_packed_cache_stats()
+
+    assert first is second
+    assert third is not first
+    assert calls["count"] == 2
     assert stats.hits == 1
     assert stats.stores == 1
 

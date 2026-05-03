@@ -1159,3 +1159,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Reused the AVX2/FMA dot-product helper for dense `o_proj` and `down_proj` instead of scalar row loops. This keeps fp32 accumulation and fp16/bf16 output conversion unchanged while reducing the inner-loop cost.
 - Fused dense gate/up projections inside the native dense layer because both consume the same post-attention normalized hidden vector and have the same row count. This avoids one hidden-vector conversion and one OpenMP launch per layer.
 - Routed decode-tail `lm_head.weight` through the request-scoped safetensors handle cache. This does not alter logits math; it removes repeated shard opens during short `--slice=full` runs where scoped handles are already enabled.
+
+## Phase Native fp16 Integration / decode expert packed cache
+- Added a narrowly scoped opt-in for fp16 packed caching of selected MoE decode expert tensors: `PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE=1`.
+- Kept it disabled by default because the real Qwen3 three-token probe regressed from 110.670s to 128.216s when the decode expert cache was default-on. The default-on run filled 4653 MB of packed cache and triggered 1433 evictions; the opt-in-disabled run used 1752.4 MB and had zero evictions.
+- The cache hook remains useful for controlled profiling with higher RAM budgets, but production defaults prioritize avoiding RAM pressure and eviction churn over speculative expert reuse.

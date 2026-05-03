@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -297,6 +298,7 @@ _fp16_packed_stats = Fp16PackedCacheStats()
 _resident_bytes = 0
 _fp16_packed_cache_bytes = 0
 _fp16_packed_cache_budget_cached: int | None = None
+_fp16_packed_context = threading.local()
 _resident_expert_bytes = 0
 _residency_step = 0
 _expert_activation_counts: dict[tuple[int, int], int] = {}
@@ -424,6 +426,8 @@ def _fp16_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
         return False
     component_group = (entry.component_group or "").lower()
     if component_group in {"expert", "expert_mlp"}:
+        if bool(getattr(_fp16_packed_context, "enable_experts", False)):
+            return True
         return os.environ.get("PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE", "0").strip().lower() in {
             "1",
             "true",
@@ -431,6 +435,17 @@ def _fp16_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
             "on",
         }
     return True
+
+
+@contextmanager
+def fp16_packed_expert_cache_scope(enabled: bool = True):
+    """Temporarily allow fp16 packed caching for selected expert loads."""
+    previous = getattr(_fp16_packed_context, "enable_experts", False)
+    _fp16_packed_context.enable_experts = bool(enabled)
+    try:
+        yield
+    finally:
+        _fp16_packed_context.enable_experts = previous
 
 
 def _fp16_packed_cache_budget_bytes() -> int:
