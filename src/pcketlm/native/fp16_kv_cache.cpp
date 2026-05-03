@@ -164,6 +164,52 @@ static void linear_two_same_input(
     }
 }
 
+static void linear_three_same_input(
+    const uint16_t* hidden,
+    const uint16_t* weight_q,
+    const uint16_t* weight_k,
+    const uint16_t* weight_v,
+    const uint16_t* bias_q,
+    const uint16_t* bias_k,
+    const uint16_t* bias_v,
+    float* out_q,
+    float* out_k,
+    float* out_v,
+    int64_t in_features,
+    int64_t q_features,
+    int64_t kv_features,
+    int dtype_code
+) {
+    std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
+    load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
+
+    const int64_t total_rows = q_features + 2 * kv_features;
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < total_rows; ++row) {
+        if (row < q_features) {
+            float acc = dot_float_u16(hidden_f.data(), weight_q + row * in_features, in_features, dtype_code);
+            if (bias_q != nullptr) {
+                acc += read_u16(bias_q[row], dtype_code);
+            }
+            out_q[row] = acc;
+        } else if (row < q_features + kv_features) {
+            const int64_t k_row = row - q_features;
+            float acc = dot_float_u16(hidden_f.data(), weight_k + k_row * in_features, in_features, dtype_code);
+            if (bias_k != nullptr) {
+                acc += read_u16(bias_k[k_row], dtype_code);
+            }
+            out_k[k_row] = acc;
+        } else {
+            const int64_t v_row = row - q_features - kv_features;
+            float acc = dot_float_u16(hidden_f.data(), weight_v + v_row * in_features, in_features, dtype_code);
+            if (bias_v != nullptr) {
+                acc += read_u16(bias_v[v_row], dtype_code);
+            }
+            out_v[v_row] = acc;
+        }
+    }
+}
+
 static void apply_rope_one(
     float* values,
     int64_t head_count,
@@ -468,9 +514,22 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
     std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
     std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
-    linear_one(hidden, q_weight, nullptr, q.data(), hidden_size, hidden_size, session->dtype_code);
-    linear_one(hidden, k_weight, nullptr, k.data(), hidden_size, kv_width, session->dtype_code);
-    linear_one(hidden, v_weight, nullptr, v.data(), hidden_size, kv_width, session->dtype_code);
+    linear_three_same_input(
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        nullptr,
+        nullptr,
+        nullptr,
+        q.data(),
+        k.data(),
+        v.data(),
+        hidden_size,
+        hidden_size,
+        kv_width,
+        session->dtype_code
+    );
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
@@ -583,9 +642,22 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
     std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
     std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
     std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
-    linear_one(hidden, q_weight, q_bias, q.data(), hidden_size, hidden_size, session->dtype_code);
-    linear_one(hidden, k_weight, k_bias, k.data(), hidden_size, kv_width, session->dtype_code);
-    linear_one(hidden, v_weight, v_bias, v.data(), hidden_size, kv_width, session->dtype_code);
+    linear_three_same_input(
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        q_bias,
+        k_bias,
+        v_bias,
+        q.data(),
+        k.data(),
+        v.data(),
+        hidden_size,
+        hidden_size,
+        kv_width,
+        session->dtype_code
+    );
     rms_norm_heads_inplace(q.data(), q_norm_weight, num_attention_heads, head_dim, rms_eps, session->dtype_code);
     rms_norm_heads_inplace(k.data(), k_norm_weight, num_key_value_heads, head_dim, rms_eps, session->dtype_code);
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
@@ -695,9 +767,22 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
     std::vector<float> q(static_cast<size_t>(attention_width), 0.0f);
     std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
     std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
-    linear_one(hidden, q_weight, q_bias, q.data(), hidden_size, attention_width, session->dtype_code);
-    linear_one(hidden, k_weight, k_bias, k.data(), hidden_size, kv_width, session->dtype_code);
-    linear_one(hidden, v_weight, v_bias, v.data(), hidden_size, kv_width, session->dtype_code);
+    linear_three_same_input(
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        q_bias,
+        k_bias,
+        v_bias,
+        q.data(),
+        k.data(),
+        v.data(),
+        hidden_size,
+        attention_width,
+        kv_width,
+        session->dtype_code
+    );
     rms_norm_heads_inplace(q.data(), q_norm_weight, num_attention_heads, head_dim, rms_eps, session->dtype_code);
     rms_norm_heads_inplace(k.data(), k_norm_weight, num_key_value_heads, head_dim, rms_eps, session->dtype_code);
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);

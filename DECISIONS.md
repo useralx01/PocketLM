@@ -1164,3 +1164,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Added a narrowly scoped opt-in for fp16 packed caching of selected MoE decode expert tensors: `PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE=1`.
 - Kept it disabled by default because the real Qwen3 three-token probe regressed from 110.670s to 128.216s when the decode expert cache was default-on. The default-on run filled 4653 MB of packed cache and triggered 1433 evictions; the opt-in-disabled run used 1752.4 MB and had zero evictions.
 - The cache hook remains useful for controlled profiling with higher RAM budgets, but production defaults prioritize avoiding RAM pressure and eviction churn over speculative expert reuse.
+
+## Phase Native fp16 Integration / fused QKV projection
+- Fused Q/K/V projection inside the native decode attention kernel rather than adding another Python bridge boundary. The fused helper preserves the same row-major weight layout and fp32 accumulation but shares the hidden-vector conversion and OpenMP launch.
+- This is a safe micro-optimization because it does not reorder operations within any individual output row; it only schedules rows from Q, K, and V in one loop.
