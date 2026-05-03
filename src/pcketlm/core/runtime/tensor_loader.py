@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import threading
 import json
 import math
@@ -47,6 +48,8 @@ class TensorLoadStats:
     live_handle_tensor_hits: int = 0
     q4_loads: int = 0
     q4_loaded_nbytes: int = 0
+    native_fp16_loads: int = 0
+    native_fp16_loaded_nbytes: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +69,10 @@ class TensorLoadStats:
             "q4_loaded_nbytes": self.q4_loaded_nbytes,
             "q4_loaded_mb": round(self.q4_loaded_nbytes / (1024**2), 2),
             "q4_loaded": self.q4_loads > 0,
+            "native_fp16_loads": self.native_fp16_loads,
+            "native_fp16_loaded_nbytes": self.native_fp16_loaded_nbytes,
+            "native_fp16_loaded_mb": round(self.native_fp16_loaded_nbytes / (1024**2), 2),
+            "native_fp16_loaded": self.native_fp16_loads > 0,
         }
 
 
@@ -95,6 +102,8 @@ def tensor_load_stats_snapshot() -> TensorLoadStats:
             live_handle_tensor_hits=_load_stats.live_handle_tensor_hits,
             q4_loads=_load_stats.q4_loads,
             q4_loaded_nbytes=_load_stats.q4_loaded_nbytes,
+            native_fp16_loads=_load_stats.native_fp16_loads,
+            native_fp16_loaded_nbytes=_load_stats.native_fp16_loaded_nbytes,
         )
 
 
@@ -409,7 +418,44 @@ def _torch_dtype_from_catalog(dtype: str) -> torch.dtype:
         return torch.float16
     if normalized == "torch.float32":
         return torch.float32
+    if normalized == "torch.int64":
+        return torch.int64
+    if normalized == "torch.int32":
+        return torch.int32
     return torch.float16
+
+
+def _native_fp16_load_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP16_LOAD", "0").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+@lru_cache(maxsize=64)
+def _safetensors_data_base_offset(path: str, mtime_ns: int) -> int:
+    del mtime_ns
+    with Path(path).open("rb") as handle:
+        header_length = struct.unpack("<Q", handle.read(8))[0]
+    return 8 + int(header_length)
+
+
+def _load_native_fp16_tensor(model_id: str, entry: TensorCatalogEntry) -> LoadedTensorSlice | None:
+    """Load a catalog tensor by raw byte-copying into a contiguous torch buffer."""
+    if not _native_fp16_load_enabled():
+        return None
+    if entry.dtype not in {"BF16", "F16", "F32", "I64", "I32"}:
+        return None
+    try:
+        from pcketlm.native import native_read_tensor_bytes
+
+        tensor = torch.empty(tuple(int(value) for value in entry.shape), dtype=_torch_dtype_from_catalog(entry.dtype))
+        absolute_offset = _safetensors_data_base_offset(
+            str(entry.shard_path.resolve()),
+            _path_mtime_ns(entry.shard_path),
+        ) + int(entry.data_offset_start)
+        native_read_tensor_bytes(entry.shard_path, absolute_offset, int(entry.data_nbytes), tensor)
+        _update_load_stats(native_fp16_loads=1, native_fp16_loaded_nbytes=int(entry.data_nbytes))
+        return _loaded_slice_from_entry(model_id, entry, tensor, borrowed_from_live_handle=False)
+    except Exception:
+        return None
 
 
 def _unpack_int4(packed: torch.Tensor, value_count: int) -> torch.Tensor:
@@ -649,6 +695,11 @@ def load_tensor_by_name(model_id: str, tensor_name: str) -> LoadedTensorSlice:
             borrowed_from_live_handle = True
             _update_load_stats(live_handle_tensor_hits=1)
         else:
+            native_loaded = _load_native_fp16_tensor(model_id, entry)
+            if native_loaded is not None:
+                if native_loaded.ready:
+                    _update_load_stats(tensors_loaded=1, loaded_nbytes=native_loaded.loaded_nbytes)
+                return native_loaded
             borrowed_from_live_handle = False
             _update_load_stats(shard_opens=1)
             with safe_open(entry.shard_path, framework="pt", device="cpu") as handle:

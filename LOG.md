@@ -4730,3 +4730,16 @@ Stage 4 verdict: SIMD native dequant is a real improvement over the Python fallb
 python -m pytest tests/ -q
 269 passed in 21.15s
 ```
+
+## Phase Native fp16 Engine / Setup
+- base: 9241921 phase-cpp-q4-simd/final: native fast, bridge loading bottleneck
+- branch: phase-native-fp16-engine
+- setup commands:
+  - git checkout 9241921
+  - git checkout -b phase-native-fp16-engine
+  - git branch --show-current -> phase-native-fp16-engine
+
+## Phase Native fp16 Engine / Deliverable A / Native fp16 loader
+- Build: python tools\build_native.py --force -> built add_test.dll, fp16_loader.dll, q4_dequant.dll
+- Focused test: python -m pytest tests/test_native_fp16_loader.py -q -> 3 passed in 2.42s
+- Focused loader suite: python -m pytest tests/test_runtime_tensor_loader.py tests/test_native_fp16_loader.py -q -> 12 passed in 1.80s

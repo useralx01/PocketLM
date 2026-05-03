@@ -1016,3 +1016,8 @@ Threading: OpenMP parallelizes across output channels. `PCKETLM_NATIVE_THREADS` 
 SIMD dequant is no longer the blocking kernel. It reduced Qwen 32B Q4 one-token runtime from the Python fallback's `131.967s/token` to `63.5385s/token`, but it did not reach the `25s/token` phase target. A standalone grouped load/dequant pass over all `771` Q4 tensors took `12.629s` total, including `8.719s` native dequant. The full layer bridge recorded `56.8791s` in tensor loading for the same generated token.
 
 Decision: do not keep tuning this dequant kernel in isolation. The next phase should attack the runtime load/residency orchestration around Q4 tensors: grouped per-layer loading, fewer repeated `load_tensors_by_name` calls, and persistent dequantized windows that let the bridge use the `12.6s` grouped-load behavior instead of the observed `56.9s` layer-loop behavior.
+
+## Phase Native fp16 Engine / Deliverable A / loader design
+- Native fp16 load is implemented as a raw byte copy from safetensors data offsets into a pre-allocated contiguous torch tensor.
+- The path preserves catalog dtype exactly (BF16 stays BF16, F16 stays F16) because the deployed Qwen/Mixtral safetensors are BF16 even when the runtime phase says fp16.
+- Kill switch: PCKETLM_DISABLE_NATIVE_FP16_LOAD=1 returns to the existing safetensors Python path.

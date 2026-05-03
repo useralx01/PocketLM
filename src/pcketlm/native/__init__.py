@@ -11,12 +11,19 @@ import torch
 
 _NATIVE_DIR = Path(__file__).resolve().parent
 _Q4_DLL = _NATIVE_DIR / "q4_dequant.dll"
+_FP16_LOADER_DLL = _NATIVE_DIR / "fp16_loader.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
+_FP16_LOADER_LIB: ctypes.CDLL | None = None
+_FP16_LOADER_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_Q4", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_fp16_load_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP16_LOAD", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_q4_lib() -> ctypes.CDLL | None:
@@ -60,6 +67,61 @@ def native_q4_has_avx2_f16c() -> bool:
 def native_q4_load_error() -> Exception | None:
     _load_q4_lib()
     return _Q4_LOAD_ERROR
+
+
+def _load_fp16_loader_lib() -> ctypes.CDLL | None:
+    global _FP16_LOADER_LIB, _FP16_LOADER_ERROR
+    if _native_fp16_load_disabled():
+        return None
+    if _FP16_LOADER_LIB is not None:
+        return _FP16_LOADER_LIB
+    if not _FP16_LOADER_DLL.exists():
+        _FP16_LOADER_ERROR = FileNotFoundError(str(_FP16_LOADER_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_LOADER_DLL))
+        lib.native_read_tensor_bytes.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_ulonglong,
+            ctypes.c_ulonglong,
+            ctypes.c_void_p,
+        ]
+        lib.native_read_tensor_bytes.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_LOADER_ERROR = exc
+        return None
+    _FP16_LOADER_LIB = lib
+    _FP16_LOADER_ERROR = None
+    return lib
+
+
+def native_fp16_loader_available() -> bool:
+    return _load_fp16_loader_lib() is not None
+
+
+def native_fp16_loader_error() -> Exception | None:
+    _load_fp16_loader_lib()
+    return _FP16_LOADER_ERROR
+
+
+def native_read_tensor_bytes(path: str | Path, absolute_offset: int, nbytes: int, out: torch.Tensor) -> None:
+    lib = _load_fp16_loader_lib()
+    if lib is None:
+        reason = "disabled" if _native_fp16_load_disabled() else _FP16_LOADER_ERROR
+        raise RuntimeError(f"Native fp16 loader is unavailable: {reason}")
+    if not out.is_contiguous():
+        raise ValueError("native_read_tensor_bytes requires a contiguous output tensor")
+    if out.nelement() * out.element_size() != int(nbytes):
+        raise ValueError("output tensor byte size does not match requested native read size")
+    path_bytes = str(Path(path)).encode("utf-8")
+    code = lib.native_read_tensor_bytes(
+        ctypes.c_char_p(path_bytes),
+        ctypes.c_ulonglong(int(absolute_offset)),
+        ctypes.c_ulonglong(int(nbytes)),
+        ctypes.c_void_p(int(out.data_ptr())),
+    )
+    if code != 0:
+        raise OSError(f"native_read_tensor_bytes failed with code {code} for {path}")
 
 
 def q4_dequant_to_fp16(
