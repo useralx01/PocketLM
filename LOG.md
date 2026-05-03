@@ -4786,3 +4786,8 @@ python -m pytest tests/ -q
 
 ## Phase Native fp16 Engine / Full pytest checkpoint
 - python -m pytest tests/ -q -> 282 passed in 21.10s
+
+## Phase Native fp16 Engine / Deliverable A-B / batch loader integration
+- Batch shard loads now try the native raw-byte loader and fp16 packed cache before falling back to safetensors handles.
+- Focused test: python -m pytest tests/test_runtime_tensor_loader.py tests/test_native_fp16_loader.py tests/test_tensor_residency.py -q -> 48 passed in 3.33s
+- Real smoke before batch integration: Qwen 14B fp16 --slice=full max_new_tokens=1 -> generated_text "Hello", layers_executed=48/48, operation_seconds=23.741, tensor_load_stats native_fp16_loads=0 because runtime pack/scoped handles won precedence.

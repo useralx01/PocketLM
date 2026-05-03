@@ -859,6 +859,17 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
                         borrowed_from_live_handle=True,
                     )
             else:
+                native_results: dict[str, LoadedTensorSlice] = {}
+                native_failed = False
+                for entry in entries:
+                    native_loaded = _load_native_fp16_tensor(model_id, entry)
+                    if native_loaded is None:
+                        native_failed = True
+                        break
+                    native_results[entry.tensor_name] = native_loaded
+                if not native_failed:
+                    results.update(native_results)
+                    continue
                 _update_load_stats(shard_opens=1)
                 with safe_open(shard_path, framework="pt", device="cpu") as handle:
                     for entry in entries:

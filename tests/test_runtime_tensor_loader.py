@@ -150,7 +150,7 @@ def test_load_tensors_by_name_reads_real_tensors_in_one_call(tmp_path: Path, mon
     stats = tensor_load_stats_snapshot()
     assert stats.batch_load_calls == 1
     assert stats.tensors_loaded == 2
-    assert stats.shard_opens == 1
+    assert (stats.native_fp16_loads, stats.shard_opens) in {(2, 0), (0, 1)}
 
 
 def test_scoped_tensor_handle_cache_reuses_handle_across_load_calls(tmp_path: Path, monkeypatch) -> None:
