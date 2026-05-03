@@ -5029,3 +5029,5 @@ Result: 297 passed in 21.83s
 - 14B with native dense prefill opt-in on the real prompt regressed: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=111.3965s, prefill_stack_op_native_layer=64.3411s, continuation_stack_op_native_layer=36.3404s.
 - Gated production dense native prefill behind `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1` so the correct but slower path cannot regress default chat.
 - Default 14B re-run after the gate: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=65.4585s, prefill_stack=19.8109s, prefill_stack_op_native_layer absent, continuation_stack_op_native_layer=35.928s.
+- Rejected fused gate/up dot-product micro-optimization: focused tests passed, but real 14B row regressed to total=66.8171s and continuation_stack_op_native_layer=37.8945s. Reverted before commit.
+- Post-revert tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> 52 passed in 6.98s; `python -m pytest tests/ -q` -> 305 passed in 23.20s.
