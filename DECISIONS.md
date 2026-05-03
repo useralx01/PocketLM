@@ -1104,3 +1104,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - The first native decode after Python prefill seeds the C session once from Python KV; later decode steps reuse committed C-side KV and do not copy full KV back to Python.
 - Fallback still keeps Python prefill as the source of truth for the first continuation; native session carry is only used when the native dense layer path succeeds.
 - Real 14B timing after this change shows the bottleneck is tensor loading: continuation native layer time was 3.9095s, continuation tensor-load time was 41.3811s.
+
+## Phase Native fp16 Integration / scoped safetensor handles
+- For dense 14B, scoped safetensor handles are materially faster than the native raw-byte loader for short multi-token runs because they reuse shard mappings across the whole prompt request.
+- Changed auto policy from `effective_steps <= 1` to `effective_steps <= 4` for non-excluded models.
+- Kept the existing explicit exclusions for Qwen 32B and Qwen3-30B-A3B until separate measurements prove the larger-model memory behavior is safe.
+- Evidence: 14B two-token smoke dropped from 101.7645s to 39.1632s with identical `Hello!` output and 96/96 layer execution.

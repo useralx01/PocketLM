@@ -133,6 +133,8 @@ def test_scoped_safetensor_handles_default_off_for_qwen_32b(monkeypatch) -> None
     monkeypatch.delenv("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", raising=False)
 
     assert _use_scoped_safetensor_handles("qwen2.5-14b-instruct", 1) is True
+    assert _use_scoped_safetensor_handles("qwen2.5-14b-instruct", 4) is True
+    assert _use_scoped_safetensor_handles("qwen2.5-14b-instruct", 5) is False
     assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 1) is False
     assert _use_scoped_safetensor_handles("qwen2.5-32b-instruct", 2) is False
     assert _use_scoped_safetensor_handles("qwen3-30b-a3b", 1) is False

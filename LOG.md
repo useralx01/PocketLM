@@ -4887,3 +4887,9 @@ Result: 297 passed in 21.83s
 - Bridge/KV/orchestrator tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q` -> 49 passed in 2.91s.
 - Full test suite: `python -m pytest tests/ -q` -> 297 passed in 22.39s.
 - Real 14B smoke after persistent C KV: prompt `Hello`, max_new_tokens=2, ready=true, layers_executed=96/96, generated_text=`Hello!`, total=101.7645s, continuation_stack_op_native_layer=3.9095s, continuation_stack_op_load_tensors=41.3811s.
+
+## Phase Native fp16 Integration / scoped handle default
+- Forced-handle experiment: `PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1`, 14B prompt `Hello`, max_new_tokens=2 -> ready=true, layers_executed=96/96, generated_text=`Hello!`, total=38.5323s, continuation_stack_op_load_tensors=15.6749s, scoped_handle_reuses=245, shard_opens=8.
+- Auto-default run after code change: 14B prompt `Hello`, max_new_tokens=2 -> ready=true, layers_executed=96/96, generated_text=`Hello!`, total=39.1632s, continuation_stack_op_load_tensors=15.8806s, scoped_handle_reuses=245, shard_opens=8.
+- Regression test: `python -m pytest tests\test_runtime_layer_bridge.py::test_scoped_safetensor_handles_default_off_for_qwen_32b -q` -> 1 passed in 3.13s.
+- Full test suite: `python -m pytest tests/ -q` -> 297 passed in 21.88s.
