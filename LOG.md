@@ -4913,3 +4913,9 @@ Result: 297 passed in 21.83s
 - Real 14B four-token rerun: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=85.5693s, avg=21.3923s/token.
 - Timing shift: continuation_stack_op_load_tensors=4.5166s, continuation_stack_op_native_layer=49.6078s. The clone/page-touch cost moved from load timing into layer execution; total improved by 8.2529s vs the previous four-token row.
 - Full test suite: `python -m pytest tests/ -q` -> 297 passed in 25.64s.
+
+## Phase Native fp16 Integration / native-vs-torch layer fallback
+- Command: `PCKETLM_DISABLE_NATIVE_LAYER=1 python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen2.5-14b-instruct --slice full --prompt "The capital of France is" --max-new-tokens 4`
+- Result: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=98.3019s, avg=24.5755s/token.
+- Verdict: native dense layer remains faster than torch fallback under zero-copy scoped handles (85.5693s vs 98.3019s for the same four-token prompt).
+- Full test suite after fallback comparison: `python -m pytest tests/ -q` -> 297 passed in 25.20s.

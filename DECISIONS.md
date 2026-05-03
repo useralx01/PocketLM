@@ -1121,3 +1121,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Enabled zero-copy for tensors borrowed from live safetensors handles by default, with `PCKETLM_DISABLE_ZERO_COPY_TENSORS=1` retaining the previous clone behavior.
 - This is safe only for live-handle tensors because scoped handles keep the mapping alive for the request; tensors stored in residency still clone borrowed storage before caching.
 - Evidence: continuation load time dropped from 58.2073s to 4.5166s on the 14B four-token run. Total improved from 93.8222s to 85.5693s because the remaining cost is now inside native layer compute/page-touch.
+
+## Phase Native fp16 Integration / native dense dispatch retained
+- Tested torch fallback with `PCKETLM_DISABLE_NATIVE_LAYER=1` on the same 14B four-token prompt.
+- Torch fallback took 98.3019s vs 85.5693s native-enabled.
+- Keep native dense dispatch active; the blocker is improving the native dense layer implementation, not disabling it.
