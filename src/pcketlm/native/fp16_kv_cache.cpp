@@ -5,6 +5,9 @@
 #include <cstring>
 #include <immintrin.h>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 struct LayerKvState {
     std::vector<uint16_t> committed_k;
@@ -56,6 +59,18 @@ static inline float read_u16(uint16_t value, int dtype_code) {
 
 static inline uint16_t write_u16(float value, int dtype_code) {
     return dtype_code == 1 ? fp32_to_bf16(value) : fp32_to_fp16(value);
+}
+
+static void configure_openmp_threads() {
+    #ifdef _OPENMP
+    const char* requested_threads = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (requested_threads != nullptr && requested_threads[0] != '\0') {
+        const int parsed = std::atoi(requested_threads);
+        if (parsed > 0) {
+            omp_set_num_threads(parsed);
+        }
+    }
+    #endif
 }
 
 static inline __m256 load_u16_as_ps(const uint16_t* values, int dtype_code) {
@@ -201,6 +216,7 @@ extern "C" __declspec(dllexport) void* kv_prefill_init_typed(
     if (layer_count <= 0 || max_seq_len <= 0 || kv_width <= 0 || (dtype_code != 0 && dtype_code != 1)) {
         return nullptr;
     }
+    configure_openmp_threads();
     KvSession* session = new KvSession();
     session->layer_count = layer_count;
     session->max_seq_len = max_seq_len;

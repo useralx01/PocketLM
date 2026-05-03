@@ -4926,3 +4926,12 @@ Result: 297 passed in 21.83s
 - Real 14B four-token rerun: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=82.1057s, avg=20.5264s/token.
 - Timing change vs previous native+zero-copy row: continuation_stack_op_native_layer=46.7155s from 49.6078s; total=82.1057s from 85.5693s.
 - Full test suite: `python -m pytest tests/ -q` -> 297 passed in 25.62s.
+
+## Phase Native fp16 Integration / KV OpenMP thread override
+- Added `PCKETLM_NATIVE_THREADS` handling to the C-owned KV/native dense decode module; it now matches the existing matmul/Q4 override behavior.
+- Focused tests after rebuild: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer -q` -> 12 passed in 6.17s.
+- Thread probes on 14B prompt `The capital of France is`, max_new_tokens=2:
+  - `PCKETLM_NATIVE_THREADS=4`: ready=true, layers_executed=96/96, generated_text=`The capital`, total=73.9694s, continuation_stack_op_native_layer=34.0769s.
+  - `PCKETLM_NATIVE_THREADS=8`: ready=true, layers_executed=96/96, generated_text=`The capital`, total=68.0643s, continuation_stack_op_native_layer=24.8702s.
+  - `PCKETLM_NATIVE_THREADS=16`: ready=true, layers_executed=96/96, generated_text=`The capital`, total=57.4469s, continuation_stack_op_native_layer=19.3205s.
+- Four-token `PCKETLM_NATIVE_THREADS=16` probe regressed vs default: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=109.2125s, continuation_stack_op_native_layer=61.1573s. No default thread-count change made.

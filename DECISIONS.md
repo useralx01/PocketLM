@@ -1131,3 +1131,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - The production dense orchestrator was still using scalar matrix-vector inner loops for q/k/v, o, gate, and up projections.
 - Added AVX2/FMA vectorization to `linear_one` for fp16 and bf16 weights.
 - Real impact is positive but limited: 14B four-token total dropped from 85.5693s to 82.1057s. The unvectorized down projection and broader memory bandwidth/page-touch now dominate the dense native layer.
+
+## Phase Native fp16 Integration / KV OpenMP override
+- Added `PCKETLM_NATIVE_THREADS` to the C-owned KV/native dense module so thread tuning does not require rebuilding the DLL.
+- Did not bake a fixed default thread count: 16 threads improved a two-token probe but regressed the four-token probe to 109.2125s total. The default OpenMP scheduler remains the production path, and the env var is retained for controlled profiling.
