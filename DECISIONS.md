@@ -1135,3 +1135,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / KV OpenMP override
 - Added `PCKETLM_NATIVE_THREADS` to the C-owned KV/native dense module so thread tuning does not require rebuilding the DLL.
 - Did not bake a fixed default thread count: 16 threads improved a two-token probe but regressed the four-token probe to 109.2125s total. The default OpenMP scheduler remains the production path, and the env var is retained for controlled profiling.
+
+## Phase Native fp16 Integration / MoE native attention boundary
+- Routed only the single-token MoE attention decode through the C-owned KV module.
+- Kept router/top-k expert selection in Python because it controls paged expert materialization and avoids loading all experts.
+- Kept selected expert FFN in the existing native selected-MoE kernel. This gives MoE layers native attention plus native selected FFN without changing the paging policy.

@@ -4935,3 +4935,10 @@ Result: 297 passed in 21.83s
   - `PCKETLM_NATIVE_THREADS=8`: ready=true, layers_executed=96/96, generated_text=`The capital`, total=68.0643s, continuation_stack_op_native_layer=24.8702s.
   - `PCKETLM_NATIVE_THREADS=16`: ready=true, layers_executed=96/96, generated_text=`The capital`, total=57.4469s, continuation_stack_op_native_layer=19.3205s.
 - Four-token `PCKETLM_NATIVE_THREADS=16` probe regressed vs default: ready=true, layers_executed=192/192, generated_text=`The capital of France`, total=109.2125s, continuation_stack_op_native_layer=61.1573s. No default thread-count change made.
+
+## Phase Native fp16 Integration / MoE native attention bridge
+- Added a single-token MoE decode bridge that routes attention through the C-owned KV attention decoder while keeping Python router/top-k and native selected-expert FFN.
+- Focused test: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer -q` -> 2 passed in 3.28s.
+- Broader bridge/speculative/native tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_speculative.py tests\test_native_fp16_kv_cache.py tests\test_native_fp16_moe.py -q` -> 62 passed in 5.90s.
+- Full test suite: `python -m pytest tests/ -q` -> 298 passed in 25.08s.
+- Explicit Qwen3 fp16 diagnostic before this change timed out at 240s and left process 14844 using 6910476288 bytes; process was stopped before further measurements.

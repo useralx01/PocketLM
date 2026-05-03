@@ -1328,6 +1328,117 @@ def _try_native_dense_decode_bridge(
     )
 
 
+def _try_native_attention_decode_bridge(
+    model_id: str,
+    layer_index: int,
+    normed_input: torch.Tensor,
+    past_key_value: tuple[torch.Tensor, torch.Tensor] | None,
+    native_kv_session: Any | None,
+    config: LayerBridgeModelConfig,
+    tensor_policy: TensorResidencyPolicy | None,
+    timings: dict[str, float],
+) -> tuple[torch.Tensor, int, Any] | None:
+    if not _native_layer_enabled() or os.environ.get("PCKETLM_DISABLE_NATIVE_ATTENTION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    if normed_input.ndim != 3 or list(normed_input.shape[:2]) != [1, 1]:
+        return None
+    math_dtype = _runtime_math_dtype()
+    if math_dtype not in {torch.float16, torch.bfloat16}:
+        return None
+    try:
+        from pcketlm.native import NativeKvSession, native_fp16_kv_available
+
+        if not native_fp16_kv_available():
+            return None
+    except Exception:
+        return None
+
+    head_dim = config.head_dim
+    kv_width = config.num_key_value_heads * head_dim
+    required_names = [
+        f"model.layers.{layer_index}.self_attn.q_proj.weight",
+        f"model.layers.{layer_index}.self_attn.k_proj.weight",
+        f"model.layers.{layer_index}.self_attn.v_proj.weight",
+        f"model.layers.{layer_index}.self_attn.o_proj.weight",
+    ]
+    optional_names = [
+        f"model.layers.{layer_index}.self_attn.q_proj.bias",
+        f"model.layers.{layer_index}.self_attn.k_proj.bias",
+        f"model.layers.{layer_index}.self_attn.v_proj.bias",
+        f"model.layers.{layer_index}.self_attn.q_norm.weight",
+        f"model.layers.{layer_index}.self_attn.k_norm.weight",
+    ]
+    present_optional = [name for name in optional_names if _tensor_entry_exists(model_id, name)]
+    load_started = time.perf_counter()
+    loaded = load_resident_tensors(
+        model_id,
+        required_names + present_optional,
+        dtype=math_dtype,
+        policy=tensor_policy,
+    )
+    timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
+    tensors: dict[str, torch.Tensor] = {}
+    for tensor_name in required_names + present_optional:
+        loaded_slice = loaded[tensor_name]
+        if not loaded_slice.ready or loaded_slice.tensor is None:
+            return None
+        tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
+
+    session = None
+    try:
+        if native_kv_session is None:
+            past_k_native, past_v_native, past_length = _reshape_past_kv_for_native(past_key_value, config, math_dtype)
+            max_seq_len = max(config.max_position_embeddings, past_length + 1, 1)
+            session = NativeKvSession(
+                layer_count=1,
+                max_seq_len=max_seq_len,
+                kv_width=kv_width,
+                dtype=math_dtype,
+            )
+            if past_length:
+                session.append_committed(0, past_k_native, past_v_native, count=past_length)
+        else:
+            session = native_kv_session
+            past_length = session.committed_length(0) + session.tentative_length(0)
+        native_started = time.perf_counter()
+        output = session.attention_decode_fp16(
+            0,
+            normed_input.reshape(-1).to(dtype=math_dtype),
+            tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"],
+            tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"],
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            rope_theta=config.rope_theta,
+            q_bias=tensors.get(f"model.layers.{layer_index}.self_attn.q_proj.bias"),
+            k_bias=tensors.get(f"model.layers.{layer_index}.self_attn.k_proj.bias"),
+            v_bias=tensors.get(f"model.layers.{layer_index}.self_attn.v_proj.bias"),
+            q_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
+            k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
+            rms_eps=config.rms_norm_eps,
+        )
+        session.commit(1)
+        timings["native_attention"] = round(
+            timings.get("native_attention", 0.0) + (time.perf_counter() - native_started),
+            4,
+        )
+    except Exception:
+        if native_kv_session is None and session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        return None
+
+    return output.view(1, 1, config.hidden_size).to(dtype=math_dtype), past_length + 1, session
+
+
 def _find_embedding_entry(model_id: str) -> TensorCatalogEntry | None:
     catalog = load_tensor_catalog(model_id)
     if not catalog.ready:
@@ -1719,6 +1830,122 @@ def run_minimal_layer_forward_bridge(
     normed_input = _rms_norm(hidden_states, input_norm_weight, config.rms_norm_eps)
     record_phase("input_norm", phase_started)
     del input_norm_weight
+
+    native_attention_payload = None
+    if _is_moe_config(config) and return_kv_cache and sequence_length == 1:
+        native_attention_payload = _try_native_attention_decode_bridge(
+            model_id=model_id,
+            layer_index=layer_index,
+            normed_input=normed_input,
+            past_key_value=past_key_value,
+            native_kv_session=native_kv_session,
+            config=config,
+            tensor_policy=tensor_policy,
+            timings=timings,
+        )
+    if native_attention_payload is not None:
+        attention_output, cache_sequence_length, attention_native_session = native_attention_payload
+        residual_after_attention = hidden_states + attention_output
+        phase_started = time.perf_counter()
+        normed_post_attention = _rms_norm(residual_after_attention, post_attention_norm_weight, config.rms_norm_eps)
+        record_phase("post_attention_norm", phase_started)
+        del post_attention_norm_weight, attention_output, normed_input
+
+        router_name = _moe_router_tensor_name(model_id, layer_index)
+        router_weight = load_required(router_name)
+        if blockers or router_weight is None:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        with torch.no_grad():
+            router_probs = torch.softmax(F.linear(normed_post_attention.float(), router_weight.float()), dim=-1)
+            selected_experts = torch.topk(
+                router_probs,
+                max(1, min(config.num_experts_per_tok, config.num_experts)),
+                dim=-1,
+            ).indices
+            selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
+        expert_tensor_names: list[str] = []
+        expert_name_maps: dict[int, dict[str, str]] = {}
+        for expert_index in selected_expert_ids:
+            record_expert_activation(layer_index, expert_index)
+            expert_name_map = _moe_expert_tensor_name_map(model_id, layer_index, expert_index)
+            expert_name_maps[expert_index] = expert_name_map
+            expert_tensor_names.extend(expert_name_map.values())
+        loaded_experts = load_required_many(expert_tensor_names)
+        expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
+        for expert_index in selected_expert_ids:
+            expert_name_map = expert_name_maps[expert_index]
+            gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
+            up_weight = loaded_experts.get(expert_name_map["up_proj"])
+            down_weight = loaded_experts.get(expert_name_map["down_proj"])
+            if gate_weight is None or up_weight is None or down_weight is None:
+                blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
+                continue
+            expert_tensors[expert_index] = {
+                "gate_proj": gate_weight,
+                "up_proj": up_weight,
+                "down_proj": down_weight,
+            }
+        if blockers or not expert_tensors:
+            return LayerBridgeResult(
+                model_id=model_id,
+                layer_index=layer_index,
+                input_mode=input_mode,
+                input_shape=[int(value) for value in hidden_states.shape],
+                output_shape=[],
+                output_dtype="unknown",
+                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                blockers=blockers,
+                attention_head_dim=head_dim,
+                cache_sequence_length=cache_sequence_length,
+                ready=False,
+                timings=timings,
+            )
+        phase_started = time.perf_counter()
+        mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
+            hidden_states=normed_post_attention,
+            router_weight=router_weight,
+            expert_tensors=expert_tensors,
+            top_k=config.num_experts_per_tok,
+            norm_topk_prob=config.norm_topk_prob,
+        )
+        record_phase("mlp", phase_started)
+        del router_weight, loaded_experts, expert_tensors, normed_post_attention
+        layer_output = residual_after_attention + mlp_output
+        del residual_after_attention, mlp_output
+        output_mean_abs = float(layer_output.abs().mean().item()) if collect_metrics else 0.0
+        output_l2_norm = float(torch.linalg.vector_norm(layer_output).item()) if collect_metrics else 0.0
+        return LayerBridgeResult(
+            model_id=model_id,
+            layer_index=layer_index,
+            input_mode=input_mode,
+            input_shape=[int(value) for value in hidden_states.shape],
+            output_shape=[int(value) for value in layer_output.shape],
+            output_dtype=str(layer_output.dtype),
+            loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+            attention_head_dim=head_dim,
+            cache_sequence_length=cache_sequence_length,
+            output_mean_abs=output_mean_abs,
+            output_l2_norm=output_l2_norm,
+            blockers=[],
+            ready=True,
+            timings=timings,
+            output_tensor=layer_output,
+            next_kv_cache=None,
+            native_kv_session=attention_native_session,
+        )
 
     qkv_tensor_names = [
         f"model.layers.{layer_index}.self_attn.q_proj.weight",

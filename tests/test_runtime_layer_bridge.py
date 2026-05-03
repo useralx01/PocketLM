@@ -310,6 +310,80 @@ def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) ->
         result.native_kv_session.close()
 
 
+def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypatch) -> None:
+    hidden_size = 8
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = hidden_size // num_heads
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-moe-attention-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=16,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(654)
+    tensors = {
+        "self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.q_proj.bias": (torch.randn((hidden_size,)) * 0.01).to(torch.bfloat16),
+        "self_attn.k_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
+        "self_attn.v_proj.bias": (torch.randn((kv_width,)) * 0.01).to(torch.bfloat16),
+    }
+
+    def fake_exists(_model_id, tensor_name):
+        return any(tensor_name.endswith(suffix) for suffix in tensors)
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        loaded = {}
+        for name in tensor_names:
+            suffix = next(suffix for suffix in tensors if name.endswith(suffix))
+            loaded[name] = SimpleNamespace(ready=True, tensor=tensors[suffix], blockers=[])
+        return loaded
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_ATTENTION", raising=False)
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+
+    timings: dict[str, float] = {}
+    payload = layer_bridge_module._try_native_attention_decode_bridge(
+        "native-moe-attention-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        (
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+        ),
+        None,
+        config,
+        tensor_policy=None,
+        timings=timings,
+    )
+
+    assert payload is not None
+    output, cache_sequence_length, session = payload
+    try:
+        assert output.shape == (1, 1, hidden_size)
+        assert output.dtype == torch.bfloat16
+        assert cache_sequence_length == 3
+        assert session.committed_length(0) == 3
+        assert "native_attention" in timings
+    finally:
+        session.close()
+
+
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
     text, marker = _trim_generated_text_at_stop_string("Hello<|im_end|>ignored", ["<|im_end|>"])
 
