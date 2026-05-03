@@ -4994,3 +4994,9 @@ Result: 297 passed in 21.83s
 - Updated `fp16_attention.dll` prefill RoPE from adjacent-pair rotation to the production split-half convention used by `layer_bridge`.
 - Vectorized the prefill attention linear helper with AVX2/FMA while preserving fp32 accumulation.
 - Focused test: `python -m pytest tests\test_native_fp16_attention.py -q` -> 2 passed in 2.66s.
+- Full test suite after latest native changes: `python -m pytest tests/ -q` -> 300 passed in 20.23s.
+
+## Phase Native fp16 Integration / remaining bottleneck probes
+- 14B fused-QKV thread probe with `PCKETLM_NATIVE_THREADS=8`: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=69.4844s, operation_seconds=71.053s, continuation_stack_op_native_layer=44.7002s. Rejected as a default because it regressed vs 58.7086s.
+- 14B fused-QKV thread probe with `PCKETLM_NATIVE_THREADS=12`: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=62.6268s, operation_seconds=64.140s, continuation_stack_op_native_layer=36.1767s. Rejected as a default because it regressed vs 58.7086s.
+- Qwen3 fp16 expert tensor budget probe with `PCKETLM_EXPERT_TENSOR_CACHE_MB=4096`, max_new_tokens=3: ready=true, anti_cheat=true, layers_executed=144/144, generated_text=`<think>\nOkay`, total=110.2966s. Continuation timing: continuation_stack=30.4725s, continuation_stack_op_load_tensors=27.7803s, continuation_stack_op_native_attention=0.2211s, continuation_stack_op_mlp=1.6047s. Expert telemetry: hits=642, misses=11052, hit_rate=5.49%, resident=3623878656 bytes, resident_count=1152. Rejected as a default because it did not materially improve the opt-in-disabled 110.670s row and consumed ~3.62 GB expert RAM.
