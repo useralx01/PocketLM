@@ -132,6 +132,27 @@ def test_native_kv_kill_switch(monkeypatch) -> None:
         raise AssertionError("PCKETLM_DISABLE_NATIVE_KV did not disable KV sessions")
 
 
+def test_native_kv_cache_accepts_bfloat16_storage() -> None:
+    from pcketlm.native import NativeKvSession
+
+    session = NativeKvSession(layer_count=1, max_seq_len=8, kv_width=4, dtype=torch.bfloat16)
+    committed_k = torch.arange(12, dtype=torch.float32).reshape(3, 4).to(torch.bfloat16)
+    committed_v = (committed_k.float() + 100).to(torch.bfloat16)
+    tentative_k = (torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1000).to(torch.bfloat16)
+    tentative_v = (tentative_k.float() + 100).to(torch.bfloat16)
+
+    session.append_committed(0, committed_k, committed_v, count=3)
+    session.append_tentative(0, tentative_k, tentative_v, count=2)
+    k_all, v_all = session.copy_layer(0)
+    assert k_all.dtype == torch.bfloat16
+    assert v_all.dtype == torch.bfloat16
+    assert torch.equal(k_all, torch.cat([committed_k, tentative_k], dim=0))
+    assert torch.equal(v_all, torch.cat([committed_v, tentative_v], dim=0))
+    session.rollback()
+    assert session.tentative_length(0) == 0
+    session.close()
+
+
 def test_native_attention_decode_uses_c_owned_kv_and_tentative_append() -> None:
     from pcketlm.native import NativeKvSession
 
@@ -181,6 +202,60 @@ def test_native_attention_decode_uses_c_owned_kv_and_tentative_append() -> None:
     assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
     assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
     assert torch.allclose(native.float(), expected.float(), atol=1e-3, rtol=1e-3)
+    session.close()
+
+
+def test_native_attention_decode_accepts_bfloat16_model_tensors() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(4321)
+    hidden_size = 8
+    num_heads = 2
+    num_kv_heads = 1
+    kv_width = hidden_size // num_heads * num_kv_heads
+    session = NativeKvSession(layer_count=1, max_seq_len=8, kv_width=kv_width, dtype=torch.bfloat16)
+    prefix_k = torch.randn((2, kv_width), dtype=torch.float32).to(torch.bfloat16)
+    prefix_v = torch.randn((2, kv_width), dtype=torch.float32).to(torch.bfloat16)
+    hidden = torch.randn((hidden_size,), dtype=torch.float32).to(torch.bfloat16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.bfloat16)
+    session.append_committed(0, prefix_k, prefix_v, count=2)
+
+    native = session.attention_decode_fp16(
+        0,
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    expected, k_new, v_new = _reference_decode(
+        hidden.to(torch.float16),
+        q_weight.to(torch.float16),
+        k_weight.to(torch.float16),
+        v_weight.to(torch.float16),
+        o_weight.to(torch.float16),
+        prefix_k.to(torch.float16),
+        prefix_v.to(torch.float16),
+        position=2,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+
+    assert native.dtype == torch.bfloat16
+    assert session.tentative_length(0) == 1
+    k_all, v_all = session.copy_layer(0)
+    assert k_all.dtype == torch.bfloat16
+    assert v_all.dtype == torch.bfloat16
+    assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=2e-2, rtol=2e-2)
+    assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=2e-2, rtol=2e-2)
+    assert torch.allclose(native.float(), expected.float(), atol=2e-2, rtol=2e-2)
     session.close()
 
 

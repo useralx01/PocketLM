@@ -54,6 +54,14 @@ def _native_kv_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_KV", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _u16_storage_dtype_code(dtype: torch.dtype) -> int:
+    if dtype == torch.float16:
+        return 0
+    if dtype == torch.bfloat16:
+        return 1
+    raise TypeError("native KV kernels require torch.float16 or torch.bfloat16 tensors")
+
+
 def _load_q4_lib() -> ctypes.CDLL | None:
     global _Q4_LIB, _Q4_LOAD_ERROR
     if _native_disabled():
@@ -405,6 +413,8 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
         lib = ctypes.CDLL(str(_FP16_KV_DLL))
         lib.kv_prefill_init.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_longlong]
         lib.kv_prefill_init.restype = ctypes.c_void_p
+        lib.kv_prefill_init_typed.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_int]
+        lib.kv_prefill_init_typed.restype = ctypes.c_void_p
         lib.kv_free.argtypes = [ctypes.c_void_p]
         lib.kv_free.restype = None
         for name in ("kv_append_committed", "kv_append_tentative"):
@@ -483,15 +493,17 @@ def native_fp16_kv_error() -> Exception | None:
 
 
 class NativeKvSession:
-    def __init__(self, layer_count: int, max_seq_len: int, kv_width: int):
+    def __init__(self, layer_count: int, max_seq_len: int, kv_width: int, dtype: torch.dtype = torch.float16):
         lib = _load_fp16_kv_lib()
         if lib is None:
             reason = "disabled" if _native_kv_disabled() else _FP16_KV_ERROR
             raise RuntimeError(f"Native fp16 KV cache is unavailable: {reason}")
-        handle = lib.kv_prefill_init(
+        dtype_code = _u16_storage_dtype_code(dtype)
+        handle = lib.kv_prefill_init_typed(
             ctypes.c_longlong(int(layer_count)),
             ctypes.c_longlong(int(max_seq_len)),
             ctypes.c_longlong(int(kv_width)),
+            ctypes.c_int(dtype_code),
         )
         if not handle:
             raise RuntimeError("kv_prefill_init failed")
@@ -500,6 +512,7 @@ class NativeKvSession:
         self.layer_count = int(layer_count)
         self.max_seq_len = int(max_seq_len)
         self.kv_width = int(kv_width)
+        self.dtype = dtype
 
     @property
     def handle(self) -> int:
@@ -519,8 +532,8 @@ class NativeKvSession:
             pass
 
     def _append(self, fn_name: str, layer: int, k_new: torch.Tensor, v_new: torch.Tensor, count: int) -> None:
-        if k_new.dtype != torch.float16 or v_new.dtype != torch.float16:
-            raise TypeError("KV cache append requires torch.float16 tensors")
+        if k_new.dtype != self.dtype or v_new.dtype != self.dtype:
+            raise TypeError(f"KV cache append requires {self.dtype} tensors")
         k_cpu = k_new.detach().cpu().contiguous().reshape(-1)
         v_cpu = v_new.detach().cpu().contiguous().reshape(-1)
         expected = int(count) * self.kv_width
@@ -560,8 +573,8 @@ class NativeKvSession:
 
     def copy_layer(self, layer: int, *, include_tentative: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         count = self.committed_length(layer) + (self.tentative_length(layer) if include_tentative else 0)
-        k_out = torch.empty((count, self.kv_width), dtype=torch.float16)
-        v_out = torch.empty((count, self.kv_width), dtype=torch.float16)
+        k_out = torch.empty((count, self.kv_width), dtype=self.dtype)
+        v_out = torch.empty((count, self.kv_width), dtype=self.dtype)
         code = self._lib.kv_copy_layer(
             self._handle,
             ctypes.c_longlong(int(layer)),
@@ -588,15 +601,15 @@ class NativeKvSession:
         rope_theta: float,
     ) -> torch.Tensor:
         tensors = [hidden, q_weight, k_weight, v_weight, o_weight]
-        if any(tensor.dtype != torch.float16 for tensor in tensors):
-            raise TypeError("attention_decode_fp16 requires torch.float16 tensors")
+        if any(tensor.dtype != self.dtype for tensor in tensors):
+            raise TypeError(f"attention_decode_fp16 requires {self.dtype} tensors")
         hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
         q_cpu = q_weight.detach().cpu().contiguous()
         k_cpu = k_weight.detach().cpu().contiguous()
         v_cpu = v_weight.detach().cpu().contiguous()
         o_cpu = o_weight.detach().cpu().contiguous()
         hidden_size = int(hidden_cpu.numel())
-        out = torch.empty((hidden_size,), dtype=torch.float16)
+        out = torch.empty((hidden_size,), dtype=self.dtype)
         code = self._lib.kv_attention_decode_fp16(
             self._handle,
             ctypes.c_longlong(int(layer)),
@@ -647,11 +660,11 @@ class NativeKvSession:
             up_weight,
             down_weight,
         ]
-        if any(tensor.dtype != torch.float16 for tensor in tensors):
-            raise TypeError("dense_layer_decode_fp16 requires torch.float16 tensors")
+        if any(tensor.dtype != self.dtype for tensor in tensors):
+            raise TypeError(f"dense_layer_decode_fp16 requires {self.dtype} tensors")
         cpu_tensors = [tensor.detach().cpu().contiguous() for tensor in tensors]
         hidden_size = int(cpu_tensors[0].numel())
-        out = torch.empty((hidden_size,), dtype=torch.float16)
+        out = torch.empty((hidden_size,), dtype=self.dtype)
         code = self._lib.kv_dense_layer_decode_fp16(
             self._handle,
             ctypes.c_longlong(int(layer)),

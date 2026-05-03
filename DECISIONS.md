@@ -1058,3 +1058,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Integration / Deliverable D / GEMM verdict
 - Tried wider NR=16 AVX2/FMA tiling. It improves 512x512 but scales poorly by 1024x1024 versus torch. This kernel should remain isolated until a real packed/blocking strategy is implemented.
+
+## Phase Native fp16 Integration / BF16 unblocker
+- Added typed C-owned KV sessions: dtype_code=0 fp16, dtype_code=1 bf16.
+- Kept raw uint16 KV layout unchanged; conversion is selected at math boundaries.
+- This removes the prior hard blocker where wrappers rejected BF16 tensors even though Qwen 14B, Qwen3-30B-A3B, Mixtral, and Qwen 32B configs all declare torch_dtype=bfloat16.
+- Production layer_bridge routing still requires per-model kernel support for q/k/v bias, q/k norm, dense-vs-MoE orchestrator selection, and a faster/accepted GEMM path.

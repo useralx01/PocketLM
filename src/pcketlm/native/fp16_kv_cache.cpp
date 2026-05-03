@@ -19,6 +19,7 @@ struct KvSession {
     int64_t layer_count = 0;
     int64_t max_seq_len = 0;
     int64_t kv_width = 0;
+    int dtype_code = 0; // 0 = fp16, 1 = bf16
     std::vector<LayerKvState> layers;
 };
 
@@ -34,6 +35,29 @@ static inline uint16_t fp32_to_fp16(float value) {
     return static_cast<uint16_t>(_mm_cvtsi128_si32(half));
 }
 
+static inline float bf16_to_fp32(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(float));
+    return out;
+}
+
+static inline uint16_t fp32_to_bf16(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(uint32_t));
+    const uint32_t lsb = (bits >> 16) & 1u;
+    const uint32_t rounding_bias = 0x7fffu + lsb;
+    return static_cast<uint16_t>((bits + rounding_bias) >> 16);
+}
+
+static inline float read_u16(uint16_t value, int dtype_code) {
+    return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
+}
+
+static inline uint16_t write_u16(float value, int dtype_code) {
+    return dtype_code == 1 ? fp32_to_bf16(value) : fp32_to_fp16(value);
+}
+
 static inline bool valid_layer(KvSession* session, int64_t layer) {
     return session != nullptr && layer >= 0 && layer < session->layer_count;
 }
@@ -43,13 +67,14 @@ static void linear_one(
     const uint16_t* weight,
     float* out,
     int64_t in_features,
-    int64_t out_features
+    int64_t out_features,
+    int dtype_code
 ) {
     #pragma omp parallel for schedule(static)
     for (int64_t row = 0; row < out_features; ++row) {
         float acc = 0.0f;
         for (int64_t col = 0; col < in_features; ++col) {
-            acc += fp16_to_fp32(hidden[col]) * fp16_to_fp32(weight[row * in_features + col]);
+            acc += read_u16(hidden[col], dtype_code) * read_u16(weight[row * in_features + col], dtype_code);
         }
         out[row] = acc;
     }
@@ -82,26 +107,45 @@ static void rms_norm_one(
     const uint16_t* weight,
     float* out,
     int64_t hidden_size,
-    float eps
+    float eps,
+    int dtype_code
 ) {
     float mean_square = 0.0f;
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
-        const float value = fp16_to_fp32(hidden[dim]);
+        const float value = read_u16(hidden[dim], dtype_code);
         mean_square += value * value;
     }
     mean_square /= static_cast<float>(hidden_size);
     const float scale = 1.0f / std::sqrt(mean_square + eps);
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
-        out[dim] = fp16_to_fp32(hidden[dim]) * scale * fp16_to_fp32(weight[dim]);
+        out[dim] = read_u16(hidden[dim], dtype_code) * scale * read_u16(weight[dim], dtype_code);
     }
 }
 
-static uint16_t* floats_to_half_buffer(const std::vector<float>& values, std::vector<uint16_t>& storage) {
+static uint16_t* floats_to_u16_buffer(const std::vector<float>& values, std::vector<uint16_t>& storage, int dtype_code) {
     storage.resize(values.size());
     for (size_t index = 0; index < values.size(); ++index) {
-        storage[index] = fp32_to_fp16(values[index]);
+        storage[index] = write_u16(values[index], dtype_code);
     }
     return storage.data();
+}
+
+extern "C" __declspec(dllexport) void* kv_prefill_init_typed(
+    int64_t layer_count,
+    int64_t max_seq_len,
+    int64_t kv_width,
+    int dtype_code
+) {
+    if (layer_count <= 0 || max_seq_len <= 0 || kv_width <= 0 || (dtype_code != 0 && dtype_code != 1)) {
+        return nullptr;
+    }
+    KvSession* session = new KvSession();
+    session->layer_count = layer_count;
+    session->max_seq_len = max_seq_len;
+    session->kv_width = kv_width;
+    session->dtype_code = dtype_code;
+    session->layers.resize(static_cast<size_t>(layer_count));
+    return session;
 }
 
 extern "C" __declspec(dllexport) void* kv_prefill_init(
@@ -109,15 +153,7 @@ extern "C" __declspec(dllexport) void* kv_prefill_init(
     int64_t max_seq_len,
     int64_t kv_width
 ) {
-    if (layer_count <= 0 || max_seq_len <= 0 || kv_width <= 0) {
-        return nullptr;
-    }
-    KvSession* session = new KvSession();
-    session->layer_count = layer_count;
-    session->max_seq_len = max_seq_len;
-    session->kv_width = kv_width;
-    session->layers.resize(static_cast<size_t>(layer_count));
-    return session;
+    return kv_prefill_init_typed(layer_count, max_seq_len, kv_width, 0);
 }
 
 extern "C" __declspec(dllexport) void kv_free(void* handle) {
@@ -321,17 +357,17 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
     std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
     std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
-    linear_one(hidden, q_weight, q.data(), hidden_size, hidden_size);
-    linear_one(hidden, k_weight, k.data(), hidden_size, kv_width);
-    linear_one(hidden, v_weight, v.data(), hidden_size, kv_width);
+    linear_one(hidden, q_weight, q.data(), hidden_size, hidden_size, session->dtype_code);
+    linear_one(hidden, k_weight, k.data(), hidden_size, kv_width, session->dtype_code);
+    linear_one(hidden, v_weight, v.data(), hidden_size, kv_width, session->dtype_code);
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
     std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
     std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
     for (int64_t index = 0; index < kv_width; ++index) {
-        k_half[static_cast<size_t>(index)] = fp32_to_fp16(k[static_cast<size_t>(index)]);
-        v_half[static_cast<size_t>(index)] = fp32_to_fp16(v[static_cast<size_t>(index)]);
+        k_half[static_cast<size_t>(index)] = write_u16(k[static_cast<size_t>(index)], session->dtype_code);
+        v_half[static_cast<size_t>(index)] = write_u16(v[static_cast<size_t>(index)], session->dtype_code);
     }
     int append_code = append_to_region(session, layer, k_half.data(), v_half.data(), 1, true);
     if (append_code != 0) {
@@ -355,7 +391,7 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
             }
             float score = 0.0f;
             for (int64_t dim = 0; dim < head_dim; ++dim) {
-                score += q_base[dim] * fp16_to_fp32(k_base[dim]);
+                score += q_base[dim] * read_u16(k_base[dim], session->dtype_code);
             }
             scores[static_cast<size_t>(token)] = score * scale;
             max_score = std::max(max_score, scores[static_cast<size_t>(token)]);
@@ -375,7 +411,7 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
                 v_base = state.tentative_v.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
             }
             for (int64_t dim = 0; dim < head_dim; ++dim) {
-                out_head[dim] += weight * fp16_to_fp32(v_base[dim]);
+                out_head[dim] += weight * read_u16(v_base[dim], session->dtype_code);
             }
         }
     }
@@ -384,9 +420,9 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     for (int64_t row = 0; row < hidden_size; ++row) {
         float acc = 0.0f;
         for (int64_t col = 0; col < hidden_size; ++col) {
-            acc += context[static_cast<size_t>(col)] * fp16_to_fp32(o_weight[row * hidden_size + col]);
+            acc += context[static_cast<size_t>(col)] * read_u16(o_weight[row * hidden_size + col], session->dtype_code);
         }
-        out[row] = fp32_to_fp16(acc);
+        out[row] = write_u16(acc, session->dtype_code);
     }
     return 0;
 }
@@ -424,13 +460,18 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     }
 
     std::vector<float> input_norm(static_cast<size_t>(hidden_size), 0.0f);
-    rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps);
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (session == nullptr) {
+        return 3;
+    }
+    const int dtype_code = session->dtype_code;
+    rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps, dtype_code);
     std::vector<uint16_t> input_norm_half;
     std::vector<uint16_t> attention_out(static_cast<size_t>(hidden_size), 0);
     const int attention_code = kv_attention_decode_fp16(
         handle,
         layer,
-        floats_to_half_buffer(input_norm, input_norm_half),
+        floats_to_u16_buffer(input_norm, input_norm_half, dtype_code),
         q_weight,
         k_weight,
         v_weight,
@@ -448,20 +489,20 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     std::vector<float> residual_after_attention(static_cast<size_t>(hidden_size), 0.0f);
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
         residual_after_attention[static_cast<size_t>(dim)] =
-            fp16_to_fp32(hidden[dim]) + fp16_to_fp32(attention_out[static_cast<size_t>(dim)]);
+            read_u16(hidden[dim], dtype_code) + read_u16(attention_out[static_cast<size_t>(dim)], dtype_code);
     }
 
     std::vector<uint16_t> residual_half;
     std::vector<float> post_norm(static_cast<size_t>(hidden_size), 0.0f);
-    rms_norm_one(floats_to_half_buffer(residual_after_attention, residual_half), post_norm_weight, post_norm.data(), hidden_size, rms_eps);
+    rms_norm_one(floats_to_u16_buffer(residual_after_attention, residual_half, dtype_code), post_norm_weight, post_norm.data(), hidden_size, rms_eps, dtype_code);
 
     std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
     std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
     std::vector<float> hidden_half_source = post_norm;
     std::vector<uint16_t> post_norm_half;
-    uint16_t* post_norm_half_ptr = floats_to_half_buffer(hidden_half_source, post_norm_half);
-    linear_one(post_norm_half_ptr, gate_weight, gate.data(), hidden_size, intermediate_size);
-    linear_one(post_norm_half_ptr, up_weight, up.data(), hidden_size, intermediate_size);
+    uint16_t* post_norm_half_ptr = floats_to_u16_buffer(hidden_half_source, post_norm_half, dtype_code);
+    linear_one(post_norm_half_ptr, gate_weight, gate.data(), hidden_size, intermediate_size, dtype_code);
+    linear_one(post_norm_half_ptr, up_weight, up.data(), hidden_size, intermediate_size, dtype_code);
     std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
         const float g = gate[static_cast<size_t>(dim)];
@@ -473,13 +514,13 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     for (int64_t row = 0; row < hidden_size; ++row) {
         float acc = 0.0f;
         for (int64_t col = 0; col < intermediate_size; ++col) {
-            acc += activated[static_cast<size_t>(col)] * fp16_to_fp32(down_weight[row * intermediate_size + col]);
+            acc += activated[static_cast<size_t>(col)] * read_u16(down_weight[row * intermediate_size + col], dtype_code);
         }
         mlp_out[static_cast<size_t>(row)] = acc;
     }
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
-        out[dim] = fp32_to_fp16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)]);
+        out[dim] = write_u16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)], dtype_code);
     }
     return 0;
 }
