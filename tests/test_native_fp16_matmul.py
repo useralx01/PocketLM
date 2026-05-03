@@ -39,6 +39,18 @@ def test_native_fp16_matmul_kill_switch(monkeypatch) -> None:
         raise AssertionError("PCKETLM_DISABLE_NATIVE_MATMUL did not disable the native matmul path")
 
 
+def test_native_fp16_matmul_blas_kill_switch_keeps_handwritten_fallback(monkeypatch) -> None:
+    from pcketlm.native import fp16_matmul
+
+    monkeypatch.setenv("PCKETLM_DISABLE_BLAS_GEMM", "1")
+    torch.manual_seed(321)
+    a = (torch.randn((5, 7), dtype=torch.float32) * 0.2).to(torch.float16)
+    b = (torch.randn((7, 3), dtype=torch.float32) * 0.2).to(torch.float16)
+    native = fp16_matmul(a, b)
+    expected = (a.float() @ b.float()).to(torch.float16)
+    assert _max_ulp(native, expected) <= 1
+
+
 def test_native_fp16_matmul_microbench_smoke() -> None:
     from pcketlm.native import fp16_matmul
 

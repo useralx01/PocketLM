@@ -1198,3 +1198,17 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / native lm_head top-k
 - Kept the native lm_head top-k helper as opt-in only (`PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`). It is correct on fp16 and bf16 chunks, but real 14B default dispatch regressed decode-tail time. Torch remains the faster production default for this chunked lm_head shape.
 - Windows Application Control intermittently blocked rebuilt DLLs after checkout/build churn. The reliable recovery was delete/rebuild the affected DLL and run `Unblock-File`; no tests were skipped or weakened.
+
+## Phase Native fp16 BLAS / 14B correctness
+- Root cause: native RoPE used the pair index as the exponent numerator (`dim/head_dim`) instead of the even rotary dimension (`2*dim/head_dim`). This corrupted rotary phases for all nonzero pairs during native decode.
+- Fix: update the native KV attention and standalone attention kernels to match the Python/HF RoPE formula, and update the native KV test oracle so it cannot preserve the same mistake.
+
+## Phase Native fp16 BLAS / OpenBLAS
+- Vendored OpenBLAS 0.3.33 x64 from GitHub release asset `OpenBLAS-0.3.33-x64.zip`; SHA256 `7AD797EF0C9A5C42E28903BF726EAAAADE307DAFE187FF0E923D90CD4002780C`.
+- Layout: row-major `cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans)` with fp16 inputs converted to fp32, fp32 accumulation, and F16C round-to-nearest conversion back to fp16.
+- Threading: this prebuilt slows down above 4 threads on the 5120x5120 path, while torch scales better to 14 threads. The default OpenBLAS thread count is capped at 4; `PCKETLM_BLAS_THREADS` overrides it.
+- Fallback: `PCKETLM_DISABLE_BLAS_GEMM=1` keeps the prior handwritten GEMM inside `fp16_matmul.dll`; `PCKETLM_DISABLE_NATIVE_MATMUL=1` disables the native matmul wrapper entirely.
+
+## Phase Native fp16 BLAS / Layer GEMV rollback
+- OpenBLAS stays in `fp16_matmul.dll` only. Linking the production C-owned KV/layer DLL to OpenBLAS was unstable on the real 14B continuation path even when the BLAS branch was disabled. The layer DLL therefore remains on the prior handwritten GEMV loops for this phase.
+- This means the BLAS deliverable is correct and benchmarked in isolation, but it does not yet unlock the end-to-end fp16 speed targets. The next viable speed path is a purpose-built native GEMV/weight-packing layer kernel rather than per-call fp16->fp32 conversion into OpenBLAS.

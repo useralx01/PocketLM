@@ -73,7 +73,7 @@ static void apply_rope(
             float* base = values + (token * head_count + head) * head_dim;
             const int64_t half_dim = head_dim / 2;
             for (int64_t dim = 0; dim < half_dim; ++dim) {
-                const float inv_freq = std::pow(rope_theta, -static_cast<float>(dim) / static_cast<float>(head_dim));
+                const float inv_freq = std::pow(rope_theta, -(2.0f * static_cast<float>(dim)) / static_cast<float>(head_dim));
                 const float angle = position * inv_freq;
                 const float c = std::cos(angle);
                 const float s = std::sin(angle);

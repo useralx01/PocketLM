@@ -73,6 +73,7 @@ static void configure_openmp_threads() {
     #endif
 }
 
+
 static inline __m256 load_u16_as_ps(const uint16_t* values, int dtype_code) {
     const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values));
     if (dtype_code == 1) {
@@ -100,6 +101,46 @@ static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t
     for (; index < count; ++index) {
         out[index] = read_u16(values[index], dtype_code);
     }
+}
+
+static void load_matrix_u16_as_float(const uint16_t* values, float* out, int64_t count, int dtype_code) {
+    load_vector_u16_as_float(values, out, count, dtype_code);
+}
+
+static bool linear_one_blas(
+    const uint16_t* hidden,
+    const uint16_t* weight,
+    const uint16_t* bias,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    (void)hidden;
+    (void)weight;
+    (void)bias;
+    (void)out;
+    (void)in_features;
+    (void)out_features;
+    (void)dtype_code;
+    return false;
+}
+
+static bool linear_float_u16_blas(
+    const float* hidden,
+    const uint16_t* weight,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    (void)hidden;
+    (void)weight;
+    (void)out;
+    (void)in_features;
+    (void)out_features;
+    (void)dtype_code;
+    return false;
 }
 
 static inline float dot_float_u16(const float* left, const uint16_t* right, int64_t count, int dtype_code) {
@@ -144,6 +185,9 @@ static void linear_one(
     int64_t out_features,
     int dtype_code
 ) {
+    if (linear_one_blas(hidden, weight, bias, out, in_features, out_features, dtype_code)) {
+        return;
+    }
     std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
     load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
 
@@ -168,6 +212,12 @@ static void linear_two_same_input(
     int64_t out_features,
     int dtype_code
 ) {
+    if (
+        linear_one_blas(hidden, weight_a, nullptr, out_a, in_features, out_features, dtype_code) &&
+        linear_one_blas(hidden, weight_b, nullptr, out_b, in_features, out_features, dtype_code)
+    ) {
+        return;
+    }
     std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
     load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
 
@@ -194,6 +244,13 @@ static void linear_three_same_input(
     int64_t kv_features,
     int dtype_code
 ) {
+    if (
+        linear_one_blas(hidden, weight_q, bias_q, out_q, in_features, q_features, dtype_code) &&
+        linear_one_blas(hidden, weight_k, bias_k, out_k, in_features, kv_features, dtype_code) &&
+        linear_one_blas(hidden, weight_v, bias_v, out_v, in_features, kv_features, dtype_code)
+    ) {
+        return;
+    }
     std::vector<float> hidden_f(static_cast<size_t>(in_features), 0.0f);
     load_vector_u16_as_float(hidden, hidden_f.data(), in_features, dtype_code);
 
@@ -235,7 +292,7 @@ static void apply_rope_one(
     for (int64_t head = 0; head < head_count; ++head) {
         float* base = values + head * head_dim;
         for (int64_t dim = 0; dim < half_dim; ++dim) {
-            const float inv_freq = std::pow(rope_theta, -static_cast<float>(dim) / static_cast<float>(head_dim));
+            const float inv_freq = std::pow(rope_theta, -(2.0f * static_cast<float>(dim)) / static_cast<float>(head_dim));
             const float angle = static_cast<float>(position) * inv_freq;
             const float c = std::cos(angle);
             const float s = std::sin(angle);
@@ -600,10 +657,20 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
         }
     }
 
-    #pragma omp parallel for schedule(static)
+    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), hidden_size, hidden_size, session->dtype_code)) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            projected[static_cast<size_t>(row)] = dot_float_u16(
+                context.data(),
+                o_weight + row * hidden_size,
+                hidden_size,
+                session->dtype_code
+            );
+        }
+    }
     for (int64_t row = 0; row < hidden_size; ++row) {
-        const float acc = dot_float_u16(context.data(), o_weight + row * hidden_size, hidden_size, session->dtype_code);
-        out[row] = write_u16(acc, session->dtype_code);
+        out[row] = write_u16(projected[static_cast<size_t>(row)], session->dtype_code);
     }
     return 0;
 }
@@ -724,10 +791,20 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
         }
     }
 
-    #pragma omp parallel for schedule(static)
+    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), hidden_size, hidden_size, session->dtype_code)) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            projected[static_cast<size_t>(row)] = dot_float_u16(
+                context.data(),
+                o_weight + row * hidden_size,
+                hidden_size,
+                session->dtype_code
+            );
+        }
+    }
     for (int64_t row = 0; row < hidden_size; ++row) {
-        const float acc = dot_float_u16(context.data(), o_weight + row * hidden_size, hidden_size, session->dtype_code);
-        out[row] = write_u16(acc, session->dtype_code);
+        out[row] = write_u16(projected[static_cast<size_t>(row)], session->dtype_code);
     }
     return 0;
 }
@@ -849,11 +926,21 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
         }
     }
 
-    #pragma omp parallel for schedule(static)
+    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), attention_width, hidden_size, session->dtype_code)) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            const uint16_t* weight_row = o_weight + row * attention_width;
+            projected[static_cast<size_t>(row)] = dot_float_u16(
+                context.data(),
+                weight_row,
+                attention_width,
+                session->dtype_code
+            );
+        }
+    }
     for (int64_t row = 0; row < hidden_size; ++row) {
-        const uint16_t* weight_row = o_weight + row * attention_width;
-        const float acc = dot_float_u16(context.data(), weight_row, attention_width, session->dtype_code);
-        out[row] = write_u16(acc, session->dtype_code);
+        out[row] = write_u16(projected[static_cast<size_t>(row)], session->dtype_code);
     }
     return 0;
 }
@@ -949,14 +1036,16 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     }
 
     std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
-    #pragma omp parallel for schedule(static)
-    for (int64_t row = 0; row < hidden_size; ++row) {
-        mlp_out[static_cast<size_t>(row)] = dot_float_u16(
-            activated.data(),
-            down_weight + row * intermediate_size,
-            intermediate_size,
-            dtype_code
-        );
+    if (!linear_float_u16_blas(activated.data(), down_weight, mlp_out.data(), intermediate_size, hidden_size, dtype_code)) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            mlp_out[static_cast<size_t>(row)] = dot_float_u16(
+                activated.data(),
+                down_weight + row * intermediate_size,
+                intermediate_size,
+                dtype_code
+            );
+        }
     }
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
@@ -1150,14 +1239,16 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
     }
 
     std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
-    #pragma omp parallel for schedule(static)
-    for (int64_t row = 0; row < hidden_size; ++row) {
-        mlp_out[static_cast<size_t>(row)] = dot_float_u16(
-            activated.data(),
-            down_weight + row * intermediate_size,
-            intermediate_size,
-            dtype_code
-        );
+    if (!linear_float_u16_blas(activated.data(), down_weight, mlp_out.data(), intermediate_size, hidden_size, dtype_code)) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            mlp_out[static_cast<size_t>(row)] = dot_float_u16(
+                activated.data(),
+                down_weight + row * intermediate_size,
+                intermediate_size,
+                dtype_code
+            );
+        }
     }
 
     for (int64_t dim = 0; dim < hidden_size; ++dim) {

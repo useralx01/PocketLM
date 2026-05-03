@@ -10,6 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NATIVE_DIR = PROJECT_ROOT / "src" / "pcketlm" / "native"
+OPENBLAS_DIR = PROJECT_ROOT / "vendor" / "openblas"
 VS_ROOT = Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC")
 
 
@@ -31,10 +32,26 @@ def build_cpp(source: Path, *, force: bool = False) -> Path:
     if dll.exists() and not force and dll.stat().st_mtime_ns >= source.stat().st_mtime_ns:
         return dll
     vcvars = find_vcvars64()
+    include_flags = ""
+    link_flags = ""
+    post_copy = ""
+    if source.name == "fp16_matmul.cpp":
+        openblas_include = OPENBLAS_DIR / "include"
+        openblas_lib = OPENBLAS_DIR / "lib" / "libopenblas.lib"
+        openblas_dll = OPENBLAS_DIR / "bin" / "libopenblas.dll"
+        if not openblas_include.exists() or not openblas_lib.exists() or not openblas_dll.exists():
+            raise FileNotFoundError(
+                "OpenBLAS vendor files are missing. Expected "
+                f"{openblas_include}, {openblas_lib}, and {openblas_dll}."
+            )
+        include_flags = f' /I"{openblas_include}"'
+        link_flags = f' /link "{openblas_lib}"'
+        post_copy = f'copy /Y "{openblas_dll}" "{NATIVE_DIR / "libopenblas.dll"}" >nul\n'
     batch = (
         "@echo off\n"
         f'call "{vcvars}" >nul\n'
-        f'cl.exe /nologo /O2 /EHsc /std:c++17 /arch:AVX2 /openmp /LD "{source}" /Fe:"{dll}"\n'
+        f'cl.exe /nologo /O2 /EHsc /std:c++17 /arch:AVX2 /openmp{include_flags} /LD "{source}" /Fe:"{dll}"{link_flags}\n'
+        f"{post_copy}"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".cmd", delete=False, encoding="utf-8") as handle:
         handle.write(batch)

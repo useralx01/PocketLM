@@ -26,3 +26,7 @@ state/runtime-settings.json
 state/llama-server.json
 state/downloads/
 state/warm-runner/
+vendor/openblas/
+src/pcketlm/native/*.obj
+src/pcketlm/native/*.exp
+src/pcketlm/native/*.lib

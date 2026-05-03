@@ -5047,3 +5047,32 @@ Result: 297 passed in 21.83s
 - Native-focused suite: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_moe.py tests\test_native_fp16_loader.py tests\test_native_fp16_matmul.py tests\test_runtime_layer_bridge.py -q` -> 62 passed in 5.84s.
 - Full test suite: `python -m pytest tests/ -q` -> 306 passed in 24.82s.
 - Current 14B regression prompt after all committed native changes: `hello world`, max_new_tokens=4 -> ready=true, anti_cheat=true, layers_executed=144/144, generated_text=`HelloWorld<|im_end|>`, total=57.1689s, continuation_stack_op_native_layer=27.7446s, continuation_decode_tail=2.2843s.
+
+## Phase Native fp16 BLAS / Setup
+- Branch: `phase-native-fp16-blas`.
+
+
+## Phase Native fp16 BLAS / A / 14B correctness
+- Python fallback baseline (`max_new_tokens=3`): generated_token_ids `[9707, 0, 2585]`, verbatim `Hello! How`, layers_executed `144/144`.
+- Native before fix: generated_token_ids `[9707, 10134, 151645]`, verbatim `HelloWorld<|im_end|>`, layers_executed `144/144`.
+- Divergence localized to native attention RoPE frequency calculation. C used `dim/head_dim`; Python reference uses `(2*dim)/head_dim`.
+- Test gate: `pytest tests/test_native_fp16_kv_cache.py -q` failed 5 attention/KV checks after correcting the Python oracle, then passed after the C fix (`11 passed`).
+- Native after fix (`max_new_tokens=3`): generated_token_ids `[9707, 0, 2585]`, verbatim `Hello! How`, layers_executed `144/144`, total `48.4195s`.
+
+## Phase Native fp16 BLAS / B-C-D / OpenBLAS
+- OpenBLAS version: `0.3.33` (`OpenBLAS-0.3.33-x64.zip`).
+- URL: `https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.33/OpenBLAS-0.3.33-x64.zip`.
+- SHA256: `7AD797EF0C9A5C42E28903BF726EAAAADE307DAFE187FF0E923D90CD4002780C`.
+- Vendored under `vendor/openblas/`; ignored by git as a build artifact.
+- Build: `python tools/build_native.py --force` copied `libopenblas.dll` next to `fp16_matmul.dll`.
+- Load check: `native_fp16_matmul_available=True`, error `None`.
+- Tests: `pytest tests/test_native_fp16_matmul.py tests/test_native_fp16_kv_cache.py -q` -> `16 passed`.
+- Microbench 5120x5120: native default OpenBLAS `0.6729438999900594s`, torch with 4 threads `1.967040600022301s`, same-thread speedup `2.92303801260604x`, max_abs `1.52587890625e-05`.
+- Torch with 14 threads measured `0.6014232000452466s`; OpenBLAS prebuilt is slower than torch at 14 threads, so default OpenBLAS threads are capped at 4 for this machine.
+
+## Phase Native fp16 BLAS / Layer GEMV attempt
+- Attempted to link `fp16_kv_cache.dll` against OpenBLAS and route native layer GEMV calls through `cblas_sgemv`.
+- Small native KV/layer tests passed, but real Qwen 14B continuation exited before the diagnostic `after` row. Explicit `PCKETLM_DISABLE_BLAS_GEMM=1` did not recover the real continuation while the KV DLL was linked to OpenBLAS.
+- Surgical recovery: removed the OpenBLAS dependency from `fp16_kv_cache.dll`, kept the RoPE correctness fix, and kept OpenBLAS isolated to `fp16_matmul.dll`.
+- Recovery tests: `pytest tests/test_native_fp16_kv_cache.py tests/test_native_fp16_matmul.py tests/test_runtime_layer_bridge.py -q` -> `57 passed`.
+- Recovery real run: Qwen 14B `max_new_tokens=3` generated `Hello! How`, token ids `[9707, 0, 2585]`, layers_executed `144/144`, total `55.8688s`.

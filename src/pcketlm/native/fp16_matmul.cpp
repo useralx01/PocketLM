@@ -3,10 +3,16 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include <algorithm>
+#include <vector>
+
+#include "cblas.h"
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+extern "C" void openblas_set_num_threads(int num_threads);
 
 static inline float fp16_to_fp32(uint16_t value) {
     const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
@@ -149,7 +155,7 @@ extern "C" __declspec(dllexport) int native_lm_head_topk_u16(
     return 0;
 }
 
-extern "C" __declspec(dllexport) int native_fp16_matmul(
+static int handwritten_fp16_matmul(
     const uint16_t* a,
     const uint16_t* b,
     uint16_t* c,
@@ -235,5 +241,101 @@ extern "C" __declspec(dllexport) int native_fp16_matmul(
             c[row * n + col] = fp32_to_fp16(acc);
         }
     }
+    return 0;
+}
+
+static void configure_blas_threads() {
+    const char* requested_threads = std::getenv("PCKETLM_BLAS_THREADS");
+    if (requested_threads == nullptr || requested_threads[0] == '\0') {
+        requested_threads = std::getenv("PCKETLM_NATIVE_THREADS");
+    }
+    if (requested_threads != nullptr && requested_threads[0] != '\0') {
+        const int parsed = std::atoi(requested_threads);
+        if (parsed > 0) {
+            openblas_set_num_threads(parsed);
+            return;
+        }
+    }
+    #ifdef _OPENMP
+    openblas_set_num_threads(std::max(1, std::min(4, omp_get_num_procs())));
+    #else
+    openblas_set_num_threads(1);
+    #endif
+}
+
+static void fp16_matrix_to_fp32(const uint16_t* source, float* dest, int64_t count) {
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        const __m128i half = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + index));
+        _mm256_storeu_ps(dest + index, _mm256_cvtph_ps(half));
+    }
+    for (; index < count; ++index) {
+        dest[index] = fp16_to_fp32(source[index]);
+    }
+}
+
+static void fp32_matrix_to_fp16(const float* source, uint16_t* dest, int64_t count) {
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        const __m256 values = _mm256_loadu_ps(source + index);
+        const __m128i half = _mm256_cvtps_ph(values, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dest + index), half);
+    }
+    for (; index < count; ++index) {
+        dest[index] = fp32_to_fp16(source[index]);
+    }
+}
+
+extern "C" __declspec(dllexport) int native_fp16_matmul(
+    const uint16_t* a,
+    const uint16_t* b,
+    uint16_t* c,
+    int64_t m,
+    int64_t n,
+    int64_t k
+) {
+    if (a == nullptr || b == nullptr || c == nullptr) {
+        return 1;
+    }
+    if (m < 0 || n < 0 || k < 0) {
+        return 2;
+    }
+    const char* disable_blas = std::getenv("PCKETLM_DISABLE_BLAS_GEMM");
+    if (disable_blas != nullptr && (
+        std::strcmp(disable_blas, "1") == 0 ||
+        std::strcmp(disable_blas, "true") == 0 ||
+        std::strcmp(disable_blas, "yes") == 0 ||
+        std::strcmp(disable_blas, "on") == 0
+    )) {
+        return handwritten_fp16_matmul(a, b, c, m, n, k);
+    }
+    configure_blas_threads();
+
+    const size_t a_count = static_cast<size_t>(m * k);
+    const size_t b_count = static_cast<size_t>(k * n);
+    const size_t c_count = static_cast<size_t>(m * n);
+    std::vector<float> a32(a_count);
+    std::vector<float> b32(b_count);
+    std::vector<float> c32(c_count, 0.0f);
+
+    fp16_matrix_to_fp32(a, a32.data(), static_cast<int64_t>(a_count));
+    fp16_matrix_to_fp32(b, b32.data(), static_cast<int64_t>(b_count));
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasNoTrans,
+        static_cast<blasint>(m),
+        static_cast<blasint>(n),
+        static_cast<blasint>(k),
+        1.0f,
+        a32.data(),
+        static_cast<blasint>(k),
+        b32.data(),
+        static_cast<blasint>(n),
+        0.0f,
+        c32.data(),
+        static_cast<blasint>(n)
+    );
+    fp32_matrix_to_fp16(c32.data(), c, static_cast<int64_t>(c_count));
     return 0;
 }

@@ -247,3 +247,13 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 ## Phase Native fp16 Integration / rejected native defaults
 - Dense native prefill was correct but regressed real 14B prefill (`prefill_stack_op_native_layer=64.3411s` vs default torch prefill around `19.8s`), so it remains opt-in via `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1`.
 - Native lm_head top-k was correct but regressed the real 14B row (`continuation_decode_tail=3.626s`), so it remains opt-in via `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`.
+
+## Phase Native fp16 BLAS / 14B native regression
+- Symptom: native Qwen 14B generated `HelloWorld<|im_end|>` for `hello world`, while Python fallback generated `Hello! How`.
+- Root cause: native RoPE frequency exponent was off by a factor of 2.
+- Fix: corrected RoPE exponent in `fp16_kv_cache.cpp` and `fp16_attention.cpp`; corrected the test oracle in `test_native_fp16_kv_cache.py`.
+
+## Phase Native fp16 BLAS / OpenBLAS in KV DLL
+- Symptom: real Qwen 14B continuation exited before diagnostic completion when `fp16_kv_cache.dll` was linked against OpenBLAS.
+- Root cause: OpenBLAS dependency in the C-owned KV/layer DLL was not stable at real model dimensions on this Windows runtime; small tests were insufficient to catch it.
+- Fix: removed OpenBLAS from the KV/layer DLL and kept BLAS isolated to `fp16_matmul.dll`.

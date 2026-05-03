@@ -6,7 +6,7 @@ def _rope_one(values: torch.Tensor, position: int, head_count: int, head_dim: in
     out = values.float().reshape(head_count, head_dim).clone()
     half_dim = head_dim // 2
     for dim in range(half_dim):
-        inv_freq = rope_theta ** (-float(dim) / float(head_dim))
+        inv_freq = rope_theta ** (-(2.0 * float(dim)) / float(head_dim))
         angle = float(position) * inv_freq
         c = torch.tensor(torch.cos(torch.tensor(angle)).item(), dtype=torch.float32)
         s = torch.tensor(torch.sin(torch.tensor(angle)).item(), dtype=torch.float32)
