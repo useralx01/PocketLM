@@ -1140,3 +1140,4 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Routed only the single-token MoE attention decode through the C-owned KV module.
 - Kept router/top-k expert selection in Python because it controls paged expert materialization and avoids loading all experts.
 - Kept selected expert FFN in the existing native selected-MoE kernel. This gives MoE layers native attention plus native selected FFN without changing the paging policy.
+- Qwen3 fp16 first-token runtime remains dominated by prefill tensor loading, not native decode math. The post-change one-token run spent 298.8721s in prefill tensor loads and never reached continuation decode. Forced scoped safetensor handles still exit early for Qwen3, so the scoped-handle policy remains excluded for this model.
