@@ -5013,3 +5013,9 @@ Result: 297 passed in 21.83s
 - Focused tests: `python -m pytest tests\test_speculative.py::test_session_native_kv_commit_and_rollback_are_explicit tests\test_speculative.py::test_session_prefill_then_single_verify_uses_existing_kv tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer tests\test_runtime_layer_bridge.py::test_native_attention_decode_dispatch_runs_one_token_moe_attention -q` -> 4 passed in 1.66s.
 - Broader tests: `python -m pytest tests\test_speculative.py tests\test_runtime_layer_bridge.py tests\test_native_fp16_kv_cache.py -q` -> 60 passed in 3.76s.
 - Full test suite: `python -m pytest tests/ -q` -> 301 passed in 22.69s.
+
+## Phase Native fp16 Integration / tentative native KV bridge guard
+- Added a direct bridge regression guard for speculative native attention decode: `_try_native_attention_decode_bridge(..., native_kv_commit=False)` appends the decoded token as tentative C-owned KV, leaves the committed length unchanged, and clears the tentative suffix on rollback.
+- Focused test: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_attention_decode_can_leave_kv_tentative_for_speculation -q` -> 1 passed in 1.66s.
+- Broader tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_speculative.py tests\test_native_fp16_kv_cache.py -q` -> 61 passed in 3.30s.
+- Full test suite: `python -m pytest tests/ -q` -> 302 passed in 23.15s.

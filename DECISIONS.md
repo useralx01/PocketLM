@@ -1184,3 +1184,4 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / speculative native KV boundary
 - Normal decode commits native C KV inside the bridge because each generated token is final. Speculative verification cannot do that: candidate suffixes are tentative until accepted.
 - Added an explicit `native_kv_commit` bridge flag. The default remains `true`; `SpeculativeSession.verify_candidates` passes `false` and owns commit/rollback. This keeps the native session contract aligned with the existing Python KV speculative contract.
+- Added a bridge-level test at `_try_native_attention_decode_bridge` rather than only the higher-level speculative loop so future native attention changes cannot accidentally commit candidate KV before `SpeculativeSession` has accepted it.

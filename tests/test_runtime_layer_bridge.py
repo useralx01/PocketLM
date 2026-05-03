@@ -385,6 +385,78 @@ def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypat
         session.close()
 
 
+def test_native_attention_decode_can_leave_kv_tentative_for_speculation(monkeypatch) -> None:
+    hidden_size = 8
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = 4
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-attention-tentative-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=16,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(987)
+    tensors = {
+        "self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+    }
+
+    def fake_exists(_model_id, tensor_name):
+        return any(tensor_name.endswith(suffix) for suffix in tensors)
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        loaded = {}
+        for name in tensor_names:
+            suffix = next(suffix for suffix in tensors if name.endswith(suffix))
+            loaded[name] = SimpleNamespace(ready=True, tensor=tensors[suffix], blockers=[])
+        return loaded
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_ATTENTION", raising=False)
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+
+    payload = layer_bridge_module._try_native_attention_decode_bridge(
+        "native-attention-tentative-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        (
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+            torch.zeros((1, num_kv_heads, 2, head_dim), dtype=torch.bfloat16),
+        ),
+        None,
+        config,
+        tensor_policy=None,
+        timings={},
+        native_kv_commit=False,
+    )
+
+    assert payload is not None
+    _output, cache_sequence_length, session = payload
+    try:
+        assert cache_sequence_length == 3
+        assert session.committed_length(0) == 2
+        assert session.tentative_length(0) == 1
+        session.rollback()
+        assert session.committed_length(0) == 2
+        assert session.tentative_length(0) == 0
+    finally:
+        session.close()
+
+
 def test_trim_generated_text_at_stop_string_removes_visible_marker() -> None:
     text, marker = _trim_generated_text_at_stop_string("Hello<|im_end|>ignored", ["<|im_end|>"])
 
