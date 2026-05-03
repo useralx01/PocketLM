@@ -1194,3 +1194,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase Native fp16 Integration / dot-kernel unroll
 - Kept the four-accumulator AVX2 dot helper because it passed the full suite and was neutral/slightly positive on the real 14B row. It is not enough to move the phase speed target; the dense fp16 path remains dominated by memory-bandwidth-scale matvec work.
+
+## Phase Native fp16 Integration / native lm_head top-k
+- Kept the native lm_head top-k helper as opt-in only (`PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`). It is correct on fp16 and bf16 chunks, but real 14B default dispatch regressed decode-tail time. Torch remains the faster production default for this chunked lm_head shape.
+- Windows Application Control intermittently blocked rebuilt DLLs after checkout/build churn. The reliable recovery was delete/rebuild the affected DLL and run `Unblock-File`; no tests were skipped or weakened.

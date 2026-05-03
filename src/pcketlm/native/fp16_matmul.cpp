@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
 #include <immintrin.h>
 
 #ifdef _OPENMP
@@ -16,6 +18,135 @@ static inline uint16_t fp32_to_fp16(float value) {
     const __m128 full = _mm_set_ss(value);
     const __m128i half = _mm_cvtps_ph(full, 0);
     return static_cast<uint16_t>(_mm_cvtsi128_si32(half));
+}
+
+static inline float bf16_to_fp32(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(float));
+    return out;
+}
+
+static inline __m256 load_u16_as_ps(const uint16_t* values, int dtype_code) {
+    const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values));
+    if (dtype_code == 1) {
+        __m256i widened = _mm256_cvtepu16_epi32(packed);
+        widened = _mm256_slli_epi32(widened, 16);
+        return _mm256_castsi256_ps(widened);
+    }
+    return _mm256_cvtph_ps(packed);
+}
+
+static inline float read_u16(uint16_t value, int dtype_code) {
+    return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
+}
+
+static inline float horizontal_sum_ps(__m256 values) {
+    const __m128 low = _mm256_castps256_ps128(values);
+    const __m128 high = _mm256_extractf128_ps(values, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
+static inline float dot_u16_u16(const uint16_t* left, const uint16_t* right, int64_t count, int dtype_code) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    int64_t index = 0;
+    for (; index + 32 <= count; index += 32) {
+        acc0 = _mm256_fmadd_ps(load_u16_as_ps(left + index, dtype_code), load_u16_as_ps(right + index, dtype_code), acc0);
+        acc1 = _mm256_fmadd_ps(load_u16_as_ps(left + index + 8, dtype_code), load_u16_as_ps(right + index + 8, dtype_code), acc1);
+        acc2 = _mm256_fmadd_ps(load_u16_as_ps(left + index + 16, dtype_code), load_u16_as_ps(right + index + 16, dtype_code), acc2);
+        acc3 = _mm256_fmadd_ps(load_u16_as_ps(left + index + 24, dtype_code), load_u16_as_ps(right + index + 24, dtype_code), acc3);
+    }
+    for (; index + 8 <= count; index += 8) {
+        acc0 = _mm256_fmadd_ps(load_u16_as_ps(left + index, dtype_code), load_u16_as_ps(right + index, dtype_code), acc0);
+    }
+    float acc = horizontal_sum_ps(_mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3)));
+    for (; index < count; ++index) {
+        acc += read_u16(left[index], dtype_code) * read_u16(right[index], dtype_code);
+    }
+    return acc;
+}
+
+static void insert_topk(float value, int64_t token_id, float* top_logits, int64_t* top_ids, int64_t top_k) {
+    int64_t slot = -1;
+    float worst = INFINITY;
+    for (int64_t index = 0; index < top_k; ++index) {
+        if (top_ids[index] < 0) {
+            slot = index;
+            break;
+        }
+        if (top_logits[index] < worst) {
+            worst = top_logits[index];
+            slot = index;
+        }
+    }
+    if (slot >= 0 && (top_ids[slot] < 0 || value > top_logits[slot])) {
+        top_logits[slot] = value;
+        top_ids[slot] = token_id;
+    }
+}
+
+extern "C" __declspec(dllexport) int native_lm_head_topk_u16(
+    const uint16_t* hidden,
+    const uint16_t* weight,
+    int64_t* out_ids,
+    float* out_logits,
+    int64_t rows,
+    int64_t hidden_size,
+    int64_t top_k,
+    int dtype_code,
+    int64_t token_offset
+) {
+    if (hidden == nullptr || weight == nullptr || out_ids == nullptr || out_logits == nullptr) {
+        return 1;
+    }
+    if (rows <= 0 || hidden_size <= 0 || top_k <= 0 || (dtype_code != 0 && dtype_code != 1)) {
+        return 2;
+    }
+    #ifdef _OPENMP
+    const char* requested_threads = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (requested_threads != nullptr) {
+        const int parsed = std::atoi(requested_threads);
+        if (parsed > 0) {
+            omp_set_num_threads(parsed);
+        }
+    }
+    #endif
+    for (int64_t index = 0; index < top_k; ++index) {
+        out_ids[index] = -1;
+        out_logits[index] = -INFINITY;
+    }
+
+    #pragma omp parallel
+    {
+        float* local_logits = new float[static_cast<size_t>(top_k)];
+        int64_t* local_ids = new int64_t[static_cast<size_t>(top_k)];
+        for (int64_t index = 0; index < top_k; ++index) {
+            local_ids[index] = -1;
+            local_logits[index] = -INFINITY;
+        }
+        #pragma omp for schedule(static)
+        for (int64_t row = 0; row < rows; ++row) {
+            const float logit = dot_u16_u16(hidden, weight + row * hidden_size, hidden_size, dtype_code);
+            insert_topk(logit, token_offset + row, local_logits, local_ids, top_k);
+        }
+        #pragma omp critical
+        {
+            for (int64_t index = 0; index < top_k; ++index) {
+                if (local_ids[index] >= 0) {
+                    insert_topk(local_logits[index], local_ids[index], out_logits, out_ids, top_k);
+                }
+            }
+        }
+        delete[] local_logits;
+        delete[] local_ids;
+    }
+    return 0;
 }
 
 extern "C" __declspec(dllexport) int native_fp16_matmul(

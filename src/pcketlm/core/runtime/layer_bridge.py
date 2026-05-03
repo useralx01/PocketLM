@@ -2837,6 +2837,18 @@ def run_decode_tail(
     k = min(top_k, vocab_size)
 
     canceled_during_lm_head = False
+    native_lm_head_topk = None
+    native_lm_head_topk_enabled = os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if native_lm_head_topk_enabled and not return_logits and repetition_penalty == 1.0:
+        try:
+            from pcketlm.native import lm_head_topk_u16 as native_lm_head_topk
+        except Exception:
+            native_lm_head_topk = None
 
     def stream_lm_head(handle) -> bool:
         nonlocal streamed_top_logits, streamed_top_token_ids
@@ -2846,20 +2858,39 @@ def run_decode_tail(
                 return False
             end = min(start + lm_head_chunk_rows, vocab_size)
             weight_chunk = lm_head_slice[start:end].to(dtype=math_dtype)
-            logits_chunk = F.linear(hidden_vector, weight_chunk)
+            if native_lm_head_topk is not None:
+                try:
+                    chunk_top_logits, chunk_top_token_ids = native_lm_head_topk(
+                        hidden_vector.reshape(-1).to(dtype=math_dtype),
+                        weight_chunk,
+                        top_k=min(k, end - start),
+                        token_offset=start,
+                    )
+                    logits_chunk = None
+                except Exception:
+                    chunk_top_logits = None
+                    chunk_top_token_ids = None
+                    logits_chunk = F.linear(hidden_vector, weight_chunk)
+            else:
+                chunk_top_logits = None
+                chunk_top_token_ids = None
+                logits_chunk = F.linear(hidden_vector, weight_chunk)
             if return_logits:
+                assert logits_chunk is not None
                 logits_chunks.append(logits_chunk)
             else:
-                chunk_vector = logits_chunk.view(-1).float()
-                if repetition_penalty != 1.0 and recent_ids:
-                    for token_id in recent_ids:
-                        if start <= token_id < end:
-                            index = token_id - start
-                            value = chunk_vector[index]
-                            chunk_vector[index] = value * repetition_penalty if value < 0 else value / repetition_penalty
-                chunk_k = min(k, chunk_vector.shape[0])
-                chunk_top_logits, chunk_top_offsets = torch.topk(chunk_vector, k=chunk_k)
-                chunk_top_token_ids = chunk_top_offsets + start
+                if chunk_top_logits is None or chunk_top_token_ids is None:
+                    assert logits_chunk is not None
+                    chunk_vector = logits_chunk.view(-1).float()
+                    if repetition_penalty != 1.0 and recent_ids:
+                        for token_id in recent_ids:
+                            if start <= token_id < end:
+                                index = token_id - start
+                                value = chunk_vector[index]
+                                chunk_vector[index] = value * repetition_penalty if value < 0 else value / repetition_penalty
+                    chunk_k = min(k, chunk_vector.shape[0])
+                    chunk_top_logits, chunk_top_offsets = torch.topk(chunk_vector, k=chunk_k)
+                    chunk_top_token_ids = chunk_top_offsets + start
                 if streamed_top_logits is None or streamed_top_token_ids is None:
                     streamed_top_logits = chunk_top_logits
                     streamed_top_token_ids = chunk_top_token_ids

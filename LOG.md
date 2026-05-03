@@ -5037,3 +5037,12 @@ Result: 297 passed in 21.83s
 - Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> 52 passed in 5.63s.
 - Real 14B row: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=65.423s, continuation_stack_op_native_layer=35.8638s, continuation_stack_op_load_tensors=3.221s. This is effectively neutral vs the gated-prefill default row (`35.928s` native layer) but not a regression.
 - Full test suite: `python -m pytest tests/ -q` -> 305 passed in 26.97s.
+
+## Phase Native fp16 Integration / native lm_head top-k probe
+- Added a native chunk-level lm_head top-k helper for fp16/bf16 chunks and wired it only behind `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`.
+- Focused test: `python -m pytest tests\test_native_fp16_matmul.py::test_native_lm_head_topk_matches_torch_for_fp16_and_bf16 -q` -> 1 passed in 2.38s.
+- Focused integration tests: `python -m pytest tests\test_native_fp16_matmul.py tests\test_runtime_layer_bridge.py::test_run_decode_tail_can_stream_topk_without_full_logits tests\test_runtime_layer_bridge.py::test_run_decode_tail_streams_lm_head_and_returns_logits -q` -> 6 passed in 3.30s.
+- Real 14B with native lm_head top-k enabled by default regressed: ready=true, anti_cheat=true, layers_executed=192/192, generated_text=`The capital of France`, total=69.7266s, continuation_decode_tail=3.626s, continuation_stack_op_native_layer=39.3537s. Gated it behind explicit opt-in before commit.
+- Native DLL load checks after Windows Application Control rebuild/unblock: kv=true, moe=true, loader=true, q4=true, matmul=true.
+- Native-focused suite: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_moe.py tests\test_native_fp16_loader.py tests\test_native_fp16_matmul.py tests\test_runtime_layer_bridge.py -q` -> 62 passed in 5.84s.
+- Full test suite: `python -m pytest tests/ -q` -> 306 passed in 24.82s.

@@ -58,3 +58,17 @@ def test_native_fp16_matmul_microbench_smoke() -> None:
             os.environ.pop("PCKETLM_NATIVE_THREADS", None)
         else:
             os.environ["PCKETLM_NATIVE_THREADS"] = old_threads
+
+
+def test_native_lm_head_topk_matches_torch_for_fp16_and_bf16() -> None:
+    from pcketlm.native import lm_head_topk_u16
+
+    torch.manual_seed(789)
+    for dtype in (torch.float16, torch.bfloat16):
+        hidden = (torch.randn((32,), dtype=torch.float32) * 0.2).to(dtype)
+        weight = (torch.randn((41, 32), dtype=torch.float32) * 0.2).to(dtype)
+        native_logits, native_ids = lm_head_topk_u16(hidden, weight, top_k=5, token_offset=100)
+        expected = torch.mv(weight.float(), hidden.float())
+        expected_logits, expected_offsets = torch.topk(expected, k=5)
+        assert torch.equal(native_ids, expected_offsets.to(torch.int64) + 100)
+        assert torch.allclose(native_logits, expected_logits, atol=1e-4, rtol=1e-4)

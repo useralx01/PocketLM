@@ -166,6 +166,19 @@ def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.native_fp16_matmul.restype = ctypes.c_int
+        if hasattr(lib, "native_lm_head_topk_u16"):
+            lib.native_lm_head_topk_u16.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_int,
+                ctypes.c_longlong,
+            ]
+            lib.native_lm_head_topk_u16.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP16_MATMUL_ERROR = exc
         return None
@@ -208,6 +221,47 @@ def fp16_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     if code != 0:
         raise RuntimeError(f"native_fp16_matmul failed with code {code}")
     return out
+
+
+def lm_head_topk_u16(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    top_k: int,
+    token_offset: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lib = _load_fp16_matmul_lib()
+    if lib is None or not hasattr(lib, "native_lm_head_topk_u16"):
+        reason = "disabled" if _native_matmul_disabled() else _FP16_MATMUL_ERROR
+        raise RuntimeError(f"Native lm_head top-k is unavailable: {reason}")
+    if hidden.dtype != weight.dtype:
+        raise TypeError("lm_head_topk_u16 requires hidden and weight to share dtype")
+    dtype_code = _u16_storage_dtype_code(hidden.dtype)
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
+    weight_cpu = weight.detach().cpu().contiguous()
+    if weight_cpu.ndim != 2:
+        raise ValueError("weight must have shape [rows, hidden_size]")
+    rows = int(weight_cpu.shape[0])
+    hidden_size = int(weight_cpu.shape[1])
+    if hidden_cpu.numel() != hidden_size:
+        raise ValueError("hidden size does not match lm_head weight")
+    ids = torch.empty((int(top_k),), dtype=torch.int64)
+    logits = torch.empty((int(top_k),), dtype=torch.float32)
+    code = lib.native_lm_head_topk_u16(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(ids.data_ptr())),
+        ctypes.c_void_p(int(logits.data_ptr())),
+        ctypes.c_longlong(rows),
+        ctypes.c_longlong(hidden_size),
+        ctypes.c_longlong(int(top_k)),
+        ctypes.c_int(dtype_code),
+        ctypes.c_longlong(int(token_offset)),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_lm_head_topk_u16 failed with code {code}")
+    order = torch.argsort(logits, descending=True)
+    return logits[order], ids[order]
 
 
 def _load_fp16_attention_lib() -> ctypes.CDLL | None:
