@@ -4834,3 +4834,7 @@ python -m pytest tests/ -q
   - size=512 native=0.002286s torch=0.003189s max_abs=0.03125
   - size=1024 native=0.033356s torch=0.009961s max_abs=0.0625
 - Verdict: 16-column tile improves small/medium shapes but still loses badly at 1024, so it will not meet the required 5120x5120 2x-over-torch target. Production GEMM remains on torch fallback.
+
+## Phase Native fp16 Integration / Validation V4 / KV decode sequence
+- Added stricter C-KV decode correctness: prefill 5 committed rows, decode token 6, commit, decode token 7, compare both outputs to Python full-context attention references.
+- Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 5 passed in 1.89s

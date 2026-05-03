@@ -49,6 +49,25 @@ def _reference_decode(
     return out, k_new.reshape(1, -1).to(torch.float16), v_new.reshape(1, -1).to(torch.float16)
 
 
+def _project_rotated_kv(
+    hidden: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    position_offset: int,
+    rope_theta: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    hidden_size = hidden.shape[-1]
+    head_dim = hidden_size // num_heads
+    k = F.linear(hidden.float(), k_weight.float()).reshape(-1, num_kv_heads, head_dim)
+    v = F.linear(hidden.float(), v_weight.float()).reshape(-1, num_kv_heads, head_dim)
+    rotated = []
+    for idx in range(k.shape[0]):
+        rotated.append(_rope_one(k[idx], position_offset + idx, num_kv_heads, head_dim, rope_theta))
+    return torch.stack(rotated, dim=0).reshape(k.shape[0], -1).to(torch.float16), v.reshape(v.shape[0], -1).to(torch.float16)
+
+
 def test_native_kv_commit_and_rollback_roundtrip() -> None:
     from pcketlm.native import NativeKvSession, native_fp16_kv_available
 
@@ -162,4 +181,80 @@ def test_native_attention_decode_uses_c_owned_kv_and_tentative_append() -> None:
     assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
     assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
     assert torch.allclose(native.float(), expected.float(), atol=1e-3, rtol=1e-3)
+    session.close()
+
+
+def test_native_kv_prefill_decode_commit_decode_matches_python_full_context_attention() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(2468)
+    hidden_size = 8
+    num_heads = 2
+    num_kv_heads = 1
+    kv_width = hidden_size // num_heads * num_kv_heads
+    session = NativeKvSession(layer_count=1, max_seq_len=16, kv_width=kv_width)
+    hidden = torch.randn((7, hidden_size), dtype=torch.float16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+
+    prefix_k, prefix_v = _project_rotated_kv(hidden[:5], k_weight, v_weight, num_heads, num_kv_heads, 0, 10000.0)
+    session.append_committed(0, prefix_k, prefix_v, count=5)
+
+    native_6 = session.attention_decode_fp16(
+        0,
+        hidden[5],
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    expected_6, _k6, _v6 = _reference_decode(
+        hidden[5],
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        prefix_k,
+        prefix_v,
+        position=5,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    assert torch.allclose(native_6.float(), expected_6.float(), atol=1e-3, rtol=1e-3)
+    session.commit(1)
+
+    committed_k, committed_v = session.copy_layer(0, include_tentative=False)
+    native_7 = session.attention_decode_fp16(
+        0,
+        hidden[6],
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    expected_7, _k7, _v7 = _reference_decode(
+        hidden[6],
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        committed_k,
+        committed_v,
+        position=6,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    assert torch.allclose(native_7.float(), expected_7.float(), atol=1e-3, rtol=1e-3)
+    assert session.committed_length(0) == 6
+    assert session.tentative_length(0) == 1
     session.close()
