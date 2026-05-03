@@ -1064,3 +1064,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Kept raw uint16 KV layout unchanged; conversion is selected at math boundaries.
 - This removes the prior hard blocker where wrappers rejected BF16 tensors even though Qwen 14B, Qwen3-30B-A3B, Mixtral, and Qwen 32B configs all declare torch_dtype=bfloat16.
 - Production layer_bridge routing still requires per-model kernel support for q/k/v bias, q/k norm, dense-vs-MoE orchestrator selection, and a faster/accepted GEMM path.
+
+## Phase Native fp16 Integration / projection bias unblocker
+- Added optional q/k/v projection bias pointers to the native KV decode attention path.
+- Qwen2.5 dense models require these biases; production routing without them would be mathematically wrong.
+- Focused tests cover BF16 native decode with projection biases against the Python reference.

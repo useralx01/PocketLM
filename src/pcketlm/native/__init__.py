@@ -453,6 +453,24 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_attention_decode_fp16.restype = ctypes.c_int
+        lib.kv_attention_decode_u16_ext.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_float,
+        ]
+        lib.kv_attention_decode_u16_ext.restype = ctypes.c_int
         lib.kv_dense_layer_decode_fp16.argtypes = [
             ctypes.c_void_p,
             ctypes.c_longlong,
@@ -599,8 +617,14 @@ class NativeKvSession:
         num_attention_heads: int,
         num_key_value_heads: int,
         rope_theta: float,
+        q_bias: torch.Tensor | None = None,
+        k_bias: torch.Tensor | None = None,
+        v_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tensors = [hidden, q_weight, k_weight, v_weight, o_weight]
+        for optional in (q_bias, k_bias, v_bias):
+            if optional is not None:
+                tensors.append(optional)
         if any(tensor.dtype != self.dtype for tensor in tensors):
             raise TypeError(f"attention_decode_fp16 requires {self.dtype} tensors")
         hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
@@ -608,9 +632,12 @@ class NativeKvSession:
         k_cpu = k_weight.detach().cpu().contiguous()
         v_cpu = v_weight.detach().cpu().contiguous()
         o_cpu = o_weight.detach().cpu().contiguous()
+        q_bias_cpu = None if q_bias is None else q_bias.detach().cpu().contiguous().reshape(-1)
+        k_bias_cpu = None if k_bias is None else k_bias.detach().cpu().contiguous().reshape(-1)
+        v_bias_cpu = None if v_bias is None else v_bias.detach().cpu().contiguous().reshape(-1)
         hidden_size = int(hidden_cpu.numel())
         out = torch.empty((hidden_size,), dtype=self.dtype)
-        code = self._lib.kv_attention_decode_fp16(
+        code = self._lib.kv_attention_decode_u16_ext(
             self._handle,
             ctypes.c_longlong(int(layer)),
             ctypes.c_void_p(int(hidden_cpu.data_ptr())),
@@ -618,6 +645,9 @@ class NativeKvSession:
             ctypes.c_void_p(int(k_cpu.data_ptr())),
             ctypes.c_void_p(int(v_cpu.data_ptr())),
             ctypes.c_void_p(int(o_cpu.data_ptr())),
+            ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),
             ctypes.c_void_p(int(out.data_ptr())),
             ctypes.c_longlong(hidden_size),
             ctypes.c_longlong(int(num_attention_heads)),

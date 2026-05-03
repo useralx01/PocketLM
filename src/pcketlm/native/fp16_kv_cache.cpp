@@ -65,6 +65,7 @@ static inline bool valid_layer(KvSession* session, int64_t layer) {
 static void linear_one(
     const uint16_t* hidden,
     const uint16_t* weight,
+    const uint16_t* bias,
     float* out,
     int64_t in_features,
     int64_t out_features,
@@ -75,6 +76,9 @@ static void linear_one(
         float acc = 0.0f;
         for (int64_t col = 0; col < in_features; ++col) {
             acc += read_u16(hidden[col], dtype_code) * read_u16(weight[row * in_features + col], dtype_code);
+        }
+        if (bias != nullptr) {
+            acc += read_u16(bias[row], dtype_code);
         }
         out[row] = acc;
     }
@@ -357,9 +361,9 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
     std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
     std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
-    linear_one(hidden, q_weight, q.data(), hidden_size, hidden_size, session->dtype_code);
-    linear_one(hidden, k_weight, k.data(), hidden_size, kv_width, session->dtype_code);
-    linear_one(hidden, v_weight, v.data(), hidden_size, kv_width, session->dtype_code);
+    linear_one(hidden, q_weight, nullptr, q.data(), hidden_size, hidden_size, session->dtype_code);
+    linear_one(hidden, k_weight, nullptr, k.data(), hidden_size, kv_width, session->dtype_code);
+    linear_one(hidden, v_weight, nullptr, v.data(), hidden_size, kv_width, session->dtype_code);
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
@@ -410,6 +414,115 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
             } else {
                 v_base = state.tentative_v.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
             }
+            for (int64_t dim = 0; dim < head_dim; ++dim) {
+                out_head[dim] += weight * read_u16(v_base[dim], session->dtype_code);
+            }
+        }
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < hidden_size; ++row) {
+        float acc = 0.0f;
+        for (int64_t col = 0; col < hidden_size; ++col) {
+            acc += context[static_cast<size_t>(col)] * read_u16(o_weight[row * hidden_size + col], session->dtype_code);
+        }
+        out[row] = write_u16(acc, session->dtype_code);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    const uint16_t* q_bias,
+    const uint16_t* k_bias,
+    const uint16_t* v_bias,
+    uint16_t* out,
+    int64_t hidden_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rope_theta
+) {
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (
+        !valid_layer(session, layer) || hidden == nullptr || q_weight == nullptr || k_weight == nullptr ||
+        v_weight == nullptr || o_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (hidden_size <= 0 || num_attention_heads <= 0 || num_key_value_heads <= 0) {
+        return 2;
+    }
+    if (hidden_size % num_attention_heads != 0 || num_attention_heads % num_key_value_heads != 0) {
+        return 3;
+    }
+    const int64_t head_dim = hidden_size / num_attention_heads;
+    const int64_t kv_width = num_key_value_heads * head_dim;
+    if (kv_width != session->kv_width) {
+        return 4;
+    }
+
+    LayerKvState& state = session->layers[static_cast<size_t>(layer)];
+    const int64_t position = state.committed_len + state.tentative_len;
+    if (position + 1 > session->max_seq_len) {
+        return 5;
+    }
+    const int64_t kv_repeat = num_attention_heads / num_key_value_heads;
+    std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
+    std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
+    linear_one(hidden, q_weight, q_bias, q.data(), hidden_size, hidden_size, session->dtype_code);
+    linear_one(hidden, k_weight, k_bias, k.data(), hidden_size, kv_width, session->dtype_code);
+    linear_one(hidden, v_weight, v_bias, v.data(), hidden_size, kv_width, session->dtype_code);
+    apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
+    apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
+
+    std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
+    std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
+    for (int64_t index = 0; index < kv_width; ++index) {
+        k_half[static_cast<size_t>(index)] = write_u16(k[static_cast<size_t>(index)], session->dtype_code);
+        v_half[static_cast<size_t>(index)] = write_u16(v[static_cast<size_t>(index)], session->dtype_code);
+    }
+    int append_code = append_to_region(session, layer, k_half.data(), v_half.data(), 1, true);
+    if (append_code != 0) {
+        return 10 + append_code;
+    }
+
+    const int64_t total_len = state.committed_len + state.tentative_len;
+    std::vector<float> context(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float> scores(static_cast<size_t>(total_len), 0.0f);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    for (int64_t head = 0; head < num_attention_heads; ++head) {
+        const int64_t kv_head = head / kv_repeat;
+        float max_score = -INFINITY;
+        const float* q_base = q.data() + head * head_dim;
+        for (int64_t token = 0; token < total_len; ++token) {
+            const uint16_t* k_base = token < state.committed_len
+                ? state.committed_k.data() + (token * kv_width + kv_head * head_dim)
+                : state.tentative_k.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
+            float score = 0.0f;
+            for (int64_t dim = 0; dim < head_dim; ++dim) {
+                score += q_base[dim] * read_u16(k_base[dim], session->dtype_code);
+            }
+            scores[static_cast<size_t>(token)] = score * scale;
+            max_score = std::max(max_score, scores[static_cast<size_t>(token)]);
+        }
+        float denom = 0.0f;
+        for (int64_t token = 0; token < total_len; ++token) {
+            scores[static_cast<size_t>(token)] = std::exp(scores[static_cast<size_t>(token)] - max_score);
+            denom += scores[static_cast<size_t>(token)];
+        }
+        float* out_head = context.data() + head * head_dim;
+        for (int64_t token = 0; token < total_len; ++token) {
+            const float weight = scores[static_cast<size_t>(token)] / denom;
+            const uint16_t* v_base = token < state.committed_len
+                ? state.committed_v.data() + (token * kv_width + kv_head * head_dim)
+                : state.tentative_v.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
             for (int64_t dim = 0; dim < head_dim; ++dim) {
                 out_head[dim] += weight * read_u16(v_base[dim], session->dtype_code);
             }
@@ -501,8 +614,8 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
     std::vector<float> hidden_half_source = post_norm;
     std::vector<uint16_t> post_norm_half;
     uint16_t* post_norm_half_ptr = floats_to_u16_buffer(hidden_half_source, post_norm_half, dtype_code);
-    linear_one(post_norm_half_ptr, gate_weight, gate.data(), hidden_size, intermediate_size, dtype_code);
-    linear_one(post_norm_half_ptr, up_weight, up.data(), hidden_size, intermediate_size, dtype_code);
+    linear_one(post_norm_half_ptr, gate_weight, nullptr, gate.data(), hidden_size, intermediate_size, dtype_code);
+    linear_one(post_norm_half_ptr, up_weight, nullptr, up.data(), hidden_size, intermediate_size, dtype_code);
     std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
         const float g = gate[static_cast<size_t>(dim)];

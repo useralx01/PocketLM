@@ -4845,3 +4845,7 @@ python -m pytest tests/ -q
 ## Phase Native fp16 Integration / BF16 KV checkpoint
 Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q`
 Result: 8 passed in 2.37s
+
+## Phase Native fp16 Integration / projection bias checkpoint
+Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_native_fp16_layer_orchestrator.py -q`
+Result: 9 passed in 5.70s
