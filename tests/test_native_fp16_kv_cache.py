@@ -1,4 +1,52 @@
 import torch
+import torch.nn.functional as F
+
+
+def _rope_one(values: torch.Tensor, position: int, head_count: int, head_dim: int, rope_theta: float) -> torch.Tensor:
+    out = values.float().reshape(head_count, head_dim).clone()
+    for dim in range(0, head_dim, 2):
+        inv_freq = rope_theta ** (-float(dim) / float(head_dim))
+        angle = float(position) * inv_freq
+        c = torch.tensor(torch.cos(torch.tensor(angle)).item(), dtype=torch.float32)
+        s = torch.tensor(torch.sin(torch.tensor(angle)).item(), dtype=torch.float32)
+        x0 = out[:, dim].clone()
+        x1 = out[:, dim + 1].clone()
+        out[:, dim] = x0 * c - x1 * s
+        out[:, dim + 1] = x1 * c + x0 * s
+    return out
+
+
+def _reference_decode(
+    hidden: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
+    o_weight: torch.Tensor,
+    prefix_k: torch.Tensor,
+    prefix_v: torch.Tensor,
+    position: int,
+    num_heads: int,
+    num_kv_heads: int,
+    rope_theta: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    hidden_size = hidden.numel()
+    head_dim = hidden_size // num_heads
+    kv_repeat = num_heads // num_kv_heads
+    q = F.linear(hidden.float().reshape(1, -1), q_weight.float()).reshape(num_heads, head_dim)
+    k_new = F.linear(hidden.float().reshape(1, -1), k_weight.float()).reshape(num_kv_heads, head_dim)
+    v_new = F.linear(hidden.float().reshape(1, -1), v_weight.float()).reshape(num_kv_heads, head_dim)
+    q = _rope_one(q, position, num_heads, head_dim, rope_theta)
+    k_new = _rope_one(k_new, position, num_kv_heads, head_dim, rope_theta)
+    all_k = torch.cat([prefix_k.float().reshape(-1, num_kv_heads, head_dim), k_new.reshape(1, num_kv_heads, head_dim)])
+    all_v = torch.cat([prefix_v.float().reshape(-1, num_kv_heads, head_dim), v_new.reshape(1, num_kv_heads, head_dim)])
+    context = torch.zeros((num_heads, head_dim), dtype=torch.float32)
+    for head in range(num_heads):
+        kv_head = head // kv_repeat
+        scores = torch.matmul(q[head], all_k[:, kv_head].T) / (head_dim ** 0.5)
+        probs = torch.softmax(scores, dim=-1)
+        context[head] = torch.matmul(probs, all_v[:, kv_head])
+    out = F.linear(context.reshape(1, hidden_size), o_weight.float()).reshape(-1).to(torch.float16)
+    return out, k_new.reshape(1, -1).to(torch.float16), v_new.reshape(1, -1).to(torch.float16)
 
 
 def test_native_kv_commit_and_rollback_roundtrip() -> None:
@@ -63,3 +111,55 @@ def test_native_kv_kill_switch(monkeypatch) -> None:
         assert "unavailable" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("PCKETLM_DISABLE_NATIVE_KV did not disable KV sessions")
+
+
+def test_native_attention_decode_uses_c_owned_kv_and_tentative_append() -> None:
+    from pcketlm.native import NativeKvSession
+
+    torch.manual_seed(1234)
+    hidden_size = 8
+    num_heads = 2
+    num_kv_heads = 1
+    kv_width = hidden_size // num_heads * num_kv_heads
+    session = NativeKvSession(layer_count=1, max_seq_len=8, kv_width=kv_width)
+    prefix_k = torch.randn((2, kv_width), dtype=torch.float16)
+    prefix_v = torch.randn((2, kv_width), dtype=torch.float16)
+    hidden = torch.randn((hidden_size,), dtype=torch.float16)
+    q_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    k_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    v_weight = (torch.randn((kv_width, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    o_weight = (torch.randn((hidden_size, hidden_size), dtype=torch.float32) * 0.2).to(torch.float16)
+    session.append_committed(0, prefix_k, prefix_v, count=2)
+
+    native = session.attention_decode_fp16(
+        0,
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+    expected, k_new, v_new = _reference_decode(
+        hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        o_weight,
+        prefix_k,
+        prefix_v,
+        position=2,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rope_theta=10000.0,
+    )
+
+    assert session.committed_length(0) == 2
+    assert session.tentative_length(0) == 1
+    k_all, v_all = session.copy_layer(0)
+    assert torch.allclose(k_all[-1].float(), k_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
+    assert torch.allclose(v_all[-1].float(), v_new.reshape(-1).float(), atol=1e-3, rtol=1e-3)
+    assert torch.allclose(native.float(), expected.float(), atol=1e-3, rtol=1e-3)
+    session.close()

@@ -1049,3 +1049,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - C-owned KV cache stores fp16 K/V per layer as row-major [seq, kv_width] buffers.
 - Committed and tentative regions are isolated. commit(N) moves up to N tentative rows per layer into committed; rollback clears tentative rows only.
 - Python receives NativeKvSession as an opaque handle wrapper; tests use copy_layer only for verification.
+
+## Phase Native fp16 Integration / Deliverable B / decode attention position
+- Decode RoPE position is computed C-side as committed_len + tentative_len for the target layer before appending the new tentative K/V row.

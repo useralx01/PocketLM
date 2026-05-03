@@ -428,6 +428,21 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_int,
         ]
         lib.kv_copy_layer.restype = ctypes.c_int
+        lib.kv_attention_decode_fp16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_float,
+        ]
+        lib.kv_attention_decode_fp16.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP16_KV_ERROR = exc
         return None
@@ -536,6 +551,47 @@ class NativeKvSession:
         if code != 0:
             raise RuntimeError(f"kv_copy_layer failed with code {code}")
         return k_out, v_out
+
+    def attention_decode_fp16(
+        self,
+        layer: int,
+        hidden: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        v_weight: torch.Tensor,
+        o_weight: torch.Tensor,
+        *,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        rope_theta: float,
+    ) -> torch.Tensor:
+        tensors = [hidden, q_weight, k_weight, v_weight, o_weight]
+        if any(tensor.dtype != torch.float16 for tensor in tensors):
+            raise TypeError("attention_decode_fp16 requires torch.float16 tensors")
+        hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
+        q_cpu = q_weight.detach().cpu().contiguous()
+        k_cpu = k_weight.detach().cpu().contiguous()
+        v_cpu = v_weight.detach().cpu().contiguous()
+        o_cpu = o_weight.detach().cpu().contiguous()
+        hidden_size = int(hidden_cpu.numel())
+        out = torch.empty((hidden_size,), dtype=torch.float16)
+        code = self._lib.kv_attention_decode_fp16(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+            ctypes.c_void_p(int(q_cpu.data_ptr())),
+            ctypes.c_void_p(int(k_cpu.data_ptr())),
+            ctypes.c_void_p(int(v_cpu.data_ptr())),
+            ctypes.c_void_p(int(o_cpu.data_ptr())),
+            ctypes.c_void_p(int(out.data_ptr())),
+            ctypes.c_longlong(hidden_size),
+            ctypes.c_longlong(int(num_attention_heads)),
+            ctypes.c_longlong(int(num_key_value_heads)),
+            ctypes.c_float(float(rope_theta)),
+        )
+        if code != 0:
+            raise RuntimeError(f"kv_attention_decode_fp16 failed with code {code}")
+        return out
 
 
 def native_read_tensor_bytes(path: str | Path, absolute_offset: int, nbytes: int, out: torch.Tensor) -> None:

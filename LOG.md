@@ -4815,3 +4815,8 @@ python -m pytest tests/ -q
 - KV layout: per session -> per layer -> committed_k/v and tentative_k/v vectors, row-major [seq, kv_width] fp16.
 - Methods exposed through ctypes NativeKvSession: append_committed, append_tentative, commit, rollback, committed_length, tentative_length, copy_layer.
 - Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 3 passed in 3.19s
+
+## Phase Native fp16 Integration / Deliverable B / native decode attention
+- Extended fp16_kv_cache.dll with kv_attention_decode_fp16.
+- Decode path: project one-token Q/K/V, apply RoPE at committed_len+tentative_len, append K/V as tentative, attend over committed+tentative KV, apply output projection.
+- Focused test: python -m pytest tests/test_native_fp16_kv_cache.py -q -> 4 passed in 2.24s

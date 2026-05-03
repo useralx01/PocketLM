@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
 #include <vector>
 
 struct LayerKvState {
@@ -20,8 +22,59 @@ struct KvSession {
     std::vector<LayerKvState> layers;
 };
 
+static inline float fp16_to_fp32(uint16_t value) {
+    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
+    const __m128 full = _mm_cvtph_ps(half);
+    return _mm_cvtss_f32(full);
+}
+
+static inline uint16_t fp32_to_fp16(float value) {
+    const __m128 full = _mm_set_ss(value);
+    const __m128i half = _mm_cvtps_ph(full, 0);
+    return static_cast<uint16_t>(_mm_cvtsi128_si32(half));
+}
+
 static inline bool valid_layer(KvSession* session, int64_t layer) {
     return session != nullptr && layer >= 0 && layer < session->layer_count;
+}
+
+static void linear_one(
+    const uint16_t* hidden,
+    const uint16_t* weight,
+    float* out,
+    int64_t in_features,
+    int64_t out_features
+) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < out_features; ++row) {
+        float acc = 0.0f;
+        for (int64_t col = 0; col < in_features; ++col) {
+            acc += fp16_to_fp32(hidden[col]) * fp16_to_fp32(weight[row * in_features + col]);
+        }
+        out[row] = acc;
+    }
+}
+
+static void apply_rope_one(
+    float* values,
+    int64_t head_count,
+    int64_t head_dim,
+    int64_t position,
+    float rope_theta
+) {
+    for (int64_t head = 0; head < head_count; ++head) {
+        float* base = values + head * head_dim;
+        for (int64_t dim = 0; dim + 1 < head_dim; dim += 2) {
+            const float inv_freq = std::pow(rope_theta, -static_cast<float>(dim) / static_cast<float>(head_dim));
+            const float angle = static_cast<float>(position) * inv_freq;
+            const float c = std::cos(angle);
+            const float s = std::sin(angle);
+            const float x0 = base[dim];
+            const float x1 = base[dim + 1];
+            base[dim] = x0 * c - x1 * s;
+            base[dim + 1] = x1 * c + x0 * s;
+        }
+    }
 }
 
 extern "C" __declspec(dllexport) void* kv_prefill_init(
@@ -195,6 +248,118 @@ extern "C" __declspec(dllexport) int kv_copy_layer(
             std::memcpy(k_out + offset, state.tentative_k.data(), tentative_values * sizeof(uint16_t));
             std::memcpy(v_out + offset, state.tentative_v.data(), tentative_values * sizeof(uint16_t));
         }
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* q_weight,
+    const uint16_t* k_weight,
+    const uint16_t* v_weight,
+    const uint16_t* o_weight,
+    uint16_t* out,
+    int64_t hidden_size,
+    int64_t num_attention_heads,
+    int64_t num_key_value_heads,
+    float rope_theta
+) {
+    KvSession* session = reinterpret_cast<KvSession*>(handle);
+    if (
+        !valid_layer(session, layer) || hidden == nullptr || q_weight == nullptr || k_weight == nullptr ||
+        v_weight == nullptr || o_weight == nullptr || out == nullptr
+    ) {
+        return 1;
+    }
+    if (hidden_size <= 0 || num_attention_heads <= 0 || num_key_value_heads <= 0) {
+        return 2;
+    }
+    if (hidden_size % num_attention_heads != 0 || num_attention_heads % num_key_value_heads != 0) {
+        return 3;
+    }
+    const int64_t head_dim = hidden_size / num_attention_heads;
+    const int64_t kv_width = num_key_value_heads * head_dim;
+    if (kv_width != session->kv_width) {
+        return 4;
+    }
+
+    LayerKvState& state = session->layers[static_cast<size_t>(layer)];
+    const int64_t position = state.committed_len + state.tentative_len;
+    if (position + 1 > session->max_seq_len) {
+        return 5;
+    }
+    const int64_t kv_repeat = num_attention_heads / num_key_value_heads;
+    std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
+    std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
+    linear_one(hidden, q_weight, q.data(), hidden_size, hidden_size);
+    linear_one(hidden, k_weight, k.data(), hidden_size, kv_width);
+    linear_one(hidden, v_weight, v.data(), hidden_size, kv_width);
+    apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
+    apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
+
+    std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
+    std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
+    for (int64_t index = 0; index < kv_width; ++index) {
+        k_half[static_cast<size_t>(index)] = fp32_to_fp16(k[static_cast<size_t>(index)]);
+        v_half[static_cast<size_t>(index)] = fp32_to_fp16(v[static_cast<size_t>(index)]);
+    }
+    int append_code = append_to_region(session, layer, k_half.data(), v_half.data(), 1, true);
+    if (append_code != 0) {
+        return 10 + append_code;
+    }
+
+    const int64_t total_len = state.committed_len + state.tentative_len;
+    std::vector<float> context(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float> scores(static_cast<size_t>(total_len), 0.0f);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    for (int64_t head = 0; head < num_attention_heads; ++head) {
+        const int64_t kv_head = head / kv_repeat;
+        float max_score = -INFINITY;
+        const float* q_base = q.data() + head * head_dim;
+        for (int64_t token = 0; token < total_len; ++token) {
+            const uint16_t* k_base = nullptr;
+            if (token < state.committed_len) {
+                k_base = state.committed_k.data() + (token * kv_width + kv_head * head_dim);
+            } else {
+                k_base = state.tentative_k.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
+            }
+            float score = 0.0f;
+            for (int64_t dim = 0; dim < head_dim; ++dim) {
+                score += q_base[dim] * fp16_to_fp32(k_base[dim]);
+            }
+            scores[static_cast<size_t>(token)] = score * scale;
+            max_score = std::max(max_score, scores[static_cast<size_t>(token)]);
+        }
+        float denom = 0.0f;
+        for (int64_t token = 0; token < total_len; ++token) {
+            scores[static_cast<size_t>(token)] = std::exp(scores[static_cast<size_t>(token)] - max_score);
+            denom += scores[static_cast<size_t>(token)];
+        }
+        float* out_head = context.data() + head * head_dim;
+        for (int64_t token = 0; token < total_len; ++token) {
+            const float weight = scores[static_cast<size_t>(token)] / denom;
+            const uint16_t* v_base = nullptr;
+            if (token < state.committed_len) {
+                v_base = state.committed_v.data() + (token * kv_width + kv_head * head_dim);
+            } else {
+                v_base = state.tentative_v.data() + ((token - state.committed_len) * kv_width + kv_head * head_dim);
+            }
+            for (int64_t dim = 0; dim < head_dim; ++dim) {
+                out_head[dim] += weight * fp16_to_fp32(v_base[dim]);
+            }
+        }
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < hidden_size; ++row) {
+        float acc = 0.0f;
+        for (int64_t col = 0; col < hidden_size; ++col) {
+            acc += context[static_cast<size_t>(col)] * fp16_to_fp32(o_weight[row * hidden_size + col]);
+        }
+        out[row] = fp32_to_fp16(acc);
     }
     return 0;
 }
