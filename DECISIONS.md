@@ -1176,3 +1176,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 Integration / rejected tuning probes
 - Did not change the default OpenMP thread count after fused-QKV probes. `PCKETLM_NATIVE_THREADS=8` and `=12` both regressed the real 14B four-token row; the runtime keeps the build/runtime default and leaves `PCKETLM_NATIVE_THREADS` as a manual profiling knob.
 - Did not raise the default fp16 MoE expert tensor cache to 4096 MB. The Qwen3 three-token row had only 5.49% expert hit rate at token 3 and matched the prior runtime while consuming 3.62 GB of expert tensor residency. The fp16 MoE route needs fewer bytes per expert, longer speculative batches, or Q4 artifacts; simply raising fp16 resident expert budget is not a useful default on this machine.
+
+## Phase Native fp16 Integration / matmul blocking
+- Chose a 32-column output block for the standalone fp16 matmul kernel. It keeps register pressure low on AVX2 while reusing each A scalar across four output vectors; this is a safer increment than a full packed-B microkernel.
+- Did not route production dense decode through this GEMM because the production decode shape is a set of row-major matrix-vector products inside the C-owned KV module, not a general matrix-matrix call.
