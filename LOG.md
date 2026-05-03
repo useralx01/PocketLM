@@ -4757,3 +4757,11 @@ python -m pytest tests/ -q
 - Microbench smoke:
   - size=256 native=0.000982s torch=0.002237s max_abs=0.03125
   - size=512 native=0.005898s torch=0.002615s max_abs=0.03125
+
+## Phase Native fp16 Engine / Deliverable C / FMA pass
+- Focused test: python -m pytest tests/test_native_fp16_matmul.py -q -> 3 passed in 2.10s
+- Microbench after FMA:
+  - size=256 native=0.000657s torch=0.001641s max_abs=0.015625
+  - size=512 native=0.004827s torch=0.002223s max_abs=0.03125
+  - size=1024 native=0.060882s torch=0.009111s max_abs=0.0625
+- Verdict: native matmul remains isolated; it is not routed into production because torch is still faster at model-scale square matrices.

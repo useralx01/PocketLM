@@ -53,7 +53,7 @@ extern "C" __declspec(dllexport) int native_fp16_matmul(
                 const __m256 avec = _mm256_set1_ps(av);
                 const __m128i b_half = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + inner * n + col));
                 const __m256 b_float = _mm256_cvtph_ps(b_half);
-                acc = _mm256_add_ps(acc, _mm256_mul_ps(avec, b_float));
+                acc = _mm256_fmadd_ps(avec, b_float, acc);
             }
             const __m128i packed = _mm256_cvtps_ph(acc, 0);
             _mm_storeu_si128(reinterpret_cast<__m128i*>(c + row * n + col), packed);
