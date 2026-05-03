@@ -5076,3 +5076,26 @@ Result: 297 passed in 21.83s
 - Surgical recovery: removed the OpenBLAS dependency from `fp16_kv_cache.dll`, kept the RoPE correctness fix, and kept OpenBLAS isolated to `fp16_matmul.dll`.
 - Recovery tests: `pytest tests/test_native_fp16_kv_cache.py tests/test_native_fp16_matmul.py tests/test_runtime_layer_bridge.py -q` -> `57 passed`.
 - Recovery real run: Qwen 14B `max_new_tokens=3` generated `Hello! How`, token ids `[9707, 0, 2585]`, layers_executed `144/144`, total `55.8688s`.
+
+## Phase Native fp16 BLAS / E / real 14B + kill-switch
+- Qwen 14B native (`hello world`, max_new_tokens=4): generated `Hello! How can`, token ids `[9707, 0, 2585, 646]`, layers_executed `192/192`, token rows `25.2668s, 16.7796s, 15.2208s, 16.2085s`, total `73.5275s`.
+- Qwen 14B all-native-disabled kill-switch (`hello world`, max_new_tokens=4): generated `Hello! How can`, token ids `[9707, 0, 2585, 646]`, layers_executed `192/192`, token rows `21.2586s, 21.6845s, 20.5189s, 19.7527s`, total `83.289s`.
+- Kill-switch sanity: native-disabled path returns to Python baseline behavior and text; timing is within 20% of native measured total for this prompt (`83.289s` vs `73.5275s`).
+
+## Phase Native fp16 BLAS / E / real Qwen3
+- Qwen3-30B-A3B native fp16 (`The capital of France is`, max_new_tokens=4): generated `<think>\nOkay,`, token ids `[151667, 198, 32313, 11]`, layers_executed `192/192`, token rows `96.1115s, 21.8152s, 90.7734s, 29.9906s`, total `238.7565s`.
+- Tensor telemetry: native fp16 load active, loaded_mb `45382.47`, fp16 packed cache budget_mb `4434.33`, disk_reads `13279`, hits `845`, misses `433`, resident_mb `1752.4`; expert_hit_rate `0.0%` (`12846` misses).
+- Verdict: coherent text and anti-cheat pass; speed target missed because production MoE forward still reloads/dispatches outside the isolated OpenBLAS matmul path.
+
+## Phase Native fp16 BLAS / E / speculative Qwen3
+- Qwen3-30B-A3B + Qwen3-1.7B speculator (`The capital of France is`, K=20, max_new_tokens=20): generated `<think>\nOkay, the user is asking for the capital of France. Let me think think that's`, token ids `[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 6722, 315, 9625, 13, 6771, 752, 1744, 1744, 429, 594]`.
+- Metrics: ready `true`, anti_cheat `true`, layers_executed `576/576`, verifier_passes `6`, accepted `14`, corrected `6`, average_accepted_per_pass `2.3333`, effective_seconds_per_token `19.5118`, elapsed `390.236s`, expert_hit_rate `0.0%`.
+- Verdict: output remains coherent and full-stack, but speculative target missed and acceptance is below the `>=80%` gate.
+
+## Phase Native fp16 BLAS / E / real Mixtral
+- Mixtral-8x7B-Instruct fp16 (`The capital of France is`, max_new_tokens=4): generated `a city that is`, token ids `[264, 2990, 369, 349]`, layers_executed `128/128`, total `338.6754s`.
+- Timing breakdown: prefill_stack `167.8299s` with load_tensors `126.5393s`; continuation_stack `169.4443s` with load_tensors `143.9723s`; continuation_stack_op_mlp `24.0411s`.
+- Verdict: coherent text and anti-cheat pass; speed target missed and telemetry points to tensor loading/residency rather than isolated BLAS GEMM.
+
+## Phase Native fp16 BLAS / Tests
+- Full suite: `python -m pytest tests/ -q` -> `307 passed in 11.38s`.
