@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 extern "C" __declspec(dllexport) int native_read_tensor_bytes(
     const char* path,
@@ -37,5 +38,17 @@ extern "C" __declspec(dllexport) int native_read_tensor_bytes(
     }
 
     fclose(handle);
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int native_copy_tensor_bytes(
+    const uint8_t* source,
+    uint64_t nbytes,
+    uint8_t* out
+) {
+    if (source == nullptr || out == nullptr) {
+        return 1;
+    }
+    std::memcpy(out, source, static_cast<size_t>(nbytes));
     return 0;
 }

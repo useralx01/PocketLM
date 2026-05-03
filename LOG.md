@@ -4743,3 +4743,10 @@ python -m pytest tests/ -q
 - Build: python tools\build_native.py --force -> built add_test.dll, fp16_loader.dll, q4_dequant.dll
 - Focused test: python -m pytest tests/test_native_fp16_loader.py -q -> 3 passed in 2.42s
 - Focused loader suite: python -m pytest tests/test_runtime_tensor_loader.py tests/test_native_fp16_loader.py -q -> 12 passed in 1.80s
+
+## Phase Native fp16 Engine / Deliverable B / fp16 packed cache
+- Design: raw BF16/F16 safetensors payload bytes are cached as bytearray entries keyed by model/tensor/shard/mtime/offset/size.
+- Cache miss: native read fills raw bytearray, then native memory-copy fills a pre-allocated torch tensor.
+- Cache hit: no disk read; native memory-copy fills the torch tensor from cached raw bytes.
+- Kill switch: PCKETLM_DISABLE_FP16_PACKED_CACHE=1 forces per-call native disk reads.
+- Focused test: python -m pytest tests/test_tensor_residency.py tests/test_native_fp16_loader.py -q -> 39 passed in 1.86s

@@ -444,14 +444,24 @@ def _load_native_fp16_tensor(model_id: str, entry: TensorCatalogEntry) -> Loaded
     if entry.dtype not in {"BF16", "F16", "F32", "I64", "I32"}:
         return None
     try:
-        from pcketlm.native import native_read_tensor_bytes
+        from pcketlm.native import native_copy_tensor_bytes, native_read_bytes, native_read_tensor_bytes
 
         tensor = torch.empty(tuple(int(value) for value in entry.shape), dtype=_torch_dtype_from_catalog(entry.dtype))
         absolute_offset = _safetensors_data_base_offset(
             str(entry.shard_path.resolve()),
             _path_mtime_ns(entry.shard_path),
         ) + int(entry.data_offset_start)
-        native_read_tensor_bytes(entry.shard_path, absolute_offset, int(entry.data_nbytes), tensor)
+        if os.environ.get("PCKETLM_DISABLE_FP16_PACKED_CACHE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            native_read_tensor_bytes(entry.shard_path, absolute_offset, int(entry.data_nbytes), tensor)
+        else:
+            from pcketlm.core.runtime.tensor_residency import fp16_packed_cache_get_or_read
+
+            raw = fp16_packed_cache_get_or_read(
+                model_id,
+                entry,
+                lambda: native_read_bytes(entry.shard_path, absolute_offset, int(entry.data_nbytes)),
+            )
+            native_copy_tensor_bytes(raw, tensor)
         _update_load_stats(native_fp16_loads=1, native_fp16_loaded_nbytes=int(entry.data_nbytes))
         return _loaded_slice_from_entry(model_id, entry, tensor, borrowed_from_live_handle=False)
     except Exception:

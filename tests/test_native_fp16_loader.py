@@ -11,6 +11,7 @@ from pcketlm.core.runtime.tensor_loader import (
     reset_tensor_load_stats,
     tensor_load_stats_snapshot,
 )
+from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, fp16_packed_cache_stats
 
 
 def _write_native_loader_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path, torch.Tensor]:
@@ -76,19 +77,28 @@ def test_native_read_tensor_bytes_matches_safetensors_payload(tmp_path: Path, mo
 
 def test_tensor_loader_uses_native_fp16_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_FP16_LOAD", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", raising=False)
     monkeypatch.setenv("PCKETLM_RUNTIME_PACK", "0")
     monkeypatch.setenv("PCKETLM_SAFETENSOR_HANDLE_CACHE", "0")
+    clear_tensor_residency_cache()
     reset_tensor_load_stats()
     model_id, _shard, expected = _write_native_loader_fixture(tmp_path, monkeypatch)
 
     loaded = load_tensor_by_name(model_id, "model.layers.0.input_layernorm.weight")
+    second = load_tensor_by_name(model_id, "model.layers.0.input_layernorm.weight")
     stats = tensor_load_stats_snapshot()
+    packed_stats = fp16_packed_cache_stats()
 
     assert loaded.ready is True
     assert loaded.tensor is not None
     assert torch.equal(loaded.tensor, expected)
-    assert stats.native_fp16_loads == 1
-    assert stats.native_fp16_loaded_nbytes == expected.nelement() * expected.element_size()
+    assert second.ready is True
+    assert second.tensor is not None
+    assert torch.equal(second.tensor, expected)
+    assert stats.native_fp16_loads == 2
+    assert stats.native_fp16_loaded_nbytes == 2 * expected.nelement() * expected.element_size()
+    assert packed_stats.hits == 1
+    assert packed_stats.disk_reads == 1
     assert stats.shard_opens == 0
 
 

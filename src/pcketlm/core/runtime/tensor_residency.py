@@ -27,6 +27,7 @@ DEFAULT_EXPERT_CACHE_MB = 256
 DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER = 4
 DEFAULT_EXPERT_DECAY_RATE = 0.98
 DEFAULT_ALWAYS_RESIDENT_TENSOR_MB = 16
+DEFAULT_FP16_PACKED_CACHE_CAP_MB = 8 * 1024
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -240,6 +241,32 @@ class TensorResidencyStats:
 
 
 @dataclass(slots=True)
+class Fp16PackedCacheStats:
+    hits: int = 0
+    misses: int = 0
+    stores: int = 0
+    evictions: int = 0
+    disk_reads: int = 0
+    resident_bytes: int = 0
+    resident_count: int = 0
+    budget_bytes: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "stores": self.stores,
+            "evictions": self.evictions,
+            "disk_reads": self.disk_reads,
+            "resident_bytes": self.resident_bytes,
+            "resident_mb": round(self.resident_bytes / (1024**2), 2),
+            "resident_count": self.resident_count,
+            "budget_bytes": self.budget_bytes,
+            "budget_mb": round(self.budget_bytes / (1024**2), 2),
+        }
+
+
+@dataclass(slots=True)
 class _QuantizedQ4Tensor:
     packed: torch.Tensor
     scales: torch.Tensor
@@ -260,11 +287,15 @@ class _ResidentTensor:
 
 
 _CacheKey = tuple[str, str, str, int, int, str]
+_Fp16PackedCacheKey = tuple[str, str, str, int, int, int]
 
 _cache_lock = threading.RLock()
 _resident_tensors: OrderedDict[_CacheKey, _ResidentTensor] = OrderedDict()
+_fp16_packed_cache: OrderedDict[_Fp16PackedCacheKey, bytearray] = OrderedDict()
 _stats = TensorResidencyStats()
+_fp16_packed_stats = Fp16PackedCacheStats()
 _resident_bytes = 0
+_fp16_packed_cache_bytes = 0
 _resident_expert_bytes = 0
 _residency_step = 0
 _expert_activation_counts: dict[tuple[int, int], int] = {}
@@ -369,6 +400,130 @@ def _cache_key(model_id: str, entry: TensorCatalogEntry, dtype: torch.dtype) -> 
         int(entry.data_nbytes),
         str(dtype),
     )
+
+
+def _fp16_packed_cache_key(model_id: str, entry: TensorCatalogEntry) -> _Fp16PackedCacheKey:
+    shard_path = entry.shard_path.resolve()
+    return (
+        model_id,
+        entry.tensor_name,
+        str(shard_path),
+        _path_mtime_ns(shard_path),
+        int(entry.data_offset_start),
+        int(entry.data_nbytes),
+    )
+
+
+def _fp16_packed_cache_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FP16_PACKED_CACHE", "0").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _fp16_packed_cache_budget_bytes() -> int:
+    explicit_mb = _env_int("PCKETLM_FP16_PACKED_CACHE_MB", -1)
+    if explicit_mb >= 0:
+        return max(0, explicit_mb) * 1024 * 1024
+    cap_mb = max(0, _env_int("PCKETLM_FP16_PACKED_CACHE_CAP_MB", DEFAULT_FP16_PACKED_CACHE_CAP_MB))
+    free_bytes = _free_memory_bytes()
+    if free_bytes is None:
+        return cap_mb * 1024 * 1024
+    return min(int(free_bytes * 0.5), cap_mb * 1024 * 1024)
+
+
+def _is_fp16_packed_always_resident(entry: TensorCatalogEntry) -> bool:
+    component_group = (entry.component_group or "").lower()
+    if component_group in {"attention", "router", "embeddings", "lm_head", "final_norm"}:
+        return True
+    tensor_name = entry.tensor_name
+    return tensor_name == "model.norm.weight" or tensor_name.startswith("lm_head.") or tensor_name.startswith("model.embed_tokens.")
+
+
+def _select_fp16_packed_eviction_key() -> _Fp16PackedCacheKey | None:
+    for key in _fp16_packed_cache:
+        entry = find_tensor_catalog_entry(key[0], key[1])
+        if entry is not None and _is_fp16_packed_always_resident(entry):
+            continue
+        return key
+    return None
+
+
+def fp16_packed_cache_get_or_read(
+    model_id: str,
+    entry: TensorCatalogEntry,
+    reader,
+) -> bytearray:
+    """Return raw fp16/BF16 safetensors bytes, caching them between tensor loads."""
+    global _fp16_packed_cache_bytes
+    if not _fp16_packed_cache_enabled():
+        _fp16_packed_stats.disk_reads += 1
+        return reader()
+
+    key = _fp16_packed_cache_key(model_id, entry)
+    budget_bytes = _fp16_packed_cache_budget_bytes()
+    with _cache_lock:
+        _fp16_packed_stats.budget_bytes = budget_bytes
+        cached = _fp16_packed_cache.get(key)
+        if cached is not None:
+            _fp16_packed_cache.move_to_end(key)
+            _fp16_packed_stats.hits += 1
+            _fp16_packed_stats.resident_bytes = _fp16_packed_cache_bytes
+            _fp16_packed_stats.resident_count = len(_fp16_packed_cache)
+            return cached
+        _fp16_packed_stats.misses += 1
+
+    raw = reader()
+    nbytes = len(raw)
+    if nbytes <= 0:
+        return raw
+
+    with _cache_lock:
+        _fp16_packed_stats.disk_reads += 1
+        if key in _fp16_packed_cache:
+            cached = _fp16_packed_cache[key]
+            _fp16_packed_cache.move_to_end(key)
+            _fp16_packed_stats.hits += 1
+            return cached
+        if not _is_fp16_packed_always_resident(entry) and nbytes > budget_bytes:
+            _fp16_packed_stats.resident_bytes = _fp16_packed_cache_bytes
+            _fp16_packed_stats.resident_count = len(_fp16_packed_cache)
+            return raw
+        while _fp16_packed_cache and _fp16_packed_cache_bytes + nbytes > budget_bytes:
+            evict_key = _select_fp16_packed_eviction_key()
+            if evict_key is None:
+                break
+            old = _fp16_packed_cache.pop(evict_key)
+            _fp16_packed_cache_bytes -= len(old)
+            _fp16_packed_stats.evictions += 1
+        _fp16_packed_cache[key] = raw
+        _fp16_packed_cache_bytes += nbytes
+        _fp16_packed_stats.stores += 1
+        _fp16_packed_stats.resident_bytes = _fp16_packed_cache_bytes
+        _fp16_packed_stats.resident_count = len(_fp16_packed_cache)
+        return raw
+
+
+def clear_fp16_packed_cache() -> None:
+    """Release raw fp16/BF16 packed bytes and reset packed-cache counters."""
+    global _fp16_packed_cache_bytes, _fp16_packed_stats
+    with _cache_lock:
+        _fp16_packed_cache.clear()
+        _fp16_packed_cache_bytes = 0
+        _fp16_packed_stats = Fp16PackedCacheStats()
+
+
+def fp16_packed_cache_stats() -> Fp16PackedCacheStats:
+    """Return fp16 packed-cache counters for diagnostics."""
+    with _cache_lock:
+        stats = Fp16PackedCacheStats(
+            hits=_fp16_packed_stats.hits,
+            misses=_fp16_packed_stats.misses,
+            stores=_fp16_packed_stats.stores,
+            evictions=_fp16_packed_stats.evictions,
+            disk_reads=_fp16_packed_stats.disk_reads,
+            resident_bytes=_fp16_packed_cache_bytes,
+            resident_count=len(_fp16_packed_cache),
+            budget_bytes=_fp16_packed_stats.budget_bytes,
+        )
+        return stats
 
 
 def _expert_key(entry: TensorCatalogEntry) -> tuple[int, int] | None:
@@ -809,6 +964,7 @@ def clear_tensor_residency_cache() -> None:
         _current_step_experts.clear()
         _stats = TensorResidencyStats()
         _memory_snapshot_cache = (0.0, None)
+    clear_fp16_packed_cache()
     clear_tensor_handle_cache()
 
 

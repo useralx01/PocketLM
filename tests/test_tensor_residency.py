@@ -11,6 +11,8 @@ from pcketlm.core.runtime.tensor_residency import (
     clear_tensor_residency_cache,
     current_tensor_residency_step,
     expert_residency_snapshot,
+    fp16_packed_cache_get_or_read,
+    fp16_packed_cache_stats,
     load_resident_tensor,
     load_resident_tensors,
     record_expert_activation,
@@ -82,6 +84,70 @@ def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_pat
     assert stats.misses == 1
     assert stats.stores == 1
     assert stats.resident_count == 1
+
+
+def test_fp16_packed_cache_serves_repeated_request_without_disk_read(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_FP16_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", raising=False)
+    entry = _entry(tmp_path, tensor_name="model.layers.0.self_attn.q_proj.weight")
+    calls = {"count": 0}
+
+    def reader() -> bytearray:
+        calls["count"] += 1
+        return bytearray(b"abcdefgh")
+
+    first = fp16_packed_cache_get_or_read("fp16-packed-test", entry, reader)
+    second = fp16_packed_cache_get_or_read("fp16-packed-test", entry, reader)
+    stats = fp16_packed_cache_stats()
+
+    assert first is second
+    assert bytes(second) == b"abcdefgh"
+    assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.misses == 1
+    assert stats.disk_reads == 1
+    assert stats.resident_count == 1
+
+
+def test_fp16_packed_cache_lru_evicts_under_budget(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._fp16_packed_cache_budget_bytes", lambda: 4)
+    entries = [
+        _entry(tmp_path, tensor_name=f"model.layers.{index}.mlp.down_proj.weight")
+        for index in range(2)
+    ]
+    for index, entry in enumerate(entries):
+        entry.layer_index = index
+        entry.component_group = "mlp"
+
+    fp16_packed_cache_get_or_read("fp16-packed-evict", entries[0], lambda: bytearray(b"aaaa"))
+    fp16_packed_cache_get_or_read("fp16-packed-evict", entries[1], lambda: bytearray(b"bbbb"))
+    stats = fp16_packed_cache_stats()
+
+    assert stats.evictions >= 1
+    assert stats.resident_count <= 1
+
+
+def test_fp16_packed_cache_kill_switch_forces_disk_read(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", "1")
+    entry = _entry(tmp_path, tensor_name="model.layers.0.self_attn.q_proj.weight")
+    calls = {"count": 0}
+
+    def reader() -> bytearray:
+        calls["count"] += 1
+        return bytearray(b"abcdefgh")
+
+    first = fp16_packed_cache_get_or_read("fp16-packed-off", entry, reader)
+    second = fp16_packed_cache_get_or_read("fp16-packed-off", entry, reader)
+    stats = fp16_packed_cache_stats()
+
+    assert first is not second
+    assert calls["count"] == 2
+    assert stats.hits == 0
+    assert stats.stores == 0
+    assert stats.disk_reads == 2
 
 
 def test_large_attention_tensor_is_evictable_under_memory_pressure(tmp_path: Path, monkeypatch) -> None:

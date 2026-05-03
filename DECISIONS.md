@@ -1021,3 +1021,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Native fp16 load is implemented as a raw byte copy from safetensors data offsets into a pre-allocated contiguous torch tensor.
 - The path preserves catalog dtype exactly (BF16 stays BF16, F16 stays F16) because the deployed Qwen/Mixtral safetensors are BF16 even when the runtime phase says fp16.
 - Kill switch: PCKETLM_DISABLE_NATIVE_FP16_LOAD=1 returns to the existing safetensors Python path.
+
+## Phase Native fp16 Engine / Deliverable B / packed cache policy
+- Raw fp16/BF16 packed cache budget defaults to 50% of free RAM, capped by PCKETLM_FP16_PACKED_CACHE_CAP_MB (default 8192 MB), or explicitly by PCKETLM_FP16_PACKED_CACHE_MB.
+- Always-resident packed entries: attention tensors, router weights, embeddings, lm_head, and final norm. Other tensors evict LRU under budget.
+- The cache stores bytearray payloads rather than torch tensors so fp16/BF16 compute tensor residency remains independent.
