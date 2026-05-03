@@ -4944,3 +4944,11 @@ Result: 297 passed in 21.83s
 - Explicit Qwen3 fp16 diagnostic before this change timed out at 240s and left process 14844 using 6910476288 bytes; process was stopped before further measurements.
 - Explicit Qwen3 fp16 diagnostic after this change: `--source fp16`, prompt `The capital of France is`, max_new_tokens=1 -> ready=true, layers_executed=48/48, generated_text=`<think>`, total=319.5351s. Timings: prefill_stack_op_load_tensors=298.8721s, prefill_stack_op_mlp=14.6269s, native decode not reached because this is the first token. FP16 packed cache: hits=0, misses=9823, evictions=8829, budget=3706.87 MB.
 - Forced scoped safetensor handles for Qwen3 fp16 (`PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE=1`) exited after the diagnostic `before` row with exit code 1 and no Python traceback. Keep Qwen3 excluded from automatic scoped-handle policy.
+
+## Phase Native fp16 Integration / fp16 expert packed cache opt-in
+- Qwen3 fp16 one-token with `PCKETLM_DISABLE_FP16_PACKED_CACHE=1`: ready=true, layers_executed=48/48, generated_text=`<think>`, total=87.2947s. Timings: prefill_stack_op_load_tensors=65.9947s, prefill_stack_op_mlp=15.0946s.
+- Catalog component-group audit for Qwen3: expert tensors are tagged `expert_mlp` (18432 tensors), not `expert`; non-expert groups are attention=288, layer_norm=96, router=48, embeddings=1, lm_head=1, final_norm=1.
+- Changed fp16 packed cache policy so `expert` and `expert_mlp` entries are opt-in via `PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE=1`; non-expert tensors still use the packed cache by default.
+- Qwen3 fp16 one-token after the `expert_mlp` policy fix: ready=true, layers_executed=48/48, generated_text=`<think>`, total=84.0099s. Timings: prefill_stack_op_load_tensors=67.4657s, prefill_stack_op_mlp=11.8949s. FP16 packed cache: hits=0, misses=433, stores=433, disk_reads=9823, evictions=0, resident=1752.4 MB, budget=4305.71 MB.
+- Focused test: `python -m pytest tests\test_tensor_residency.py::test_fp16_packed_expert_cache_is_opt_in -q` -> 1 passed in 1.35s.
+- Full test suite: `python -m pytest tests/ -q` -> 299 passed in 22.47s.

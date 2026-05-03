@@ -168,6 +168,42 @@ def test_fp16_packed_cache_kill_switch_forces_disk_read(tmp_path: Path, monkeypa
     assert stats.disk_reads == 2
 
 
+def test_fp16_packed_expert_cache_is_opt_in(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_FP16_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_FP16_PACKED_CACHE", raising=False)
+    monkeypatch.delenv("PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE", raising=False)
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.3.gate_proj.weight")
+    entry.component_group = "expert_mlp"
+    calls = {"count": 0}
+
+    def reader() -> bytearray:
+        calls["count"] += 1
+        return bytearray(b"abcdefgh")
+
+    first = fp16_packed_cache_get_or_read("fp16-packed-expert-off", entry, reader)
+    second = fp16_packed_cache_get_or_read("fp16-packed-expert-off", entry, reader)
+    stats = fp16_packed_cache_stats()
+
+    assert first is not second
+    assert calls["count"] == 2
+    assert stats.hits == 0
+    assert stats.stores == 0
+    assert stats.disk_reads == 2
+
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE", "1")
+    calls["count"] = 0
+    cached_first = fp16_packed_cache_get_or_read("fp16-packed-expert-on", entry, reader)
+    cached_second = fp16_packed_cache_get_or_read("fp16-packed-expert-on", entry, reader)
+    stats = fp16_packed_cache_stats()
+
+    assert cached_first is cached_second
+    assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.stores == 1
+
+
 def test_large_attention_tensor_is_evictable_under_memory_pressure(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-large-attention-test"

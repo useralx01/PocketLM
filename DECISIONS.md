@@ -1141,3 +1141,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Kept router/top-k expert selection in Python because it controls paged expert materialization and avoids loading all experts.
 - Kept selected expert FFN in the existing native selected-MoE kernel. This gives MoE layers native attention plus native selected FFN without changing the paging policy.
 - Qwen3 fp16 first-token runtime remains dominated by prefill tensor loading, not native decode math. The post-change one-token run spent 298.8721s in prefill tensor loads and never reached continuation decode. Forced scoped safetensor handles still exit early for Qwen3, so the scoped-handle policy remains excluded for this model.
+
+## Phase Native fp16 Integration / fp16 expert packed cache policy
+- Disabled fp16 packed caching by default for MoE expert tensor groups (`expert` and `expert_mlp`), with opt-in override `PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE=1`.
+- Reason: Qwen3 first-token prefill touches thousands of one-use expert tensors. Caching those raw bytes under the default RAM budget caused 8829 evictions and a 319.5351s one-token run; disabling expert caching while keeping non-expert cache active brought the same run to 84.0099s with zero packed-cache evictions.
+- Non-expert fp16 packed caching remains enabled for repeated attention, router, norm, embedding, and lm_head tensors because those entries are small and reused across decode steps.

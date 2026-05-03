@@ -419,6 +419,20 @@ def _fp16_packed_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP16_PACKED_CACHE", "0").strip().lower() not in {"1", "true", "yes", "on"}
 
 
+def _fp16_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
+    if not _fp16_packed_cache_enabled():
+        return False
+    component_group = (entry.component_group or "").lower()
+    if component_group in {"expert", "expert_mlp"}:
+        return os.environ.get("PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return True
+
+
 def _fp16_packed_cache_budget_bytes() -> int:
     global _fp16_packed_cache_budget_cached
     explicit_mb = _env_int("PCKETLM_FP16_PACKED_CACHE_MB", -1)
@@ -459,7 +473,7 @@ def fp16_packed_cache_get_or_read(
 ) -> bytearray:
     """Return raw fp16/BF16 safetensors bytes, caching them between tensor loads."""
     global _fp16_packed_cache_bytes
-    if not _fp16_packed_cache_enabled():
+    if not _fp16_packed_cache_enabled_for_entry(entry):
         _fp16_packed_stats.disk_reads += 1
         return reader()
 
