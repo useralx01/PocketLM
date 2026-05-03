@@ -619,3 +619,4 @@ Phase Native fp16 Engine: partial native foundation landed; production native la
 Phase Native fp16 Integration: partial; C-owned KV, decode attention, dense decode orchestrator, and GEMM tile attempt landed, but production native layer_bridge routing is blocked by BF16/fp16 precision mismatch and GEMM performance.
 
 Phase Native fp16 Integration: partial; dense single-token native layer routing active for Qwen2.5 BF16, 14B smoke coherent with 96/96 layers, but load orchestration still dominates and MoE/speculative native routing remains incomplete.
+Phase Native fp16 Integration update: C-owned KV decode, speculative tentative commit/rollback, native dense decode, MoE native attention decode, selected-MoE SIMD, opt-in dense prefill, and opt-in native lm_head top-k are implemented and tested (`306 passed`); current default 14B row remains `65.423s` for 4 tokens with `192/192` layers, so speed targets are still not met.

@@ -238,3 +238,12 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Production routing through layer_bridge.py is not enabled because the deployed model sources are BF16 while the native orchestrator path is fp16. Direct routing would change precision and risks failing the identical greedy-token regression gate.
 - Native GEMM still loses to torch at 1024x1024 after the NR=16/FMA pass, so using it in production would likely slow model-scale layers.
 - C-owned KV/decode/orchestrator correctness is proven on isolated tiny tests, but not through the full native path in layer_bridge.py.
+
+## Phase Native fp16 Integration / native DLL load churn
+- Symptom: full-suite runs intermittently failed native availability checks with `[WinError 4551] An Application Control policy has blocked this file` after rebuild/checkout churn.
+- Root cause: Windows Application Control blocked freshly replaced DLL files, not a kernel correctness failure.
+- Fix: delete/rebuild affected DLLs and run `Unblock-File` on `src/pcketlm/native/*.dll`; native module checks then returned kv=true, moe=true, loader=true, q4=true, matmul=true, and the full suite passed (`306 passed`).
+
+## Phase Native fp16 Integration / rejected native defaults
+- Dense native prefill was correct but regressed real 14B prefill (`prefill_stack_op_native_layer=64.3411s` vs default torch prefill around `19.8s`), so it remains opt-in via `PCKETLM_ENABLE_NATIVE_DENSE_PREFILL=1`.
+- Native lm_head top-k was correct but regressed the real 14B row (`continuation_decode_tail=3.626s`), so it remains opt-in via `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`.
