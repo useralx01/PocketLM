@@ -1146,3 +1146,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Disabled fp16 packed caching by default for MoE expert tensor groups (`expert` and `expert_mlp`), with opt-in override `PCKETLM_ENABLE_FP16_PACKED_EXPERT_CACHE=1`.
 - Reason: Qwen3 first-token prefill touches thousands of one-use expert tensors. Caching those raw bytes under the default RAM budget caused 8829 evictions and a 319.5351s one-token run; disabling expert caching while keeping non-expert cache active brought the same run to 84.0099s with zero packed-cache evictions.
 - Non-expert fp16 packed caching remains enabled for repeated attention, router, norm, embedding, and lm_head tensors because those entries are small and reused across decode steps.
+
+## Phase Native fp16 Integration / selected MoE SIMD boundary
+- Kept the production MoE boundary at selected experts only, but replaced scalar selected-expert dot products with AVX2/FMA helpers inside `fp16_moe.dll`.
+- This avoids materializing non-selected experts while making the top-k expert FFN path faster. The Qwen3-shaped BF16 selected-FFN microbench is 2.0x faster than the torch reference with max_abs=0.0.

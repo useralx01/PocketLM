@@ -4952,3 +4952,9 @@ Result: 297 passed in 21.83s
 - Qwen3 fp16 one-token after the `expert_mlp` policy fix: ready=true, layers_executed=48/48, generated_text=`<think>`, total=84.0099s. Timings: prefill_stack_op_load_tensors=67.4657s, prefill_stack_op_mlp=11.8949s. FP16 packed cache: hits=0, misses=433, stores=433, disk_reads=9823, evictions=0, resident=1752.4 MB, budget=4305.71 MB.
 - Focused test: `python -m pytest tests\test_tensor_residency.py::test_fp16_packed_expert_cache_is_opt_in -q` -> 1 passed in 1.35s.
 - Full test suite: `python -m pytest tests/ -q` -> 299 passed in 22.47s.
+
+## Phase Native fp16 Integration / selected MoE AVX2 dot products
+- Vectorized `fp16_moe.cpp::native_moe_selected_forward_u16` gate/up/down dot products with AVX2/FMA and one hidden-vector conversion per token.
+- Build: `python tools\build_native.py --force` rebuilt `fp16_moe.dll`.
+- Focused tests: `python -m pytest tests\test_native_fp16_moe.py -q` -> 3 passed in 1.97s.
+- Qwen3-shaped selected expert microbench (`seq=1`, `hidden=2048`, `selected=8`, `intermediate=768`, BF16): native=0.005126s, torch reference=0.010266s, speedup=2.0x, max_abs=0.0.

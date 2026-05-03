@@ -36,12 +36,55 @@ static inline float read_u16(uint16_t value, int dtype_code) {
     return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
 }
 
+static inline __m256 load_u16_as_ps(const uint16_t* values, int dtype_code) {
+    const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values));
+    if (dtype_code == 1) {
+        const __m256i widened = _mm256_slli_epi32(_mm256_cvtepu16_epi32(packed), 16);
+        return _mm256_castsi256_ps(widened);
+    }
+    return _mm256_cvtph_ps(packed);
+}
+
+static inline float horizontal_sum_ps(__m256 values) {
+    const __m128 low = _mm256_castps256_ps128(values);
+    const __m128 high = _mm256_extractf128_ps(values, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
 static inline uint16_t write_u16(float value, int dtype_code) {
     return dtype_code == 1 ? fp32_to_bf16(value) : fp32_to_fp16(value);
 }
 
 static inline float silu(float value) {
     return value / (1.0f + std::exp(-value));
+}
+
+static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t count, int dtype_code) {
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        _mm256_storeu_ps(out + index, load_u16_as_ps(values + index, dtype_code));
+    }
+    for (; index < count; ++index) {
+        out[index] = read_u16(values[index], dtype_code);
+    }
+}
+
+static float dot_float_u16(const float* left, const uint16_t* right, int64_t count, int dtype_code) {
+    __m256 acc_vec = _mm256_setzero_ps();
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        const __m256 l = _mm256_loadu_ps(left + index);
+        const __m256 r = load_u16_as_ps(right + index, dtype_code);
+        acc_vec = _mm256_fmadd_ps(l, r, acc_vec);
+    }
+    float acc = horizontal_sum_ps(acc_vec);
+    for (; index < count; ++index) {
+        acc += left[index] * read_u16(right[index], dtype_code);
+    }
+    return acc;
 }
 
 extern "C" __declspec(dllexport) int native_moe_forward_fp16(
@@ -76,14 +119,12 @@ extern "C" __declspec(dllexport) int native_moe_forward_fp16(
     #pragma omp parallel for schedule(static)
     for (int64_t token = 0; token < seq_len; ++token) {
         const uint16_t* token_hidden = hidden + token * hidden_size;
+        std::vector<float> token_hidden_f(static_cast<size_t>(hidden_size), 0.0f);
+        load_vector_u16_as_float(token_hidden, token_hidden_f.data(), hidden_size, 0);
         std::vector<float> logits(static_cast<size_t>(num_experts), 0.0f);
         for (int64_t expert = 0; expert < num_experts; ++expert) {
-            float acc = 0.0f;
             const uint16_t* row = router_weight + expert * hidden_size;
-            for (int64_t dim = 0; dim < hidden_size; ++dim) {
-                acc += fp16_to_fp32(token_hidden[dim]) * fp16_to_fp32(row[dim]);
-            }
-            logits[static_cast<size_t>(expert)] = acc;
+            logits[static_cast<size_t>(expert)] = dot_float_u16(token_hidden_f.data(), row, hidden_size, 0);
         }
 
         const float max_logit = *std::max_element(logits.begin(), logits.end());
@@ -138,20 +179,12 @@ extern "C" __declspec(dllexport) int native_moe_forward_fp16(
             const uint16_t* up_base = up_weight + (expert * intermediate_size * hidden_size);
             const uint16_t* down_base = down_weight + (expert * hidden_size * intermediate_size);
             for (int64_t row = 0; row < intermediate_size; ++row) {
-                float gate_acc = 0.0f;
-                float up_acc = 0.0f;
-                for (int64_t dim = 0; dim < hidden_size; ++dim) {
-                    const float h = fp16_to_fp32(token_hidden[dim]);
-                    gate_acc += h * fp16_to_fp32(gate_base[row * hidden_size + dim]);
-                    up_acc += h * fp16_to_fp32(up_base[row * hidden_size + dim]);
-                }
+                const float gate_acc = dot_float_u16(token_hidden_f.data(), gate_base + row * hidden_size, hidden_size, 0);
+                const float up_acc = dot_float_u16(token_hidden_f.data(), up_base + row * hidden_size, hidden_size, 0);
                 expert_hidden[static_cast<size_t>(row)] = silu(gate_acc) * up_acc;
             }
             for (int64_t row = 0; row < hidden_size; ++row) {
-                float down_acc = 0.0f;
-                for (int64_t dim = 0; dim < intermediate_size; ++dim) {
-                    down_acc += expert_hidden[static_cast<size_t>(dim)] * fp16_to_fp32(down_base[row * intermediate_size + dim]);
-                }
+                const float down_acc = dot_float_u16(expert_hidden.data(), down_base + row * intermediate_size, intermediate_size, 0);
                 combined[static_cast<size_t>(row)] += route_weight * down_acc;
             }
         }
@@ -192,6 +225,8 @@ extern "C" __declspec(dllexport) int native_moe_selected_forward_u16(
     #pragma omp parallel for schedule(static)
     for (int64_t token = 0; token < seq_len; ++token) {
         const uint16_t* token_hidden = hidden + token * hidden_size;
+        std::vector<float> token_hidden_f(static_cast<size_t>(hidden_size), 0.0f);
+        load_vector_u16_as_float(token_hidden, token_hidden_f.data(), hidden_size, dtype_code);
         std::vector<float> combined(static_cast<size_t>(hidden_size), 0.0f);
         std::vector<float> expert_hidden(static_cast<size_t>(intermediate_size), 0.0f);
         for (int64_t rank = 0; rank < selected_count; ++rank) {
@@ -200,20 +235,27 @@ extern "C" __declspec(dllexport) int native_moe_selected_forward_u16(
             const uint16_t* up_base = up_weight + (rank * intermediate_size * hidden_size);
             const uint16_t* down_base = down_weight + (rank * hidden_size * intermediate_size);
             for (int64_t row = 0; row < intermediate_size; ++row) {
-                float gate_acc = 0.0f;
-                float up_acc = 0.0f;
-                for (int64_t dim = 0; dim < hidden_size; ++dim) {
-                    const float h = read_u16(token_hidden[dim], dtype_code);
-                    gate_acc += h * read_u16(gate_base[row * hidden_size + dim], dtype_code);
-                    up_acc += h * read_u16(up_base[row * hidden_size + dim], dtype_code);
-                }
+                const float gate_acc = dot_float_u16(
+                    token_hidden_f.data(),
+                    gate_base + row * hidden_size,
+                    hidden_size,
+                    dtype_code
+                );
+                const float up_acc = dot_float_u16(
+                    token_hidden_f.data(),
+                    up_base + row * hidden_size,
+                    hidden_size,
+                    dtype_code
+                );
                 expert_hidden[static_cast<size_t>(row)] = silu(gate_acc) * up_acc;
             }
             for (int64_t row = 0; row < hidden_size; ++row) {
-                float down_acc = 0.0f;
-                for (int64_t dim = 0; dim < intermediate_size; ++dim) {
-                    down_acc += expert_hidden[static_cast<size_t>(dim)] * read_u16(down_base[row * intermediate_size + dim], dtype_code);
-                }
+                const float down_acc = dot_float_u16(
+                    expert_hidden.data(),
+                    down_base + row * intermediate_size,
+                    intermediate_size,
+                    dtype_code
+                );
                 combined[static_cast<size_t>(row)] += route_weight * down_acc;
             }
         }
