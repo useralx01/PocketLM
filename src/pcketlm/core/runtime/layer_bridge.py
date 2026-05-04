@@ -1072,6 +1072,15 @@ def _native_dense_prefill_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_NATIVE_DENSE_PREFILL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_packed_gemv_layer_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _layer_tensor_names(layer_index: int) -> list[str]:
     return [
         f"model.layers.{layer_index}.input_layernorm.weight",
@@ -1220,6 +1229,7 @@ def _try_native_dense_decode_bridge(
         return None
     try:
         from pcketlm.native import NativeKvSession, native_fp16_kv_available
+        from pcketlm.native import cached_pack_weight_rows8
 
         if not native_fp16_kv_available():
             return None
@@ -1283,29 +1293,75 @@ def _try_native_dense_decode_bridge(
             session = native_kv_session
             past_length = session.committed_length(0) + session.tentative_length(0)
         native_started = time.perf_counter()
-        output = session.dense_layer_decode_fp16(
-            0,
-            hidden_states.reshape(-1).to(dtype=math_dtype),
-            tensors[f"model.layers.{layer_index}.input_layernorm.weight"],
-            tensors[f"model.layers.{layer_index}.post_attention_layernorm.weight"],
-            tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"],
-            tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"],
-            tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"],
-            tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"],
-            tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"],
-            tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"],
-            tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"],
-            intermediate_size=config.intermediate_size,
-            num_attention_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            rms_eps=config.rms_norm_eps,
-            rope_theta=config.rope_theta,
-            q_bias=tensors.get(f"model.layers.{layer_index}.self_attn.q_proj.bias"),
-            k_bias=tensors.get(f"model.layers.{layer_index}.self_attn.k_proj.bias"),
-            v_bias=tensors.get(f"model.layers.{layer_index}.self_attn.v_proj.bias"),
-            q_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
-            k_norm_weight=tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
-        )
+        hidden_flat = hidden_states.reshape(-1).to(dtype=math_dtype)
+        input_norm = tensors[f"model.layers.{layer_index}.input_layernorm.weight"]
+        post_norm = tensors[f"model.layers.{layer_index}.post_attention_layernorm.weight"]
+        q_weight = tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"]
+        k_weight = tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]
+        v_weight = tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"]
+        o_weight = tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"]
+        gate_weight = tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"]
+        up_weight = tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"]
+        down_weight = tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"]
+        common_kwargs = {
+            "rms_eps": config.rms_norm_eps,
+            "rope_theta": config.rope_theta,
+            "q_bias": tensors.get(f"model.layers.{layer_index}.self_attn.q_proj.bias"),
+            "k_bias": tensors.get(f"model.layers.{layer_index}.self_attn.k_proj.bias"),
+            "v_bias": tensors.get(f"model.layers.{layer_index}.self_attn.v_proj.bias"),
+            "q_norm_weight": tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
+            "k_norm_weight": tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
+        }
+        if _native_packed_gemv_layer_enabled() and hasattr(session, "dense_layer_decode_packed_rows8"):
+            pack_started = time.perf_counter()
+            q_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:q", q_weight)
+            k_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:k", k_weight)
+            v_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:v", v_weight)
+            o_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:o", o_weight)
+            gate_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:gate", gate_weight)
+            up_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:up", up_weight)
+            down_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:down", down_weight)
+            timings["pack_weights"] = round(
+                timings.get("pack_weights", 0.0) + (time.perf_counter() - pack_started),
+                4,
+            )
+            output = session.dense_layer_decode_packed_rows8(
+                0,
+                hidden_flat,
+                input_norm,
+                post_norm,
+                q_packed,
+                k_packed,
+                v_packed,
+                o_packed,
+                gate_packed,
+                up_packed,
+                down_packed,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=head_dim,
+                **common_kwargs,
+            )
+        else:
+            output = session.dense_layer_decode_fp16(
+                0,
+                hidden_flat,
+                input_norm,
+                post_norm,
+                q_weight,
+                k_weight,
+                v_weight,
+                o_weight,
+                gate_weight,
+                up_weight,
+                down_weight,
+                intermediate_size=config.intermediate_size,
+                num_attention_heads=config.num_attention_heads,
+                num_key_value_heads=config.num_key_value_heads,
+                **common_kwargs,
+            )
         if native_kv_commit:
             session.commit(1)
         timings["native_layer"] = round(timings.get("native_layer", 0.0) + (time.perf_counter() - native_started), 4)

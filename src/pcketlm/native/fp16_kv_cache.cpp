@@ -45,6 +45,8 @@ struct KvSession {
     std::vector<uint16_t> scratch_v_u16;
 };
 
+static thread_local bool g_use_prepacked_rows8 = false;
+
 static inline float fp16_to_fp32(uint16_t value) {
     const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
     const __m128 full = _mm_cvtph_ps(half);
@@ -112,6 +114,71 @@ static inline float horizontal_sum_ps(__m256 values) {
     return _mm_cvtss_f32(sum);
 }
 
+static bool packed_rows8_gemv_u16_hidden(
+    const uint16_t* hidden,
+    const uint16_t* packed,
+    const uint16_t* bias,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t block_count = (out_features + row_block - 1) / row_block;
+    #pragma omp parallel for schedule(static)
+    for (int64_t block = 0; block < block_count; ++block) {
+        const int64_t row_base = block * row_block;
+        const uint16_t* weight_block = packed + block * in_features * row_block;
+        __m256 acc = _mm256_setzero_ps();
+        for (int64_t col = 0; col < in_features; ++col) {
+            const __m256 w = load_u16_as_ps(weight_block + col * row_block, dtype_code);
+            const __m256 h = _mm256_set1_ps(read_u16(hidden[col], dtype_code));
+            acc = _mm256_fmadd_ps(h, w, acc);
+        }
+        float sums[row_block];
+        _mm256_storeu_ps(sums, acc);
+        for (int64_t lane = 0; lane < row_block; ++lane) {
+            const int64_t row = row_base + lane;
+            if (row < out_features) {
+                out[row] = sums[lane] + (bias != nullptr ? read_u16(bias[row], dtype_code) : 0.0f);
+            }
+        }
+    }
+    return true;
+}
+
+static bool packed_rows8_gemv_float_hidden(
+    const float* hidden,
+    const uint16_t* packed,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t block_count = (out_features + row_block - 1) / row_block;
+    #pragma omp parallel for schedule(static)
+    for (int64_t block = 0; block < block_count; ++block) {
+        const int64_t row_base = block * row_block;
+        const uint16_t* weight_block = packed + block * in_features * row_block;
+        __m256 acc = _mm256_setzero_ps();
+        for (int64_t col = 0; col < in_features; ++col) {
+            const __m256 w = load_u16_as_ps(weight_block + col * row_block, dtype_code);
+            const __m256 h = _mm256_set1_ps(hidden[col]);
+            acc = _mm256_fmadd_ps(h, w, acc);
+        }
+        float sums[row_block];
+        _mm256_storeu_ps(sums, acc);
+        for (int64_t lane = 0; lane < row_block; ++lane) {
+            const int64_t row = row_base + lane;
+            if (row < out_features) {
+                out[row] = sums[lane];
+            }
+        }
+    }
+    return true;
+}
+
 static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t count, int dtype_code) {
     int64_t index = 0;
     for (; index + 8 <= count; index += 8) {
@@ -135,6 +202,9 @@ static bool linear_one_blas(
     int64_t out_features,
     int dtype_code
 ) {
+    if (g_use_prepacked_rows8) {
+        return packed_rows8_gemv_u16_hidden(hidden, weight, bias, out, in_features, out_features, dtype_code);
+    }
     (void)hidden;
     (void)weight;
     (void)bias;
@@ -153,6 +223,9 @@ static bool linear_float_u16_blas(
     int64_t out_features,
     int dtype_code
 ) {
+    if (g_use_prepacked_rows8) {
+        return packed_rows8_gemv_float_hidden(hidden, weight, out, in_features, out_features, dtype_code);
+    }
     (void)hidden;
     (void)weight;
     (void)out;
@@ -1313,6 +1386,64 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
         out[dim] = write_u16(residual_after_attention[static_cast<size_t>(dim)] + mlp_out[static_cast<size_t>(dim)], dtype_code);
     }
     return 0;
+}
+
+extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext_packed_rows8(
+    void* handle,
+    int64_t layer,
+    const uint16_t* hidden,
+    const uint16_t* input_norm_weight,
+    const uint16_t* post_norm_weight,
+    const uint16_t* q_weight_packed,
+    const uint16_t* k_weight_packed,
+    const uint16_t* v_weight_packed,
+    const uint16_t* o_weight_packed,
+    const uint16_t* gate_weight_packed,
+    const uint16_t* up_weight_packed,
+    const uint16_t* down_weight_packed,
+    const uint16_t* q_bias,
+    const uint16_t* k_bias,
+    const uint16_t* v_bias,
+    const uint16_t* q_norm_weight,
+    const uint16_t* k_norm_weight,
+    uint16_t* out,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    float rms_eps,
+    float rope_theta
+) {
+    const bool previous = g_use_prepacked_rows8;
+    g_use_prepacked_rows8 = true;
+    const int code = kv_dense_layer_decode_u16_ext(
+        handle,
+        layer,
+        hidden,
+        input_norm_weight,
+        post_norm_weight,
+        q_weight_packed,
+        k_weight_packed,
+        v_weight_packed,
+        o_weight_packed,
+        gate_weight_packed,
+        up_weight_packed,
+        down_weight_packed,
+        q_bias,
+        k_bias,
+        v_bias,
+        q_norm_weight,
+        k_norm_weight,
+        out,
+        hidden_size,
+        intermediate_size,
+        num_heads,
+        num_kv_heads,
+        rms_eps,
+        rope_theta
+    );
+    g_use_prepacked_rows8 = previous;
+    return code;
 }
 
 extern "C" __declspec(dllexport) int kv_dense_layer_prefill_u16_ext(

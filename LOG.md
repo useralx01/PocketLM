@@ -5147,3 +5147,25 @@ Result: 297 passed in 21.83s
 - Four-token opt-in row wrote only `start` and `before` events and no `after` row, so the production hook was removed.
 - Rebuilt safe DLLs and reran focused tests: `python -m pytest tests\test_native_fp16_packed_gemv.py tests\test_native_fp16_kv_cache.py -q` -> `14 passed`.
 - Full suite: `python -m pytest tests/ -q` -> `311 passed in 26.13s`.
+
+## Phase Native Packed Weight Cache / Setup
+- Branch: `phase-native-packed-weight-cache`.
+- Goal: persist row8 packed weights so Qwen 14B does not repack inside every layer call; route only after correctness and real timing prove it is safe.
+
+## Phase Native Packed Weight Cache / API and bridge
+- Added Python LRU cache for row8 packed GEMV weights: `cached_pack_weight_rows8`, `packed_gemv_cache_stats`, and `reset_packed_gemv_cache`.
+- Added kill switch `PCKETLM_DISABLE_PACKED_GEMV_CACHE=1` and budget env `PCKETLM_PACKED_GEMV_CACHE_MB`.
+- Added packed dense decode entry point `kv_dense_layer_decode_u16_ext_packed_rows8` and `NativeKvSession.dense_layer_decode_packed_rows8`.
+- Added opt-in bridge routing via `PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER=1`; default production path remains the previous native dense decode.
+- Tests: `python -m pytest tests\test_native_packed_gemv_cache.py tests\test_native_fp16_packed_gemv.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer -q` -> `8 passed`.
+
+## Phase Native Packed Weight Cache / real Qwen 14B probes
+- Qwen 14B packed cache, 4096 MB budget, max_new_tokens=1: generated `Hello`, layers_executed `48/48`, result total `21.4261s`. This row mostly exercises prefill, not continuation packed decode.
+- Qwen 14B packed cache, 4096 MB budget, max_new_tokens=4: wrote only `start` and `before`, no `after`; too much packed residency pressure at this budget.
+- Qwen 14B packed cache, 512 MB budget, max_new_tokens=4: generated `Hello! How can`, layers_executed `192/192`, result total `85.6504s`; continuation `pack_weights`/packed call was `52.3527s`, slower than default.
+- Qwen 14B default path after this phase, max_new_tokens=4: generated `Hello! How can`, layers_executed `192/192`, result total `74.2058s`. Default remains correct and does not use packed GEMV.
+- Full suite: `python -m pytest tests/ -q` -> `315 passed in 31.83s`.
+
+## Phase Native Packed Weight Cache / Setup
+- Branch: phase-native-packed-weight-cache.
+- Goal: persist row8 packed weights so Qwen 14B does not repack inside every layer call; route only after correctness and real timing prove it is safe.

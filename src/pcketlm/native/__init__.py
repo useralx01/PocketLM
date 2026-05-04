@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 from pathlib import Path
+from collections import OrderedDict
 
 import torch
 
@@ -31,6 +32,14 @@ _FP16_KV_LIB: ctypes.CDLL | None = None
 _FP16_KV_ERROR: Exception | None = None
 _FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
 _FP16_PACKED_GEMV_ERROR: Exception | None = None
+_PACKED_GEMV_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+_PACKED_GEMV_CACHE_BYTES = 0
+_PACKED_GEMV_CACHE_STATS = {
+    "hits": 0,
+    "misses": 0,
+    "stores": 0,
+    "evictions": 0,
+}
 
 
 def _native_disabled() -> bool:
@@ -247,6 +256,39 @@ def native_fp16_packed_gemv_error() -> Exception | None:
     return _FP16_PACKED_GEMV_ERROR
 
 
+def _packed_gemv_cache_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_PACKED_GEMV_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _packed_gemv_cache_budget_bytes() -> int:
+    raw = os.environ.get("PCKETLM_PACKED_GEMV_CACHE_MB", "").strip()
+    if not raw:
+        return 0
+    try:
+        mb = int(raw)
+    except ValueError:
+        return 0
+    return max(0, mb) * 1024 * 1024
+
+
+def reset_packed_gemv_cache() -> None:
+    global _PACKED_GEMV_CACHE_BYTES
+    _PACKED_GEMV_CACHE.clear()
+    _PACKED_GEMV_CACHE_BYTES = 0
+    for key in _PACKED_GEMV_CACHE_STATS:
+        _PACKED_GEMV_CACHE_STATS[key] = 0
+
+
+def packed_gemv_cache_stats() -> dict[str, int | float]:
+    return {
+        **_PACKED_GEMV_CACHE_STATS,
+        "resident_count": len(_PACKED_GEMV_CACHE),
+        "resident_bytes": _PACKED_GEMV_CACHE_BYTES,
+        "resident_mb": round(_PACKED_GEMV_CACHE_BYTES / 1024 / 1024, 4),
+        "budget_bytes": _packed_gemv_cache_budget_bytes(),
+    }
+
+
 def pack_weight_rows8(weight: torch.Tensor) -> torch.Tensor:
     lib = _load_fp16_packed_gemv_lib()
     if lib is None:
@@ -270,6 +312,36 @@ def pack_weight_rows8(weight: torch.Tensor) -> torch.Tensor:
     if code != 0:
         raise RuntimeError(f"native_pack_u16_rows8 failed with code {code}")
     return packed_u16
+
+
+def cached_pack_weight_rows8(cache_key: str, weight: torch.Tensor) -> torch.Tensor:
+    global _PACKED_GEMV_CACHE_BYTES
+    if _packed_gemv_cache_disabled():
+        _PACKED_GEMV_CACHE_STATS["misses"] += 1
+        return pack_weight_rows8(weight)
+    budget = _packed_gemv_cache_budget_bytes()
+    if budget <= 0:
+        _PACKED_GEMV_CACHE_STATS["misses"] += 1
+        return pack_weight_rows8(weight)
+    key = str(cache_key)
+    cached = _PACKED_GEMV_CACHE.get(key)
+    if cached is not None:
+        _PACKED_GEMV_CACHE.move_to_end(key)
+        _PACKED_GEMV_CACHE_STATS["hits"] += 1
+        return cached
+    _PACKED_GEMV_CACHE_STATS["misses"] += 1
+    packed = pack_weight_rows8(weight)
+    packed_bytes = int(packed.numel() * packed.element_size())
+    if packed_bytes > budget:
+        return packed
+    while _PACKED_GEMV_CACHE and _PACKED_GEMV_CACHE_BYTES + packed_bytes > budget:
+        _old_key, old_value = _PACKED_GEMV_CACHE.popitem(last=False)
+        _PACKED_GEMV_CACHE_BYTES -= int(old_value.numel() * old_value.element_size())
+        _PACKED_GEMV_CACHE_STATS["evictions"] += 1
+    _PACKED_GEMV_CACHE[key] = packed
+    _PACKED_GEMV_CACHE_BYTES += packed_bytes
+    _PACKED_GEMV_CACHE_STATS["stores"] += 1
+    return packed
 
 
 def packed_gemv_rows8(hidden: torch.Tensor, packed_weight: torch.Tensor, *, rows: int, cols: int) -> torch.Tensor:
@@ -793,6 +865,9 @@ def _load_fp16_kv_lib() -> ctypes.CDLL | None:
             ctypes.c_float,
         ]
         lib.kv_dense_layer_decode_u16_ext.restype = ctypes.c_int
+        if hasattr(lib, "kv_dense_layer_decode_u16_ext_packed_rows8"):
+            lib.kv_dense_layer_decode_u16_ext_packed_rows8.argtypes = lib.kv_dense_layer_decode_u16_ext.argtypes
+            lib.kv_dense_layer_decode_u16_ext_packed_rows8.restype = ctypes.c_int
         if hasattr(lib, "kv_dense_layer_prefill_u16_ext"):
             lib.kv_dense_layer_prefill_u16_ext.argtypes = [
                 ctypes.c_void_p,
@@ -1082,6 +1157,87 @@ class NativeKvSession:
         )
         if code != 0:
             raise RuntimeError(f"kv_dense_layer_decode_fp16 failed with code {code}")
+        return out
+
+    def dense_layer_decode_packed_rows8(
+        self,
+        layer: int,
+        hidden: torch.Tensor,
+        input_norm_weight: torch.Tensor,
+        post_norm_weight: torch.Tensor,
+        q_weight_packed: torch.Tensor,
+        k_weight_packed: torch.Tensor,
+        v_weight_packed: torch.Tensor,
+        o_weight_packed: torch.Tensor,
+        gate_weight_packed: torch.Tensor,
+        up_weight_packed: torch.Tensor,
+        down_weight_packed: torch.Tensor,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rms_eps: float,
+        rope_theta: float,
+        q_bias: torch.Tensor | None = None,
+        k_bias: torch.Tensor | None = None,
+        v_bias: torch.Tensor | None = None,
+        q_norm_weight: torch.Tensor | None = None,
+        k_norm_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not hasattr(self._lib, "kv_dense_layer_decode_u16_ext_packed_rows8"):
+            raise RuntimeError("kv_dense_layer_decode_u16_ext_packed_rows8 is unavailable")
+        raw_tensors = [hidden, input_norm_weight, post_norm_weight]
+        if any(tensor.dtype != self.dtype for tensor in raw_tensors):
+            raise TypeError(f"dense_layer_decode_packed_rows8 requires {self.dtype} raw tensors")
+        packed_tensors = [
+            q_weight_packed,
+            k_weight_packed,
+            v_weight_packed,
+            o_weight_packed,
+            gate_weight_packed,
+            up_weight_packed,
+            down_weight_packed,
+        ]
+        if any(tensor.dtype != torch.uint16 for tensor in packed_tensors):
+            raise TypeError("packed dense layer weights must be torch.uint16")
+        raw_cpu = [tensor.detach().cpu().contiguous() for tensor in raw_tensors]
+        packed_cpu = [tensor.detach().cpu().contiguous() for tensor in packed_tensors]
+        q_bias_cpu = None if q_bias is None else q_bias.detach().cpu().contiguous().reshape(-1)
+        k_bias_cpu = None if k_bias is None else k_bias.detach().cpu().contiguous().reshape(-1)
+        v_bias_cpu = None if v_bias is None else v_bias.detach().cpu().contiguous().reshape(-1)
+        q_norm_cpu = None if q_norm_weight is None else q_norm_weight.detach().cpu().contiguous().reshape(-1)
+        k_norm_cpu = None if k_norm_weight is None else k_norm_weight.detach().cpu().contiguous().reshape(-1)
+        out = torch.empty((int(hidden_size),), dtype=self.dtype)
+        code = self._lib.kv_dense_layer_decode_u16_ext_packed_rows8(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(raw_cpu[0].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(raw_cpu[1].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(raw_cpu[2].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[0].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[1].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[2].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[3].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[4].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[5].data_ptr())),
+            ctypes.c_void_p(int(packed_cpu[6].data_ptr())),
+            ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if q_norm_cpu is None else int(q_norm_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_norm_cpu is None else int(k_norm_cpu.data_ptr())),
+            ctypes.c_void_p(int(out.data_ptr())),
+            ctypes.c_longlong(int(hidden_size)),
+            ctypes.c_longlong(int(intermediate_size)),
+            ctypes.c_longlong(int(num_heads)),
+            ctypes.c_longlong(int(num_kv_heads)),
+            ctypes.c_float(float(rms_eps)),
+            ctypes.c_float(float(rope_theta)),
+        )
+        if code != 0:
+            raise RuntimeError(f"kv_dense_layer_decode_u16_ext_packed_rows8 failed with code {code}")
         return out
 
     def dense_layer_prefill_fp16(

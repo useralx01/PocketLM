@@ -1228,3 +1228,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Chose an 8-row interleaved packed layout for the first native packed GEMV kernel. For each output-row block, weights are stored as `[col0 row0..7, col1 row0..7, ...]`, letting one hidden scalar multiply eight output rows in one AVX2 vector.
 - The standalone kernel proves the layout is viable: it is 7x-12x faster than single-thread torch GEMV on Qwen-shaped dimensions when pack time is amortized.
 - Do not pack weights on every production layer call. The real Qwen 14B opt-in probe did not improve one-token latency and failed to complete the four-token diagnostic row. Persistent packed weights, keyed by tensor identity and reused across tokens, are required before production dispatch.
+
+## Phase Native Packed Weight Cache / production default
+- Added a persistent row8 packed-weight LRU cache, but kept production dispatch opt-in. The cache works in unit tests and the packed dense C entry point matches the unpacked native dense layer on a tiny layer.
+- Real Qwen 14B proves the current RAM budget cannot retain enough packed weights to make this faster. With a 512 MB budget, the run completes but spends `52.3527s` in continuation packed weight preparation/packed-call time and totals `85.6504s`, worse than default. With a 4096 MB budget, the 4-token row does not complete.
+- Decision: keep `PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER=1` as a profiling knob only. The next viable route is an offline packed-weight artifact or mmap-backed packed source, not RAM-only packed caching on a 16 GB machine.

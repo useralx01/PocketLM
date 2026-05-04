@@ -267,3 +267,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: temporary `PCKETLM_ENABLE_LAYER_PACKED_GEMV=1` hook inside `fp16_kv_cache.dll` completed a one-token Qwen 14B row but failed to produce an `after` row on the four-token diagnostic.
 - Root cause: per-call packing inside the production layer path is unsafe/too expensive for the current loaded tensor lifecycle. The standalone packed GEMV kernel itself passed correctness tests.
 - Fix: removed the production hook and kept only the standalone packed GEMV module. Next implementation must use persistent packed weights instead of packing inside each layer invocation.
+
+## Phase Native Packed Weight Cache / RAM budget pressure
+- Symptom: `PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER=1` with `PCKETLM_PACKED_GEMV_CACHE_MB=4096` on Qwen 14B `max_new_tokens=4` wrote only `start` and `before` rows.
+- Root cause: the packed fp16 working set is too large for this machine when held in RAM alongside runtime tensors. A lower 512 MB budget completed but repacked/evicted too much and regressed to `85.6504s`.
+- Fix: keep packed GEMV production routing opt-in and disabled by default. Future work should use an offline packed artifact or mmap-backed packed tensors so the runtime does not duplicate model-scale weights in RAM.
