@@ -298,3 +298,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: the commit path put the generated token into KV and also kept it as `next_token_id`, so the next decode step processed the same token twice.
 - Fix: remove the unsafe exact-prefix continuation path and make prefix append start at `decode_state.next_position`. Generated tokens remain pending until the next request appends them once.
 
+## Phase Q4 MoE Expert Kernel / Native Q4 low-RAM continuation crash
+- Symptom: same-session Qwen3-30B-A3B Q4 continuation crashed after several warm turns under high cache settings, especially when free RAM fell near the low-GB range.
+- Root cause: native packed-Q4 MoE execution remained correct, but dequantized fp16 residency plus packed Q4 cache could push the process into an unstable low-memory zone. Disabling native Q4 MoE avoided the crash but lost the speed path, proving the issue was memory pressure around the native Q4 MoE path rather than token math.
+- Fix: add a Q4-MoE-only low-RAM guard that clears dequantized fp16 residency while keeping packed Q4 bytes warm. The accepted default threshold is `800 MB`, with a `512 MB` continuation guard floor.
+

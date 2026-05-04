@@ -797,6 +797,22 @@ def clear_q4_packed_cache() -> None:
         _path_identity.cache_clear()
 
 
+def clear_dequantized_tensor_residency_cache() -> None:
+    """Release converted fp16/bf16 tensors while keeping packed byte caches warm."""
+    global _resident_bytes, _resident_expert_bytes, _residency_step, _stats, _memory_snapshot_cache
+    with _cache_lock:
+        _resident_tensors.clear()
+        _resident_bytes = 0
+        _resident_expert_bytes = 0
+        _residency_step = 0
+        _current_step_experts.clear()
+        _stats.resident_bytes = 0
+        _stats.resident_count = 0
+        _stats.expert_resident_bytes = 0
+        _stats.expert_resident_count = 0
+        _memory_snapshot_cache = (0.0, None)
+
+
 def fp16_packed_cache_stats() -> Fp16PackedCacheStats:
     """Return fp16 packed-cache counters for diagnostics."""
     with _cache_lock:

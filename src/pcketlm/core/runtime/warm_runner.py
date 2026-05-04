@@ -15,7 +15,11 @@ from typing import Any
 
 from pcketlm.core.runtime.layer_bridge import KVDecodeState, run_prompt_decode_loop
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
-from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, tensor_residency_stats
+from pcketlm.core.runtime.tensor_residency import (
+    clear_dequantized_tensor_residency_cache,
+    clear_tensor_residency_cache,
+    tensor_residency_stats,
+)
 from pcketlm.core.storage.paths import state_root
 
 WARM_RUNNER_MIN_FREE_MEMORY_MB = 4 * 1024
@@ -23,6 +27,7 @@ WARM_RUNNER_AGENT_MAX_NEW_TOKENS = 2
 WARM_RUNNER_STATUS_DIR_NAME = "warm-runner"
 Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
 Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
+Q4_MOE_LOW_FREE_RAM_TRIM_MB = 800
 
 
 @dataclass(slots=True)
@@ -272,6 +277,43 @@ def _q4_moe_warm_cache_defaults(model_id: str) -> dict[str, str]:
     return defaults
 
 
+def _q4_moe_low_ram_trim_enabled(model_id: str) -> bool:
+    if os.environ.get("PCKETLM_DISABLE_Q4_MOE_LOW_RAM_TRIM", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    if os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4":
+        return False
+    try:
+        from pcketlm.core.runtime.layer_bridge import load_layer_bridge_config
+
+        config = load_layer_bridge_config(model_id)
+    except Exception:
+        return False
+    return (
+        bool(getattr(config, "ready", False))
+        and int(getattr(config, "num_experts", 0) or 0) > 0
+        and int(getattr(config, "num_experts_per_tok", 0) or 0) > 0
+    )
+
+
+def _q4_moe_trim_threshold_mb() -> int:
+    try:
+        return max(0, int(os.environ.get("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", str(Q4_MOE_LOW_FREE_RAM_TRIM_MB))))
+    except ValueError:
+        return Q4_MOE_LOW_FREE_RAM_TRIM_MB
+
+
+def _q4_moe_min_free_memory_mb() -> int:
+    try:
+        return max(0, int(os.environ.get("PCKETLM_Q4_MOE_MIN_FREE_RAM_MB", "512")))
+    except ValueError:
+        return 512
+
+
 @contextmanager
 def _scoped_environment(updates: dict[str, str]):
     previous = {key: os.environ.get(key) for key in updates}
@@ -392,12 +434,25 @@ def run_warm_agent_prompt(
 
         memory_before = warm_runner_memory_snapshot()
         free_ram_mb = memory_before.get("free_ram_mb")
-        if free_ram_mb is not None and int(free_ram_mb) < min_free_memory_mb:
+        q4_moe_trim_enabled = _q4_moe_low_ram_trim_enabled(model_id)
+        q4_moe_min_free_memory_mb = _q4_moe_min_free_memory_mb() if q4_moe_trim_enabled else min_free_memory_mb
+        if (
+            free_ram_mb is not None
+            and int(free_ram_mb) < min_free_memory_mb
+            and q4_moe_trim_enabled
+            and int(free_ram_mb) >= q4_moe_min_free_memory_mb
+            and int(free_ram_mb) < _q4_moe_trim_threshold_mb()
+        ):
+            clear_dequantized_tensor_residency_cache()
+            memory_before = warm_runner_memory_snapshot()
+            free_ram_mb = memory_before.get("free_ram_mb")
+        effective_min_free_memory_mb = q4_moe_min_free_memory_mb if q4_moe_trim_enabled else min_free_memory_mb
+        if free_ram_mb is not None and int(free_ram_mb) < effective_min_free_memory_mb:
             return _blocked_result(
                 runner,
                 prompt,
                 max_new_tokens,
-                [f"Free RAM is below the warm-runner guard of {min_free_memory_mb} MB."],
+                [f"Free RAM is below the warm-runner guard of {effective_min_free_memory_mb} MB."],
                 memory_before,
             )
 
@@ -449,6 +504,20 @@ def run_warm_agent_prompt(
             )
         elapsed = round(time.perf_counter() - started, 3)
         memory_after = warm_runner_memory_snapshot()
+        low_ram_trim: dict[str, Any] = {"applied": False}
+        if _q4_moe_low_ram_trim_enabled(model_id):
+            free_after = memory_after.get("free_ram_mb")
+            trim_threshold = _q4_moe_trim_threshold_mb()
+            if free_after is not None and int(free_after) < trim_threshold:
+                clear_dequantized_tensor_residency_cache()
+                trimmed_memory = warm_runner_memory_snapshot()
+                low_ram_trim = {
+                    "applied": True,
+                    "threshold_mb": trim_threshold,
+                    "free_before_mb": int(free_after),
+                    "free_after_mb": trimmed_memory.get("free_ram_mb"),
+                }
+                memory_after = trimmed_memory
         runner.request_count += 1
         runner.last_request_at = time.time()
         runner.last_latency_seconds = elapsed
@@ -464,6 +533,9 @@ def run_warm_agent_prompt(
         _write_runner_status(runner)
 
         timings = dict(getattr(result, "timings", {}) or {})
+        prefix_reuse_payload = dict(getattr(result, "prefix_reuse", {}) or {})
+        if low_ram_trim["applied"]:
+            prefix_reuse_payload["q4_moe_low_ram_trim"] = dict(low_ram_trim)
         return WarmRunnerRequestResult(
             model_id=model_id,
             session_id=runner.session_id,
@@ -477,7 +549,7 @@ def run_warm_agent_prompt(
             steps_completed=int(getattr(result, "steps_completed", 0) or 0),
             generated_token_ids=list(getattr(result, "generated_token_ids", []) or []),
             blockers=list(getattr(result, "blockers", []) or []),
-            prefix_reuse=dict(getattr(result, "prefix_reuse", {}) or {}),
+            prefix_reuse=prefix_reuse_payload,
             performance_summary=_performance_summary(timings),
             memory_before=memory_before,
             memory_after=memory_after,

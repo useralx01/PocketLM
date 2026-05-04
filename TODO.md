@@ -125,4 +125,4 @@
 - After scoped safetensors handle reuse, the Qwen3-30B-A3B Q4 same-session follow-up target moved to `7.484s`. Next speed work should attack the remaining prefix append layer/expert compute, not add RAM-heavy expert byte caches.
 - Do not revisit simple generated-prefix commit or a basic one-call Q4 selected-expert batch wrapper as defaults; both were re-measured after scoped handles and regressed.
 - Do not default native thread-count tuning until it is repeatable across fresh runs; the one `6.908s` row was not stable.
-- Next target after pending-token prefix reuse: reduce first-token/prefill cost. Same-session warm continuation is now `2.135s-3.774s/token`, but first turn is still about `22.743s`.
+- Next target after Q4 MoE low-RAM hardening: reduce cold first-token/prefill cost. Same-session warm continuation is now stable around `3.529s/token` average on the accepted default row, but first turn is still about `21-23s`.

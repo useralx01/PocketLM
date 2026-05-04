@@ -191,6 +191,134 @@ def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, m
     assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS") is None
 
 
+def test_warm_runner_trims_dequantized_q4_moe_cache_under_low_ram(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    snapshots = [
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=1500 * 1024**2),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=3200 * 1024**2),
+    ]
+    trims = []
+
+    def fake_memory_snapshot():
+        if snapshots:
+            return snapshots.pop(0)
+        return MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=3200 * 1024**2)
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        del model_id, kwargs
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=1,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(runtime.warm_runner, "_memory_snapshot", fake_memory_snapshot)
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "clear_dequantized_tensor_residency_cache", lambda: trims.append(True))
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", "2500")
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-trim-test",
+        "hello",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert trims == [True]
+    trim = result.prefix_reuse["q4_moe_low_ram_trim"]
+    assert trim["applied"] is True
+    assert trim["threshold_mb"] == 2500
+    assert trim["free_before_mb"] == 1500
+    assert result.memory_after["free_ram_mb"] == 3200
+
+
+def test_warm_runner_trims_q4_moe_cache_before_memory_guard_blocks(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    snapshots = [
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=1400 * 1024**2),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=5200 * 1024**2),
+        MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=5000 * 1024**2),
+    ]
+    trims = []
+    calls = []
+
+    def fake_memory_snapshot():
+        if snapshots:
+            return snapshots.pop(0)
+        return MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=5000 * 1024**2)
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append((model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=1,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(runtime.warm_runner, "_memory_snapshot", fake_memory_snapshot)
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "clear_dequantized_tensor_residency_cache", lambda: trims.append(True))
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", "2500")
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-guard-trim-test",
+        "hello",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert trims == [True]
+    assert len(calls) == 1
+    assert result.memory_before["free_ram_mb"] == 5200
+
+
 def test_warm_runner_preserves_explicit_q4_moe_cache_settings(tmp_path, monkeypatch) -> None:
     from pcketlm.core import runtime, storage
     from pcketlm.core.runtime import layer_bridge
