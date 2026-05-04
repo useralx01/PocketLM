@@ -4473,19 +4473,39 @@ def _run_prompt_decode_loop(
             effective_temperature = generation_settings.temperature
     record_phase("configure_generation", phase_started)
 
+    effective_stop_token_ids = list(config.eos_token_ids) if stop_token_ids is None else [int(value) for value in stop_token_ids]
     supplied_prefix_ids = [] if initial_token_ids is None else [int(value) for value in initial_token_ids]
     try:
         max_prefix_append_tokens = max(1, int(os.environ.get("PCKETLM_PREFIX_REUSE_MAX_APPEND_TOKENS", "64")))
     except ValueError:
         max_prefix_append_tokens = 8
-    suffix_token_count = len(prompt_token_ids) - len(supplied_prefix_ids)
+    state_token_ids = (
+        []
+        if initial_decode_state is None
+        else [int(value) for value in (initial_decode_state.generated_token_ids or [])]
+    )
+    state_next_position = 0 if initial_decode_state is None else int(initial_decode_state.next_position)
+    prefix_matches_prompt = (
+        bool(supplied_prefix_ids)
+        and len(supplied_prefix_ids) <= len(prompt_token_ids)
+        and prompt_token_ids[: len(supplied_prefix_ids)] == supplied_prefix_ids
+    )
+    state_matches_supplied_prefix = (
+        not state_token_ids
+        or (
+            len(state_token_ids) >= len(supplied_prefix_ids)
+            and state_token_ids[: len(supplied_prefix_ids)] == supplied_prefix_ids
+        )
+    )
+    prefix_append_start = state_next_position
+    suffix_token_count = len(prompt_token_ids) - prefix_append_start
     can_try_prefix = (
         initial_decode_state is not None
         and initial_decode_state.ready
         and initial_decode_state.model_id == model_id
-        and bool(supplied_prefix_ids)
-        and len(supplied_prefix_ids) < len(prompt_token_ids)
-        and prompt_token_ids[: len(supplied_prefix_ids)] == supplied_prefix_ids
+        and prefix_matches_prompt
+        and state_matches_supplied_prefix
+        and 0 <= prefix_append_start < len(prompt_token_ids)
         and suffix_token_count <= max_prefix_append_tokens
     )
     if initial_decode_state is not None or supplied_prefix_ids:
@@ -4502,9 +4522,8 @@ def _run_prompt_decode_loop(
                 initial_decode_state is not None
                 and initial_decode_state.ready
                 and initial_decode_state.model_id == model_id
-                and bool(supplied_prefix_ids)
-                and len(supplied_prefix_ids) < len(prompt_token_ids)
-                and prompt_token_ids[: len(supplied_prefix_ids)] == supplied_prefix_ids
+                and prefix_matches_prompt
+                and state_matches_supplied_prefix
                 and suffix_token_count > max_prefix_append_tokens
             ):
                 summary = (
@@ -4522,7 +4541,7 @@ def _run_prompt_decode_loop(
 
     if can_try_prefix:
         phase_started = time.perf_counter()
-        suffix_token_ids = prompt_token_ids[len(supplied_prefix_ids) :]
+        suffix_token_ids = prompt_token_ids[prefix_append_start:]
         token_hidden_state, token_hidden_blockers = load_token_entry_hidden_state(model_id, suffix_token_ids)
         append_blockers: list[str] = []
         stack_result = None
@@ -4576,7 +4595,8 @@ def _run_prompt_decode_loop(
                 "used": not append_blockers and stack_result is not None and stack_result.output_tensor is not None,
                 "appended_token_count": len(suffix_token_ids) if not append_blockers else 0,
                 "summary": (
-                    f"Reused {len(supplied_prefix_ids)} prompt tokens and batch-appended {len(suffix_token_ids)} new prompt tokens."
+                    f"Reused {len(supplied_prefix_ids)} logical prompt tokens, kept {prefix_append_start} in KV, "
+                    f"and batch-appended {len(suffix_token_ids)} prompt tokens."
                     if not append_blockers and stack_result is not None and stack_result.output_tensor is not None
                     else "Prefix reuse was attempted but failed; generation stopped before unsafe output."
                 ),
@@ -4787,57 +4807,10 @@ def _run_prompt_decode_loop(
         reusable_token_ids = list(prompt_token_ids)
         prefix_commit_blockers: list[str] = []
         if commit_generated_prefix and not decode_state.finished:
-            phase_started = time.perf_counter()
-            generated_hidden_state, generated_hidden_blockers = load_token_entry_hidden_state(
-                model_id,
-                [first_generated_token_id],
+            prefix_reuse["generated_token_commit_skipped"] = (
+                "Generated tokens stay pending until the next decode step so the KV cache never "
+                "contains a token that run_kv_decode_step would process a second time."
             )
-            if generated_hidden_blockers or generated_hidden_state is None:
-                prefix_commit_blockers.extend(generated_hidden_blockers or ["Generated-token prefix commit entry failed."])
-            elif _cancel_requested(should_cancel):
-                return canceled_result(
-                    generated_token_ids=generated_token_ids,
-                    full_chain=first_generated_chain,
-                    cache_sequence_lengths=dict(decode_state.cache_sequence_lengths),
-                    steps_completed=1,
-                )
-            else:
-                commit_stack = run_layer_bridge_stack(
-                    model_id,
-                    start_layer=start_layer,
-                    layer_count=effective_layer_count,
-                    input_hidden=generated_hidden_state,
-                    past_key_values=decode_state.kv_caches,
-                    position_offset=decode_state.next_position,
-                    return_kv_cache=True,
-                    native_kv_sessions=decode_state.native_kv_sessions,
-                    should_cancel=should_cancel,
-                    collect_step_summaries=False,
-                    collect_metrics=False,
-                )
-                add_nested_timings("prefix_commit_stack", commit_stack.timings)
-                if commit_stack.ready and commit_stack.output_tensor is not None:
-                    layers_executed_total += len(commit_stack.executed_layers)
-                    decode_state = KVDecodeState(
-                        model_id=model_id,
-                        next_token_id=first_generated_token_id,
-                        next_position=decode_state.next_position + 1,
-                        generated_token_ids=list(first_generated_chain),
-                        cache_sequence_lengths=dict(commit_stack.cache_sequence_lengths),
-                        kv_caches=dict(commit_stack.next_kv_caches),
-                        native_kv_sessions=dict(commit_stack.next_native_kv_sessions),
-                        finished=decode_state.finished,
-                        stop_reason=decode_state.stop_reason,
-                        ready=True,
-                        blockers=[],
-                    )
-                    reusable_token_ids = list(first_generated_chain)
-                    prefix_reuse["committed_generated_token_count"] = 1
-                else:
-                    prefix_commit_blockers.extend(
-                        commit_stack.blockers or ["Generated-token prefix commit stack failed."]
-                    )
-            record_phase("prefix_commit_generated", phase_started)
         if prefix_commit_blockers:
             prefix_reuse["generated_token_commit_blockers"] = list(prefix_commit_blockers)
         return PromptDecodeLoopResult(

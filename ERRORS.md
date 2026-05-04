@@ -287,3 +287,14 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: after rebuilding `fp16_kv_cache.dll`, native imports failed with Windows Application Control blocking the file.
 - Root cause: rebuilt DLL churn on this machine can leave the file marked or blocked by policy.
 - Fix: delete the DLL, rebuild only `fp16_kv_cache.cpp`, then run `Unblock-File src\pcketlm\native\fp16_kv_cache.dll`; focused native tests passed afterward.
+
+## Phase Q4 MoE Expert Kernel / Scratch reuse rejected
+- Attempted reusable thread-local scratch buffers inside q4_moe_selected_forward_u16.
+- Real Qwen3-30B-A3B Q4 greedy output changed from the prior coherent baseline to '-' / '<think>' in state/phase-q4-moe-session-prefix-scratch-reuse-greedy.json, and timing regressed to 29.65s on the second turn because prefix reuse did not safely match.
+- Root cause classification: native Q4 MoE scratch lifetime/thread interaction was not behavior-preserving under the real OpenMP path. Reverted q4_dequant.cpp to the accepted allocation path and rebuilt q4_dequant.dll.
+
+## Phase Q4 MoE Expert Kernel / Generated-token commit rejected
+- Symptom: an exact-prefix shortcut with generated-token commit produced fast rows but repeated `" Paris"` instead of continuing to `"."`.
+- Root cause: the commit path put the generated token into KV and also kept it as `next_token_id`, so the next decode step processed the same token twice.
+- Fix: remove the unsafe exact-prefix continuation path and make prefix append start at `decode_state.next_position`. Generated tokens remain pending until the next request appends them once.
+
