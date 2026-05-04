@@ -5372,3 +5372,11 @@ Result: 297 passed in 21.83s
 - Full suite: `python -m pytest tests/ -q` -> `344 passed in 22.01s`.
 - Real Qwen3-30B-A3B Q4 check from a lower-RAM start (`2974 MB` free): coherent generated text `"<think>\n"`, layers_executed `96/96`, total `62.3715s`, token rows `52.923s`, `9.431s`, continuation_stack_op_load_tensors `4.4844s`, continuation_stack_op_mlp `3.5518s`, peak working set `3049 MB`, free RAM after `1800 MB`.
 - Verdict: correctness and tests are clean, but this is a bookkeeping cleanup rather than a proven speed unlock. The best repeatable row remains the prior `8.9583s` second token.
+
+## Phase Q4 MoE Fused Expert Load / q4 path identity cache
+- Change: Q4 packed-cache keys now cache resolved Q4/scales path identities and mtimes. The cache is cleared together with the Q4 packed cache. This removes repeated `Path.resolve()` / `stat()` work for every selected expert tensor that shares the same artifact shards.
+- Test added: `test_q4_packed_cache_reuses_path_identity_for_same_shards`.
+- Focused tests: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_tensor_loader.py tests\test_tensor_residency.py tests\test_runtime_layer_bridge.py -q` -> `116 passed in 3.62s`.
+- Real Qwen3-30B-A3B Q4 check from `3728 MB` free: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `57.8344s`, token rows `49.223s`, `8.5922s`, continuation_stack `8.1484s`, continuation_stack_op_load_tensors `4.9775s`, continuation_stack_op_mlp `2.528s`, peak working set `3017 MB`, free RAM after `1870 MB`.
+- Full suite: `python -m pytest tests/ -q` -> `345 passed in 22.06s`.
+- Verdict: keep. This is a small but real repeatable-direction improvement over the prior clean `8.9583s` row, while preserving coherent output and anti-cheat `96/96`.

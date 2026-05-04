@@ -332,6 +332,40 @@ def test_q4_packed_cache_serves_repeated_request_without_disk_read(tmp_path: Pat
     assert stats.resident_count == 1
 
 
+def test_q4_packed_cache_reuses_path_identity_for_same_shards(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1")
+    entry_a = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.1.gate_proj.weight")
+    entry_b = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.2.gate_proj.weight")
+    for expert_index, entry in enumerate([entry_a, entry_b], start=1):
+        entry.component_group = "expert_mlp"
+        entry.expert_index = expert_index
+    q4_path = tmp_path / "model.q4.safetensors"
+    scale_path = tmp_path / "model.scales.safetensors"
+    q4_path.write_bytes(b"q4")
+    scale_path.write_bytes(b"scales")
+    calls = {"mtime": 0}
+
+    from pcketlm.core.runtime import tensor_residency
+
+    real_mtime = tensor_residency._path_mtime_ns
+
+    def counting_mtime(path: Path) -> int:
+        calls["mtime"] += 1
+        return real_mtime(path)
+
+    monkeypatch.setattr(tensor_residency, "_path_mtime_ns", counting_mtime)
+
+    def loader() -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.arange(8, dtype=torch.uint8), torch.ones((4,), dtype=torch.float16)
+
+    with q4_packed_expert_cache_scope(enabled=True):
+        q4_packed_cache_get_or_load("q4-packed-path-id", entry_a, q4_path, scale_path, loader)
+        q4_packed_cache_get_or_load("q4-packed-path-id", entry_b, q4_path, scale_path, loader)
+
+    assert calls["mtime"] == 2
+
+
 def test_q4_packed_cache_lru_evicts_under_budget(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._q4_packed_cache_budget_bytes", lambda: 12)

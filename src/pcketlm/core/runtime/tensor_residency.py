@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -462,6 +463,12 @@ def _path_mtime_ns(path: Path) -> int:
         return 0
 
 
+@lru_cache(maxsize=1024)
+def _path_identity(path: str) -> tuple[str, int]:
+    resolved = Path(path).resolve()
+    return str(resolved), _path_mtime_ns(resolved)
+
+
 def _cache_key(model_id: str, entry: TensorCatalogEntry, dtype: torch.dtype) -> _CacheKey:
     shard_path = entry.shard_path.resolve()
     return (
@@ -492,13 +499,15 @@ def _q4_packed_cache_key(
     q4_path: Path,
     scale_path: Path,
 ) -> _Q4PackedCacheKey:
+    q4_resolved, q4_mtime = _path_identity(str(q4_path))
+    scale_resolved, scale_mtime = _path_identity(str(scale_path))
     return (
         model_id,
         entry.tensor_name,
-        str(q4_path.resolve()),
-        _path_mtime_ns(q4_path),
-        str(scale_path.resolve()),
-        _path_mtime_ns(scale_path),
+        q4_resolved,
+        q4_mtime,
+        scale_resolved,
+        scale_mtime,
     )
 
 
@@ -785,6 +794,7 @@ def clear_q4_packed_cache() -> None:
         _q4_packed_cache_bytes = 0
         _q4_packed_stats = Q4PackedCacheStats()
         _q4_packed_cache_budget_cached = None
+        _path_identity.cache_clear()
 
 
 def fp16_packed_cache_stats() -> Fp16PackedCacheStats:
