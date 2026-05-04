@@ -272,3 +272,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: `PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER=1` with `PCKETLM_PACKED_GEMV_CACHE_MB=4096` on Qwen 14B `max_new_tokens=4` wrote only `start` and `before` rows.
 - Root cause: the packed fp16 working set is too large for this machine when held in RAM alongside runtime tensors. A lower 512 MB budget completed but repacked/evicted too much and regressed to `85.6504s`.
 - Fix: keep packed GEMV production routing opt-in and disabled by default. Future work should use an offline packed artifact or mmap-backed packed tensors so the runtime does not duplicate model-scale weights in RAM.
+
+## Phase Native Packed Artifact Loader / cached pointer reuse
+- Symptom: Qwen 14B `--slice=full`, `max_new_tokens=3`, with `PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER=1` and row8 tensor cache enabled exited with code `1` after the diagnostic `before` row.
+- Root cause: cached `torch.uint16` tensors were passed by raw ctypes pointer into the native packed layer across decode calls. The C path should be const, but this pointer reuse was not stable in the real runtime process.
+- Fix: row8 cache hits now return a fresh cloned tensor. This keeps disk reads out of the hot path and restores correctness, but it is not a speed win; native-owned artifact mapping is required next.

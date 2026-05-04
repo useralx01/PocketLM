@@ -5185,3 +5185,23 @@ Result: 297 passed in 21.83s
 - Real down_proj artifact GEMV microbench: shape `[5120, 13824]`, dtype `torch.bfloat16`, native `0.0061279s`, torch `0.0829623s`, speedup `13.54x`, max_abs `0.0000267`.
 - Qwen 14B layer-0 full dense projection artifact (q/k/v/o/gate/up/down): tensor_count `7`, packed bytes `550502400`, size_ratio `1.0`.
 - Full suite: `python -m pytest tests/ -q` -> `318 passed in 24.32s`.
+
+## Phase Native Packed Artifact Loader / Setup
+- Branch: phase-native-packed-artifact-loader.
+- Goal: load offline row8 packed artifacts by tensor name and feed the native packed dense layer without loading original projection weights.
+
+## Phase Native Packed Artifact Loader / runtime loader
+- Added `packed_artifact_loader.py` for row8 artifacts. It resolves artifacts from both `state/streaming/<model>/artifacts/<name>/` and `models/<model>/artifacts/<name>/`.
+- Added a row8 packed tensor LRU cache with `PCKETLM_ROW8_TENSOR_CACHE_MB` and kill switch `PCKETLM_DISABLE_ROW8_TENSOR_CACHE=1`.
+- Focused tests: `python -m pytest tests\test_packed_artifact_loader.py tests\test_packed_weight_artifact.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_row8_artifact_without_original_projection_load -q` -> `6 passed`.
+
+## Phase Native Packed Artifact Loader / bridge probe
+- Added opt-in bridge route: `PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER=1`, artifact selector `PCKETLM_ROW8_ARTIFACT_NAME`.
+- Test `test_native_dense_decode_uses_row8_artifact_without_original_projection_load` verifies layer decode loads only norm tensors through the normal loader and pulls q/k/v/o/gate/up/down from the row8 artifact.
+- Real artifact status for `qwen2.5-14b-instruct`, artifact `row8_layer0`: ready `true`, tensor_count `7`, total_packed_bytes `550502400`; all seven layer-0 projection tensors available.
+- Real Qwen 14B two-token probe with artifact layer 0: generated `Hello!`, layers_executed `96/96`, result total `45.7123s`, continuation `load_packed_artifact=1.5335s`.
+- First three-token cache attempt exited with code `1` after the diagnostic `before` row. Root cause narrowed to cached tensor pointer reuse across native packed decode calls. Fix: cache hits return a fresh cloned tensor, still avoiding disk reads.
+- Real Qwen 14B three-token probe with cache disabled: generated `Hello! How`, layers_executed `144/144`, result total `85.5179s`, continuation `load_packed_artifact=4.9361s`.
+- Real Qwen 14B three-token probe with safe row8 tensor cache: generated `Hello! How`, layers_executed `144/144`, result total `87.3980s`, continuation `load_packed_artifact=3.2396s`.
+- Full suite: `python -m pytest tests/ -q` -> `321 passed in 22.88s`.
+- Verdict: artifact routing is correct and avoids original projection loads for covered layers, but the safe Python tensor clone erases the disk-read saving on this machine. The next speed step needs a native-owned packed artifact mapping/pointer table, not Python tensor cloning.

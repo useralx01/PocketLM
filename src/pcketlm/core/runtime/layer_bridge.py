@@ -1081,6 +1081,19 @@ def _native_packed_gemv_layer_enabled() -> bool:
     }
 
 
+def _native_packed_artifact_layer_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _native_packed_artifact_name() -> str:
+    return os.environ.get("PCKETLM_ROW8_ARTIFACT_NAME", "row8").strip() or "row8"
+
+
 def _layer_tensor_names(layer_index: int) -> list[str]:
     return [
         f"model.layers.{layer_index}.input_layernorm.weight",
@@ -1256,9 +1269,34 @@ def _try_native_dense_decode_bridge(
         f"model.layers.{layer_index}.self_attn.q_norm.weight",
         f"model.layers.{layer_index}.self_attn.k_norm.weight",
     ]
+    projection_names = {
+        "q": f"model.layers.{layer_index}.self_attn.q_proj.weight",
+        "k": f"model.layers.{layer_index}.self_attn.k_proj.weight",
+        "v": f"model.layers.{layer_index}.self_attn.v_proj.weight",
+        "o": f"model.layers.{layer_index}.self_attn.o_proj.weight",
+        "gate": f"model.layers.{layer_index}.mlp.gate_proj.weight",
+        "up": f"model.layers.{layer_index}.mlp.up_proj.weight",
+        "down": f"model.layers.{layer_index}.mlp.down_proj.weight",
+    }
+    packed_artifact_enabled = False
+    packed_artifact_name = _native_packed_artifact_name()
+    if _native_packed_artifact_layer_enabled() and hasattr(NativeKvSession, "dense_layer_decode_packed_rows8"):
+        try:
+            from pcketlm.core.runtime.packed_artifact_loader import row8_tensor_available
+
+            packed_artifact_enabled = all(
+                row8_tensor_available(model_id, tensor_name, packed_artifact_name)
+                for tensor_name in projection_names.values()
+            )
+        except Exception:
+            packed_artifact_enabled = False
     present_optional = [name for name in optional_names if _tensor_entry_exists(model_id, name)]
     tensors: dict[str, torch.Tensor] = {}
-    tensor_names = required_names + present_optional
+    tensor_names = (
+        [name for name in required_names if name not in set(projection_names.values())] + present_optional
+        if packed_artifact_enabled
+        else required_names + present_optional
+    )
     if prefetched_tensors is not None and all(tensor_name in prefetched_tensors for tensor_name in tensor_names):
         tensors = {tensor_name: prefetched_tensors[tensor_name].to(dtype=math_dtype) for tensor_name in tensor_names}
     else:
@@ -1296,13 +1334,6 @@ def _try_native_dense_decode_bridge(
         hidden_flat = hidden_states.reshape(-1).to(dtype=math_dtype)
         input_norm = tensors[f"model.layers.{layer_index}.input_layernorm.weight"]
         post_norm = tensors[f"model.layers.{layer_index}.post_attention_layernorm.weight"]
-        q_weight = tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"]
-        k_weight = tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]
-        v_weight = tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"]
-        o_weight = tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"]
-        gate_weight = tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"]
-        up_weight = tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"]
-        down_weight = tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"]
         common_kwargs = {
             "rms_eps": config.rms_norm_eps,
             "rope_theta": config.rope_theta,
@@ -1312,7 +1343,48 @@ def _try_native_dense_decode_bridge(
             "q_norm_weight": tensors.get(f"model.layers.{layer_index}.self_attn.q_norm.weight"),
             "k_norm_weight": tensors.get(f"model.layers.{layer_index}.self_attn.k_norm.weight"),
         }
-        if _native_packed_gemv_layer_enabled() and hasattr(session, "dense_layer_decode_packed_rows8"):
+        if packed_artifact_enabled and hasattr(session, "dense_layer_decode_packed_rows8"):
+            load_packed_started = time.perf_counter()
+            from pcketlm.core.runtime.packed_artifact_loader import load_row8_packed_tensor
+
+            q_packed, _ = load_row8_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
+            k_packed, _ = load_row8_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
+            v_packed, _ = load_row8_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
+            o_packed, _ = load_row8_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
+            gate_packed, _ = load_row8_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
+            up_packed, _ = load_row8_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
+            down_packed, _ = load_row8_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
+            timings["load_packed_artifact"] = round(
+                timings.get("load_packed_artifact", 0.0) + (time.perf_counter() - load_packed_started),
+                4,
+            )
+            output = session.dense_layer_decode_packed_rows8(
+                0,
+                hidden_flat,
+                input_norm,
+                post_norm,
+                q_packed,
+                k_packed,
+                v_packed,
+                o_packed,
+                gate_packed,
+                up_packed,
+                down_packed,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=head_dim,
+                **common_kwargs,
+            )
+        elif _native_packed_gemv_layer_enabled() and hasattr(session, "dense_layer_decode_packed_rows8"):
+            q_weight = tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"]
+            k_weight = tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]
+            v_weight = tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"]
+            o_weight = tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"]
+            gate_weight = tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"]
+            up_weight = tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"]
+            down_weight = tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"]
             pack_started = time.perf_counter()
             q_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:q", q_weight)
             k_packed = cached_pack_weight_rows8(f"{model_id}:{layer_index}:k", k_weight)
@@ -1345,6 +1417,13 @@ def _try_native_dense_decode_bridge(
                 **common_kwargs,
             )
         else:
+            q_weight = tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"]
+            k_weight = tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]
+            v_weight = tensors[f"model.layers.{layer_index}.self_attn.v_proj.weight"]
+            o_weight = tensors[f"model.layers.{layer_index}.self_attn.o_proj.weight"]
+            gate_weight = tensors[f"model.layers.{layer_index}.mlp.gate_proj.weight"]
+            up_weight = tensors[f"model.layers.{layer_index}.mlp.up_proj.weight"]
+            down_weight = tensors[f"model.layers.{layer_index}.mlp.down_proj.weight"]
             output = session.dense_layer_decode_fp16(
                 0,
                 hidden_flat,

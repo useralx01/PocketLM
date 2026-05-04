@@ -1238,3 +1238,12 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Chose a simple contiguous `row8_packed.bin` plus JSON manifest instead of safetensors for the first offline packed artifact. Reason: the runtime needs offset-based mmap/slice reads, and the manifest can directly describe each packed tensor's byte range.
 - Kept size ratio at `1.0`: this phase changes layout only, not precision or quantization. The 14B layer-0 sample is `550502400` bytes, which explains why duplicating all packed weights in RAM is not viable on a 16 GB machine.
 - The real tensor microbench confirms the artifact path preserves the standalone packed GEMV speed: Qwen 14B `down_proj` native artifact GEMV is `13.54x` faster than torch for one matrix-vector multiply.
+
+## Phase Native Packed Artifact Loader / source resolution
+- The runtime row8 loader checks `state/streaming/<model>/artifacts/<name>/` first and `models/<model>/artifacts/<name>/` second. This supports imported streaming models while also using the real local artifacts built under `models/`.
+- Artifact bridge dispatch is opt-in via `PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER=1`. Defaults stay unchanged because only layer-0 sample artifacts exist today and the whole-model artifact has not been built.
+
+## Phase Native Packed Artifact Loader / cache safety
+- A direct cached-tensor reuse attempt failed a real Qwen 14B three-token row before the diagnostic `after` event. Since the native packed layer consumes raw ctypes pointers, the safe runtime choice is to return a fresh clone on cache hits until C owns the artifact mapping lifecycle.
+- This preserves correctness and avoids disk reads, but it is not a speed win: the safe clone of the `550502400` byte layer-0 artifact costs roughly the same as the avoided read for this small probe.
+- Next direction: move row8 artifact residency into native C/C++ as a persistent mmap or file-backed pointer table, so decode can reuse stable packed pointers without Python tensor cloning.

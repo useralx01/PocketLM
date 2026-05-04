@@ -381,6 +381,121 @@ def test_native_dense_decode_uses_prefetched_tensor_bundle(monkeypatch) -> None:
             result.native_kv_session.close()
 
 
+def test_native_dense_decode_uses_row8_artifact_without_original_projection_load(monkeypatch) -> None:
+    from tools.pack_weights_row8 import pack_rows8_tensor
+    from pcketlm.core.runtime import packed_artifact_loader
+
+    hidden_size = 8
+    intermediate_size = 16
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = hidden_size // num_heads
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-dense-row8-artifact-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=0,
+        num_experts_per_tok=0,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(4422)
+    full_names = {
+        "model.layers.0.input_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "model.layers.0.post_attention_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "model.layers.0.self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.mlp.gate_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.mlp.up_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        "model.layers.0.mlp.down_proj.weight": (torch.randn((hidden_size, intermediate_size)) * 0.1).to(torch.bfloat16),
+    }
+    projection_names = {
+        name
+        for name in full_names
+        if any(
+            suffix in name
+            for suffix in (
+                "q_proj.weight",
+                "k_proj.weight",
+                "v_proj.weight",
+                "o_proj.weight",
+                "gate_proj.weight",
+                "up_proj.weight",
+                "down_proj.weight",
+            )
+        )
+    }
+    packed_by_name = {
+        name: pack_rows8_tensor(tensor)
+        for name, tensor in full_names.items()
+        if name in projection_names
+    }
+    loaded_names: list[str] = []
+
+    def fake_exists(_model_id, tensor_name):
+        return tensor_name in full_names
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        loaded = {}
+        for name in tensor_names:
+            assert name not in projection_names
+            loaded_names.append(name)
+            loaded[name] = SimpleNamespace(ready=True, tensor=full_names[name], blockers=[])
+        return loaded
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER", "1")
+    monkeypatch.setenv("PCKETLM_ROW8_ARTIFACT_NAME", "row8-test")
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+    monkeypatch.setattr(
+        packed_artifact_loader,
+        "row8_tensor_available",
+        lambda _model_id, tensor_name, artifact_name="row8": artifact_name == "row8-test" and tensor_name in packed_by_name,
+    )
+    monkeypatch.setattr(
+        packed_artifact_loader,
+        "load_row8_packed_tensor",
+        lambda _model_id, tensor_name, artifact_name="row8": (packed_by_name[tensor_name], {"shape": list(full_names[tensor_name].shape)}),
+    )
+
+    timings: dict[str, float] = {}
+    result = layer_bridge_module._try_native_dense_decode_bridge(
+        "native-dense-row8-artifact-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        None,
+        None,
+        config,
+        tensor_policy=None,
+        collect_metrics=True,
+        timings=timings,
+    )
+
+    assert result is not None
+    try:
+        assert result.ready is True
+        assert result.output_tensor is not None
+        assert set(loaded_names) == {
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+        }
+        assert timings.get("load_packed_artifact", 0.0) >= 0.0
+        assert "pack_weights" not in timings
+    finally:
+        if result.native_kv_session is not None:
+            result.native_kv_session.close()
+
+
 def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypatch) -> None:
     hidden_size = 8
     num_heads = 2
