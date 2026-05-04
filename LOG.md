@@ -5341,3 +5341,12 @@ Result: 297 passed in 21.83s
 - AVX2 Q4 dot probe for the selected expert kernel stayed correct but did not materially improve the real row under low free RAM: coherent generated text `"<think>\n"`, total `70.1478s`, second token `10.4585s`, continuation_stack_op_mlp `3.2641s`. The useful win remains bypassing fp16 expert materialization, not the current AVX dot micro-loop.
 - Focused tests after all changes: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_layer_bridge.py tests\test_runtime_tensor_loader.py tests\test_tensor_residency.py -q` -> `113 passed in 4.20s`.
 - Full suite: `python -m pytest tests/ -q` -> `342 passed in 21.32s`.
+
+## Phase Q4 MoE Fused Expert Load / front-layer Q4 attention cache default
+- Rejected scratch-buffer reuse inside `q4_moe_selected_forward_u16`: correctness stayed green, but the real Qwen3-30B-A3B Q4 row regressed to `61.256s` total and `9.5364s` second token, so the C++ change was reverted.
+- Probe with explicit front-layer fp16 attention residency: `PCKETLM_TENSOR_CACHE_MB=512`, `PCKETLM_TENSOR_CACHE_FRONT_LAYERS=12`, `PCKETLM_Q4_PACKED_CACHE_MB=4096`, Qwen3-30B-A3B Q4 full, max_new_tokens `2`.
+- Result: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `58.084s`, token rows `50.0732s`, `7.9918s`, continuation_stack `7.6364s`, continuation_stack_op_load_tensors `3.6181s`, continuation_stack_op_mlp `3.4137s`, peak working set `3440 MB`, free RAM after `2190 MB`.
+- Default policy was updated to use the same guarded `512 MB` / front `12` layer cache for Q4 MoE when no explicit tensor-cache env is set. Policy check reported `max_resident_mb=512`, `front_layer_count=12`, `model_aware_budget_active=True`, free RAM `3.89 GB`.
+- Clean default rerun: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `60.8984s`, token rows `51.8412s`, `9.0416s`, continuation_stack_op_load_tensors `4.4952s`, continuation_stack_op_mlp `3.5510s`, peak working set `3307 MB`, free RAM after `2191 MB`.
+- Verdict: keep as a guarded default because it slightly improves the committed direct-Q4 baseline (`9.1017s` -> `9.0416s` second token) and can reach `7.9918s` under better RAM conditions, but do not claim stable under-8 yet. Remaining wall is still selected-expert Q4 load/dequant orchestration plus MLP math.
+- Full suite: `python -m pytest tests/ -q` -> `342 passed in 22.07s`.

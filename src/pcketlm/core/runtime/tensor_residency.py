@@ -31,6 +31,7 @@ DEFAULT_ALWAYS_RESIDENT_TENSOR_MB = 16
 DEFAULT_FP16_PACKED_CACHE_CAP_MB = 8 * 1024
 DEFAULT_Q4_PACKED_CACHE_CAP_MB = 4 * 1024
 DEFAULT_Q4_MOE_ATTENTION_CACHE_MB = 2 * 1024
+DEFAULT_Q4_MOE_FRONT_CACHE_MB = 512
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -165,6 +166,20 @@ class TensorResidencyPolicy:
                 free_mb = int(free_memory_bytes // (1024**2))
                 adaptive_expert_mb = max(DEFAULT_EXPERT_CACHE_MB, min(max(0, free_mb - 2048), 2048))
                 expert_cache_mb = max(expert_cache_mb, adaptive_expert_mb)
+            if (
+                q4_source_requested
+                and is_moe_model
+                and not q4_moe_attention_residency
+                and not _env_is_set("PCKETLM_TENSOR_CACHE_MB")
+            ):
+                free_mb = int(free_memory_bytes // (1024**2))
+                front_cache_mb = max(
+                    DEFAULT_TENSOR_CACHE_MB,
+                    min(max(0, free_mb - 2048), DEFAULT_Q4_MOE_FRONT_CACHE_MB),
+                )
+                if front_cache_mb > max_resident_mb:
+                    max_resident_mb = front_cache_mb
+                    model_aware_budget_active = True
             if q4_source_requested and q4_moe_attention_residency and is_moe_model:
                 free_mb = int(free_memory_bytes // (1024**2))
                 attention_cache_mb = max(

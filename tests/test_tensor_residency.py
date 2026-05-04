@@ -107,7 +107,7 @@ def test_q4_moe_policy_keeps_late_attention_cacheable(monkeypatch, tmp_path: Pat
     assert _is_cacheable(tensor, entry, policy) is True
 
 
-def test_q4_moe_attention_residency_is_opt_in(monkeypatch) -> None:
+def test_q4_moe_default_uses_front_layer_attention_cache_only(monkeypatch) -> None:
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
     monkeypatch.delenv("PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY", raising=False)
     monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
@@ -122,8 +122,9 @@ def test_q4_moe_attention_residency_is_opt_in(monkeypatch) -> None:
 
     policy = TensorResidencyPolicy.from_environment("q4-moe-policy-test")
 
-    assert policy.max_resident_bytes == 256 * 1024**2
+    assert policy.max_resident_bytes == 512 * 1024**2
     assert policy.front_layer_count == 12
+    assert policy.model_aware_budget_active is True
 
 
 def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_path: Path, monkeypatch) -> None:
