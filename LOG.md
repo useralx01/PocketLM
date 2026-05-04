@@ -5249,3 +5249,11 @@ Result: 297 passed in 21.83s
 - Fresh same-branch Qwen 14B three-token baseline without artifact: generated `Hello! How`, layers_executed `144/144`, result total `61.2291s`, continuation total `35.4866s`, continuation `native_layer=29.0539s`.
 - Full suite: `python -m pytest tests/ -q` -> `324 passed in 23.52s`.
 - Verdict: fused packed dispatch is correct and starts to pay off over multiple continuation tokens. It is not chat speed yet; the next probe should expand artifact coverage beyond layers 0-3 and keep comparing against fresh same-session baselines.
+
+## Phase Native Row8 Packed Fusion / wider artifact probe
+- Built Qwen 14B artifact `row8_layers0_7`: tensor_count `56`, total_packed_bytes `4404019200`, size_ratio `1.0`.
+- Fresh Qwen 14B three-token baseline without artifact: generated `Hello! How`, layers_executed `144/144`, result total `58.5500s`, continuation total `34.0781s`, continuation `native_layer=27.6880s`.
+- Qwen 14B three-token row with `row8_layers0_7`: generated `Hello! How`, layers_executed `144/144`, result total `62.9150s`, continuation total `35.5806s`, continuation `native_layer=30.4858s`, `load_packed_artifact_native=0.0383s`.
+- Repeat Qwen 14B three-token row with `row8_layers0_3`: generated `Hello! How`, layers_executed `144/144`, result total `63.7770s`, continuation total `37.0802s`, continuation `native_layer=31.0488s`, `load_packed_artifact_native=0.0246s`.
+- Qwen 14B three-token row with `row8_layers0_3` and `PCKETLM_NATIVE_THREADS=1`: generated `Hello! How`, layers_executed `144/144`, result total `166.4960s`, continuation total `142.1733s`, continuation `native_layer=137.7011s`.
+- Verdict: wider artifact coverage and single-thread policy are not speed wins. The packed artifact path remains correct and opt-in only. The next speed lever should target the packed GEMV microkernel or model-scale Q4/MoE residency, not simply packing more dense 14B layers.

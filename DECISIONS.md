@@ -1259,3 +1259,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Fused only the projection groups that share the same input vector: Q/K/V after input norm and gate/up after post-attention norm. Output projection and down projection stay single calls because they consume different intermediate vectors.
 - Kept the row8 artifact route opt-in. The two-token row still has slightly slower continuation native-layer time than the fresh baseline, even though total time improved; the three-token row is the first real row where the packed route beats the fresh baseline.
 - Decision: do not promote packed artifacts to default yet. The direction is promising, but it needs more layer coverage and repeated warm rows before becoming the production path.
+- Follow-up wider probe rejected `row8_layers0_7` as a speed path. It reduced normal tensor loads but increased native-layer time enough to lose overall.
+- Rejected `PCKETLM_NATIVE_THREADS=1` for packed artifacts after the real three-token row regressed to `166.4960s`; the packed kernel needs parallelism on this hardware.
+- Updated direction: stop expanding dense 14B row8 artifacts until the packed GEMV microkernel itself improves. More artifact coverage alone now has a measured negative result.
