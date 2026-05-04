@@ -5455,3 +5455,12 @@ Result: 297 passed in 21.83s
 - Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_can_commit_single_generated_token_for_reuse tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers -q` -> `10 passed in 2.52s`.
 - Full suite: `python -m pytest tests/ -q` -> `354 passed in 12.12s`.
 - Verdict: this is a real product win for follow-up turns, not a full chat-speed finish. Tensor loading is almost gone on the second turn (`0.234s`), so the remaining bottleneck is layer/expert math for the six appended prompt tokens (`8.304s` layer stack).
+
+## Phase Q4 MoE Fused Expert Load / expert payload lookup cleanup
+- Change kept: the multi-token Q4 MoE token loop now resolves packed Q4 gate/up/down payloads once per unique selected expert per layer call, then reuses those payload tuples for every token row. The unit test pins the lookup count at `6` for two unique experts instead of resolving per token-slot.
+- Focused tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts tests/test_warm_runner.py -q` -> `9 passed in 3.36s`.
+- Real low-RAM row with this cleanup alone started at `3830 MB` free RAM: first turn `21.774s`, second turn `10.307s`, tensor load second `0.253s`, generated `" the"`. This is not accepted as a speed win because it did not beat the prior automatic-cache row.
+- Thread probe rejected: `PCKETLM_TORCH_THREADS=4` produced second turn `9.165s`; `PCKETLM_TORCH_THREADS=8` produced `8.952s`. Neither beat the accepted automatic-cache row.
+- Native OpenMP-team probe rejected and reverted: rebuilding `q4_dequant.dll` with one OpenMP team around the selected-expert loop preserved focused correctness tests, but the real row produced second turn `9.018s`, worse than the accepted `8.840s`. The C++/DLL change was restored to the previous committed version.
+- Full suite after final kept changes: `python -m pytest tests/ -q` -> `354 passed in 10.54s`.
+- Verdict: safe cleanup only. The speed blocker is now clearly inside Q4 expert dot/math work and decode-tail/layer-stack compute, not cache, Python payload lookup, or simple thread-count tuning.

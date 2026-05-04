@@ -919,35 +919,36 @@ def _run_q4_moe_mlp_token_loop(
     flat_hidden = hidden_states.reshape(-1, int(hidden_size))
     flat_selected = selected_experts.reshape(flat_hidden.shape[0], -1)
     flat_routes = routing_weights.reshape(flat_hidden.shape[0], -1)
-    outputs: list[torch.Tensor] = []
+    unique_experts = {int(value) for value in flat_selected.reshape(-1).tolist()}
+    native_payloads_by_expert: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+    for expert_index in unique_experts:
+        expert_name_map = expert_name_maps[expert_index]
+        gate_payload = packed_by_name[expert_name_map["gate_proj"]]
+        up_payload = packed_by_name[expert_name_map["up_proj"]]
+        down_payload = packed_by_name[expert_name_map["down_proj"]]
+        native_payloads_by_expert[expert_index] = (
+            gate_payload[0],
+            gate_payload[1],
+            up_payload[0],
+            up_payload[1],
+            down_payload[0],
+            down_payload[1],
+        )
+
+    flat_hidden_fp16 = flat_hidden if flat_hidden.dtype == torch.float16 else flat_hidden.to(dtype=torch.float16)
+    output_rows = torch.empty((flat_hidden.shape[0], int(hidden_size)), dtype=torch.float16)
     for row_index in range(flat_hidden.shape[0]):
-        native_experts = []
-        for expert_value in flat_selected[row_index].tolist():
-            expert_index = int(expert_value)
-            expert_name_map = expert_name_maps[expert_index]
-            gate_payload = packed_by_name[expert_name_map["gate_proj"]]
-            up_payload = packed_by_name[expert_name_map["up_proj"]]
-            down_payload = packed_by_name[expert_name_map["down_proj"]]
-            native_experts.append(
-                (
-                    gate_payload[0],
-                    gate_payload[1],
-                    up_payload[0],
-                    up_payload[1],
-                    down_payload[0],
-                    down_payload[1],
-                )
-            )
-        outputs.append(
+        native_experts = [native_payloads_by_expert[int(expert_value)] for expert_value in flat_selected[row_index].tolist()]
+        output_rows[row_index].copy_(
             q4_moe_selected_forward_u16(
-                flat_hidden[row_index : row_index + 1].to(dtype=torch.float16),
+                flat_hidden_fp16[row_index : row_index + 1],
                 native_experts,
                 flat_routes[row_index].float(),
                 hidden_size=int(hidden_size),
                 intermediate_size=int(intermediate_size),
-            ).to(dtype=output_dtype)
+            )
         )
-    return torch.stack(outputs, dim=0).reshape_as(hidden_states)
+    return output_rows.reshape_as(hidden_states).to(dtype=output_dtype)
 
 
 def _repeat_kv(hidden_states: torch.Tensor, repeat_count: int) -> torch.Tensor:

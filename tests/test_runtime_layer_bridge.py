@@ -1160,6 +1160,15 @@ def test_native_q4_moe_prefill_defaults_on_with_kill_switch(monkeypatch) -> None
 def test_q4_moe_token_loop_matches_dequantized_selected_experts() -> None:
     from tools.quantize_to_q4 import dequantize_q4_tensor, quantize_tensor_to_q4
 
+    class CountingPackedMap(dict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lookup_count = 0
+
+        def __getitem__(self, key):
+            self.lookup_count += 1
+            return super().__getitem__(key)
+
     torch.manual_seed(777)
     hidden_size = 8
     intermediate_size = 6
@@ -1178,7 +1187,7 @@ def test_q4_moe_token_loop_matches_dequantized_selected_experts() -> None:
             "down_proj": "expert.1.down",
         },
     }
-    packed_by_name = {}
+    packed_by_name = CountingPackedMap()
     dequantized = {}
     for expert_index in (0, 1):
         dequantized[expert_index] = {}
@@ -1221,6 +1230,7 @@ def test_q4_moe_token_loop_matches_dequantized_selected_experts() -> None:
     )
 
     assert torch.allclose(actual.float(), expected.to(torch.float16).float(), atol=1e-2, rtol=1e-2)
+    assert packed_by_name.lookup_count == 6
 
 
 def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: Path, monkeypatch) -> None:

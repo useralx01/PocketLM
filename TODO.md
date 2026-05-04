@@ -121,3 +121,4 @@
 - Replace the first scalar ctypes Q4 dequant kernel with SIMD/threaded fused unpack+dequant or a grouped packed executor; scalar native dequant is correct but slower than PyTorch vectorized dequant on Qwen 32B.
 - Move Q4 speed work from raw dequant into grouped bridge/residency loading. SIMD dequant is fast now, but full Qwen 32B still spends `56.8791s` in layer-loop tensor loading where a standalone grouped Q4 pass takes `12.629s`.
 - Add a fused/native multi-token Q4 MoE expert/layer compute path for appended prompt tokens. The latest warm-runner Q4 MoE row has tensor load down to `0.234s`, so the remaining `8.304s` second-turn wall is layer/expert math, not disk loading.
+- Build and benchmark a different Q4 selected-expert math kernel that reduces the number of row-dot calls or fuses gate/up/down more deeply. Simple Python payload lookup caching, torch thread tuning, and OpenMP region reshaping did not beat the accepted `8.840s` follow-up row.
