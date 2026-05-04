@@ -5121,3 +5121,10 @@ Result: 297 passed in 21.83s
 - Real prefetch probe after the fix (`PCKETLM_ENABLE_LAYER_PREFETCH=1`, Qwen 14B, `hello world`, max_new_tokens=4): generated `Hello! How can`, layers_executed `192/192`, total `306.0006s`, prefetch_wait `281.4568s`.
 - Verdict: duplicate native loads are fixed, but layer prefetch is still too slow and remains opt-in only.
 - Full suite: `python -m pytest tests/ -q` -> `308 passed in 23.50s`.
+
+## Phase Native Packed Layer Executor / follow-up probes
+- Thread sweep on Qwen 14B one-token row: `PCKETLM_NATIVE_THREADS=1` total `21.536s`, `=2` total `22.566s`, `=4` total `22.744s`; all generated `Hello` with `48/48` layers. Single-thread is least bad for this shape, but no default was changed because the committed 4-token default row remains the comparison anchor.
+- Experimental KV-layer BLAS path: linked `fp16_kv_cache.dll` to OpenBLAS behind `PCKETLM_ENABLE_KV_BLAS=1`; focused native tests passed (`12 passed` plus BLAS-flag dense prefill checks `2 passed`), but real Qwen 14B one-token row with `PCKETLM_BLAS_THREADS=4` regressed to total `23.023s` / result total `21.3951s`. Reverted the source experiment; per-call fp16-to-fp32 conversion is not viable for production layer GEMV.
+- Experimental fused gate/up dense MLP path: focused tests passed, but real Qwen 14B four-token row regressed to total `66.8214s` versus the best committed `63.4436s`. Reverted the source experiment.
+- Rebuilt native DLLs from the reverted source and reran focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_prefetched_tensor_bundle -q` -> `12 passed in 4.52s`.
+- Full suite after rejected probes: `python -m pytest tests/ -q` -> `308 passed in 36.26s`.
