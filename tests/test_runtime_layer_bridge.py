@@ -34,6 +34,7 @@ from pcketlm.core.runtime.layer_bridge import (
     run_prompt_decode_loop,
     run_repeated_decode_loop,
     runtime_torch_thread_count,
+    runtime_math_dtype_name,
     run_token_decode_step,
     run_token_entry_layer_bridge,
 )
@@ -1052,6 +1053,20 @@ def test_run_minimal_layer_forward_bridge_supports_bfloat16_math_mode(tmp_path: 
     assert result.output_dtype == "torch.bfloat16"
     assert result.output_tensor is not None
     assert torch.isfinite(result.output_tensor.float()).all()
+
+
+def test_q4_tensor_source_defaults_to_float16_math(monkeypatch) -> None:
+    monkeypatch.delenv("PCKETLM_RUNTIME_MATH_DTYPE", raising=False)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+
+    assert runtime_math_dtype_name() == "float16"
+
+
+def test_explicit_runtime_dtype_overrides_q4_default(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_RUNTIME_MATH_DTYPE", "bf16")
+
+    assert runtime_math_dtype_name() == "bfloat16"
 
 
 def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: Path, monkeypatch) -> None:

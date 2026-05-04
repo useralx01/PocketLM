@@ -5281,3 +5281,12 @@ Result: 297 passed in 21.83s
 - Probe: `PCKETLM_ENABLE_Q4_PACKED_EXPERT_CACHE=1`, `PCKETLM_Q4_PACKED_CACHE_MB=2048`, Qwen3-30B-A3B Q4 full, max_new_tokens `3`.
 - Result: timed out after `244s` before a diagnostic `after` row. The lingering diagnostic Python process held about `4019.9 MB` working set and was killed; free RAM recovered to `6126067712` bytes.
 - Verdict: globally caching packed expert bytes through prefill is not safe on this machine. The default remains decode-scoped packed expert cache only.
+
+## Phase Q4 MoE Residency / fp16 Q4 math default
+- Change: when `PCKETLM_TENSOR_SOURCE=q4` and no explicit `PCKETLM_RUNTIME_MATH_DTYPE` is set, runtime math now defaults to `float16` instead of `bfloat16`. Explicit dtype env values still win.
+- Reason: Q4 native dequant already produces fp16. Converting every loaded Q4 tensor from fp16 to bf16 was pure loader overhead.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_tensor_residency.py tests\test_q4_quantizer.py -q` -> `96 passed in 3.57s`.
+- Real Qwen3-30B-A3B Q4 row after change: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `117.2170s`, token rows `76.6166s`, `20.8075s`, `19.7642s`, peak working set `3597 MB`.
+- Timing comparison vs prior Q4 packed-cache row: total `125.2272s` -> `117.2170s`; continuation_stack_op_load_tensors `40.2723s` -> `35.7300s`.
+- Verdict: real improvement, but not enough. Warm decode is now about `20.3s/token`, still dominated by MoE expert tensor load/dequant orchestration.
+- Full suite: `python -m pytest tests/ -q` -> `334 passed in 22.62s`.

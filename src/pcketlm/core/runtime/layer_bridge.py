@@ -999,14 +999,24 @@ def _synthetic_hidden_state(hidden_size: int) -> torch.Tensor:
 
 def runtime_math_dtype_name() -> str:
     """Return the current runtime math dtype name."""
-    requested = os.environ.get("PCKETLM_RUNTIME_MATH_DTYPE", DEFAULT_RUNTIME_MATH_DTYPE).strip().lower()
+    explicit = os.environ.get("PCKETLM_RUNTIME_MATH_DTYPE")
+    if explicit is None and os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() == "q4":
+        return "float16"
+    requested = (explicit if explicit is not None else DEFAULT_RUNTIME_MATH_DTYPE).strip().lower()
     if requested in {"bf16", "bfloat16", "torch.bfloat16"}:
         return "bfloat16"
+    if requested in {"fp16", "float16", "torch.float16", "half"}:
+        return "float16"
     return "float32"
 
 
 def _runtime_math_dtype() -> torch.dtype:
-    return torch.bfloat16 if runtime_math_dtype_name() == "bfloat16" else torch.float32
+    name = runtime_math_dtype_name()
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float16":
+        return torch.float16
+    return torch.float32
 
 
 def _fp16_decode_expert_packed_cache_enabled() -> bool:
