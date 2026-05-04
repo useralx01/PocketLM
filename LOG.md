@@ -5500,5 +5500,7 @@ Result: 297 passed in 21.83s
 - Added `clear_dequantized_tensor_residency_cache()` and a Q4-MoE-only low-RAM guard in the warm runner. It frees dequantized fp16 tensors while keeping the packed Q4 byte cache warm. Default threshold is `800 MB`; default minimum guard floor is `512 MB`.
 - Real Qwen3-30B-A3B Q4 default proof after closing non-workload desktop apps: `state/phase-q4-moe-default-trim800-ten.json` generated `" Paris"`, `"."`, `" The"`, `" capital"`, `" of"`, `" Germany"`, `" is"`, `" Berlin"`, `"."`, `" The"`. First turn `21.255s`; warm rows `6.117s`, `5.149s`, `3.779s`, `3.240s`, `3.217s`, `2.589s`, `2.912s`, `2.493s`, `2.261s`; warm average `3.529s/token`.
 - Longer 20-token stability probe (`state/phase-q4-moe-threshold800-twenty.json`) completed coherently and stayed ready for all 20 turns, but had compute spikes (`12.915s`, `7.564s`, `8.385s`) under low memory, with warm average `4.370s/token`. This is stable but not the clean speed row.
+- Rejected `1000 MB` trim threshold. It trimmed too often and regressed the 20-token warm average to `6.827s/token`, with repeated post-trim rows over `14s`.
+- Rejected reducing packed Q4 cache to `3072 MB` while keeping the fp16 tensor cache at `2048 MB`. The 20-token probe thrashed badly, with warm average `34.990s/token`. The accepted packed-cache budget remains `4096 MB`.
 - Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_tensor_residency.py -q` -> `61 passed in 2.41s`.
 - Full suite: `python -m pytest tests/ -q` -> `358 passed in 10.95s`.
