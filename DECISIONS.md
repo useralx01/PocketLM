@@ -1233,3 +1233,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Added a persistent row8 packed-weight LRU cache, but kept production dispatch opt-in. The cache works in unit tests and the packed dense C entry point matches the unpacked native dense layer on a tiny layer.
 - Real Qwen 14B proves the current RAM budget cannot retain enough packed weights to make this faster. With a 512 MB budget, the run completes but spends `52.3527s` in continuation packed weight preparation/packed-call time and totals `85.6504s`, worse than default. With a 4096 MB budget, the 4-token row does not complete.
 - Decision: keep `PCKETLM_ENABLE_NATIVE_PACKED_GEMV_LAYER=1` as a profiling knob only. The next viable route is an offline packed-weight artifact or mmap-backed packed source, not RAM-only packed caching on a 16 GB machine.
+
+## Phase Native Packed Artifact / artifact shape
+- Chose a simple contiguous `row8_packed.bin` plus JSON manifest instead of safetensors for the first offline packed artifact. Reason: the runtime needs offset-based mmap/slice reads, and the manifest can directly describe each packed tensor's byte range.
+- Kept size ratio at `1.0`: this phase changes layout only, not precision or quantization. The 14B layer-0 sample is `550502400` bytes, which explains why duplicating all packed weights in RAM is not viable on a 16 GB machine.
+- The real tensor microbench confirms the artifact path preserves the standalone packed GEMV speed: Qwen 14B `down_proj` native artifact GEMV is `13.54x` faster than torch for one matrix-vector multiply.

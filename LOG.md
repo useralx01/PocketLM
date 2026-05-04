@@ -5169,3 +5169,19 @@ Result: 297 passed in 21.83s
 ## Phase Native Packed Weight Cache / Setup
 - Branch: phase-native-packed-weight-cache.
 - Goal: persist row8 packed weights so Qwen 14B does not repack inside every layer call; route only after correctness and real timing prove it is safe.
+
+## Phase Native Packed Artifact / Setup
+- Branch: phase-native-packed-artifact.
+- Goal: create offline row8 packed weight artifacts so runtime can use packed GEMV without repacking or duplicating full weights in RAM.
+
+## Phase Native Packed Artifact / row8 artifact tool
+- Added `tools/pack_weights_row8.py`.
+- Artifact layout: `row8_packed.bin` plus `row8_manifest.json`; each tensor manifest entry stores dtype, shape, byte offset, byte count, and source shard.
+- Tests: `python -m pytest tests\test_packed_weight_artifact.py tests\test_native_fp16_packed_gemv.py tests\test_native_packed_gemv_cache.py -q` -> `9 passed`.
+- Added artifact-to-native-GEMV test: `python -m pytest tests\test_packed_weight_artifact.py tests\test_native_fp16_packed_gemv.py -q` -> `6 passed`.
+
+## Phase Native Packed Artifact / Qwen 14B samples
+- Qwen 14B `model.layers.0.mlp.down_proj.weight` packed artifact: tensor_count `1`, packed bytes `141557760`, size_ratio `1.0`.
+- Real down_proj artifact GEMV microbench: shape `[5120, 13824]`, dtype `torch.bfloat16`, native `0.0061279s`, torch `0.0829623s`, speedup `13.54x`, max_abs `0.0000267`.
+- Qwen 14B layer-0 full dense projection artifact (q/k/v/o/gate/up/down): tensor_count `7`, packed bytes `550502400`, size_ratio `1.0`.
+- Full suite: `python -m pytest tests/ -q` -> `318 passed in 24.32s`.
