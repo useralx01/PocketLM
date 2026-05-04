@@ -1262,3 +1262,11 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Follow-up wider probe rejected `row8_layers0_7` as a speed path. It reduced normal tensor loads but increased native-layer time enough to lose overall.
 - Rejected `PCKETLM_NATIVE_THREADS=1` for packed artifacts after the real three-token row regressed to `166.4960s`; the packed kernel needs parallelism on this hardware.
 - Updated direction: stop expanding dense 14B row8 artifacts until the packed GEMV microkernel itself improves. More artifact coverage alone now has a measured negative result.
+
+## Phase Q4 MoE Residency / cache policy
+- Q4 packed bytes are worth caching; dequantized fp16 Q4 expert tensors are not worth caching by default on this 16 GB machine.
+- The production default is now: keep Q4 packed cache enabled for Q4 sources, allow expert packed-cache use only in the scoped decode path, and do not store dequantized Q4 expert tensors in the fp16 residency cache.
+- Reason: profiling showed the dequantized expert cache produced `0` expert hits on the short real Qwen3 row and made warm decode slower while increasing RAM pressure. The packed cache itself had real reuse (`972` hits, `2341` misses) without evictions under a `4096 MB` budget.
+- Added opt-in controls for future profiling: `PCKETLM_ENABLE_Q4_PACKED_EXPERT_CACHE=1`, `PCKETLM_ENABLE_Q4_DEQUANT_EXPERT_RESIDENCY=1`, and decode-scoped `PCKETLM_ENABLE_Q4_DECODE_DEQUANT_EXPERT_RESIDENCY=1`.
+- Loader policy: safetensors files for Q4 data are opened only inside the packed-cache miss loader. Cache hits no longer reopen the packed/scales files, reducing shard opens on the measured row to `740`.
+- The remaining bottleneck is not the AVX2 Q4 dequant kernel. The measured continuation stack still spends `40.2723s` in `load_tensors` across two decode tokens. The next speed phase should batch/fuse MoE expert tensor activation across the selected experts, ideally with a native expert-pack loader or fused MoE expert dispatch, instead of adding larger Python-side caches.

@@ -5257,3 +5257,22 @@ Result: 297 passed in 21.83s
 - Repeat Qwen 14B three-token row with `row8_layers0_3`: generated `Hello! How`, layers_executed `144/144`, result total `63.7770s`, continuation total `37.0802s`, continuation `native_layer=31.0488s`, `load_packed_artifact_native=0.0246s`.
 - Qwen 14B three-token row with `row8_layers0_3` and `PCKETLM_NATIVE_THREADS=1`: generated `Hello! How`, layers_executed `144/144`, result total `166.4960s`, continuation total `142.1733s`, continuation `native_layer=137.7011s`.
 - Verdict: wider artifact coverage and single-thread policy are not speed wins. The packed artifact path remains correct and opt-in only. The next speed lever should target the packed GEMV microkernel or model-scale Q4/MoE residency, not simply packing more dense 14B layers.
+
+## Phase Q4 MoE Residency / Setup
+- Branch: `phase-q4-moe-residency-v2`.
+- Startup free RAM: `6377308160` bytes (`6082 MB`), above the 6 GB pre-flight floor.
+- Qwen3-30B-A3B Q4 artifact: manifest ready, tensor_count `18867`, fp16 bytes `61064245248`, q4 bytes `15311831552`, compression_ratio `0.25075`.
+
+## Phase Q4 MoE Residency / cache tests
+- Added Q4 packed-cache coverage for repeated request/no disk reread, LRU eviction, kill switch, expert-cache opt-in, and dequantized Q4 expert residency opt-in/scope behavior.
+- Focused tests: `python -m pytest tests\test_tensor_residency.py tests\test_q4_quantizer.py tests\test_runtime_tensor_loader.py tests\test_runtime_layer_bridge.py -q` -> `103 passed in 2.57s`.
+
+## Phase Q4 MoE Residency / real Qwen3 Q4 row
+- Default Q4 packed-cache run: `python -m pcketlm.app.chat_shell.runtime_diagnose_cli --model qwen3-30b-a3b --source q4 --slice full --prompt "The capital of France is" --max-new-tokens 3`.
+- Result: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `125.2272s`, token rows `80.0077s`, `22.7699s`, `22.4182s`, peak working set `3744 MB`, RAM after run `2649 MB`.
+- Q4 packed cache: budget `4096 MB`, resident `1874.52 MB`, resident_count `2341`, hits `972`, misses `2341`, disk_reads `12094`, evictions `0`.
+- Tensor load stats: q4_loaded `true`, q4_loads `13066`, q4_loaded `10344.86 MB`, shard_opens `740`, continuation_stack_op_load_tensors `40.2723s`, prefill_stack_op_load_tensors `61.9449s`.
+- Expert fp16 residency stayed disabled for Q4 experts: expert_resident_bytes `0`, expert_resident_count `0`. This avoids the RAM blow-up seen in profiling.
+- Decode-only dequantized expert residency probe was rejected: it produced no expert hits and regressed warm decode (`23.47s`/`23.19s`) while increasing RAM pressure.
+- Verdict: Q4 MoE path is correct/coherent and packed-cache hits are real, but the phase speed target is not met. Warm decode remains about `22.6s/token`; the bottleneck is still per-expert `load_tensors` orchestration and many small Q4 expert dequants, not native Q4 math.
+- Full suite: `python -m pytest tests/ -q` -> `332 passed in 21.76s`.

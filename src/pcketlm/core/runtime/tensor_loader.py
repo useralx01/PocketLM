@@ -8,10 +8,11 @@ import threading
 import json
 import math
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 import torch
 from safetensors import safe_open
@@ -521,11 +522,12 @@ def _q4_entry(model_id: str, tensor_name: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _load_q4_tensor_from_handles(
+def _load_q4_tensor_from_source(
     model_id: str,
     entry: TensorCatalogEntry,
-    q4_handle: object,
-    scale_handle: object,
+    load_packed: Callable[[], tuple[torch.Tensor, torch.Tensor]],
+    q4_path: Path | None = None,
+    scale_path: Path | None = None,
 ) -> LoadedTensorSlice:
     payload = _q4_entry(model_id, entry.tensor_name)
     if payload is None:
@@ -535,8 +537,18 @@ def _load_q4_tensor_from_handles(
             blockers=[f"Q4 artifact does not contain tensor {entry.tensor_name}."],
             ready=False,
         )
-    packed = q4_handle.get_tensor(entry.tensor_name)
-    scales = scale_handle.get_tensor(entry.tensor_name)
+    if q4_path is not None and scale_path is not None:
+        from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
+
+        packed, scales = q4_packed_cache_get_or_load(
+            model_id,
+            entry,
+            q4_path,
+            scale_path,
+            load_packed,
+        )
+    else:
+        packed, scales = load_packed()
     tensor = _dequantize_q4_tensor(packed, scales, [int(value) for value in payload.get("shape", entry.shape)], entry.dtype)
     _update_load_stats(q4_loads=1, q4_loaded_nbytes=int(packed.nelement() * packed.element_size()))
     return _loaded_slice_from_entry(model_id, entry, tensor, q4_loaded=True)
@@ -552,10 +564,20 @@ def _load_q4_tensor(model_id: str, entry: TensorCatalogEntry) -> LoadedTensorSli
     q4_path = root / str(payload.get("q4_shard"))
     scale_path = root / str(payload.get("scale_shard"))
     try:
-        with safe_open(q4_path, framework="pt", device="cpu") as q4_handle:
-            with safe_open(scale_path, framework="pt", device="cpu") as scale_handle:
-                _update_load_stats(shard_opens=2)
-                return _load_q4_tensor_from_handles(model_id, entry, q4_handle, scale_handle)
+        with ExitStack() as stack:
+            handles: dict[str, object] = {}
+
+            def load_packed() -> tuple[torch.Tensor, torch.Tensor]:
+                if "q4" not in handles:
+                    handles["q4"] = stack.enter_context(safe_open(q4_path, framework="pt", device="cpu"))
+                    handles["scale"] = stack.enter_context(safe_open(scale_path, framework="pt", device="cpu"))
+                    _update_load_stats(shard_opens=2)
+                return (
+                    handles["q4"].get_tensor(entry.tensor_name),
+                    handles["scale"].get_tensor(entry.tensor_name),
+                )
+
+            return _load_q4_tensor_from_source(model_id, entry, load_packed, q4_path, scale_path)
     except Exception as exc:  # pragma: no cover - defensive Q4 IO path
         return _loaded_slice_from_entry(
             model_id,
@@ -791,16 +813,27 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
 
     for (q4_path, scale_path), entries in q4_groups.items():
         try:
-            _update_load_stats(shard_opens=2)
-            with safe_open(q4_path, framework="pt", device="cpu") as q4_handle:
-                with safe_open(scale_path, framework="pt", device="cpu") as scale_handle:
-                    for entry in entries:
-                        results[entry.tensor_name] = _load_q4_tensor_from_handles(
-                            model_id,
-                            entry,
-                            q4_handle,
-                            scale_handle,
-                        )
+            with ExitStack() as stack:
+                handles: dict[str, object] = {}
+
+                def load_packed(entry: TensorCatalogEntry) -> tuple[torch.Tensor, torch.Tensor]:
+                    if "q4" not in handles:
+                        handles["q4"] = stack.enter_context(safe_open(q4_path, framework="pt", device="cpu"))
+                        handles["scale"] = stack.enter_context(safe_open(scale_path, framework="pt", device="cpu"))
+                        _update_load_stats(shard_opens=2)
+                    return (
+                        handles["q4"].get_tensor(entry.tensor_name),
+                        handles["scale"].get_tensor(entry.tensor_name),
+                    )
+
+                for entry in entries:
+                    results[entry.tensor_name] = _load_q4_tensor_from_source(
+                        model_id,
+                        entry,
+                        lambda entry=entry: load_packed(entry),
+                        q4_path,
+                        scale_path,
+                    )
         except Exception as exc:  # pragma: no cover - defensive Q4 IO path
             for entry in entries:
                 results[entry.tensor_name] = _loaded_slice_from_entry(

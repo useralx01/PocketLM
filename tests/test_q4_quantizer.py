@@ -11,6 +11,7 @@ from pcketlm.core.runtime.tensor_loader import (
     reset_tensor_load_stats,
     tensor_load_stats_snapshot,
 )
+from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, q4_packed_cache_stats
 from tools.quantize_to_q4 import (
     dequantize_q4_tensor,
     pack_int4,
@@ -75,6 +76,34 @@ def test_q4_loader_dequantizes_to_runtime_tensor(tmp_path: Path, monkeypatch) ->
     assert stats.q4_loads == 1
     assert stats.to_dict()["q4_loaded"] is True
     assert status["ready"] is True
+
+
+def test_q4_loader_reuses_packed_cache_on_repeated_load(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    clear_tensor_residency_cache()
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_Q4_PACKED_CACHE", raising=False)
+    model_id = "q4-loader-cache-test"
+    model_dir = _write_runtime_fixture(tmp_path, model_id)
+    build_tensor_execution_plan(model_id, model_dir)
+    quantize_model_dir_to_q4(model_dir, tmp_path / "models" / model_id / "artifacts" / "q4")
+    reset_tensor_load_stats()
+
+    first = load_tensor_by_name(model_id, "model.layers.0.self_attn.q_proj.weight")
+    second = load_tensor_by_name(model_id, "model.layers.0.self_attn.q_proj.weight")
+    stats = q4_packed_cache_stats()
+    load_stats = tensor_load_stats_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert torch.allclose(first.tensor.float(), second.tensor.float())
+    assert stats.misses == 1
+    assert stats.hits == 1
+    assert stats.disk_reads == 1
+    assert load_stats.shard_opens == 2
 
 
 def _write_quantizer_fixture(tmp_path: Path, tensor: torch.Tensor) -> Path:

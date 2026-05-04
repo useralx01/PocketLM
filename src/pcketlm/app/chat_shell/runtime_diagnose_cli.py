@@ -43,6 +43,7 @@ from pcketlm.core.runtime.tensor_residency import (
     expert_residency_snapshot,
     fp16_packed_cache_stats,
     load_resident_tensors,
+    q4_packed_cache_stats,
     record_expert_activation,
 )
 from pcketlm.core.runtime.speculative import (
@@ -793,6 +794,7 @@ def _full_forward(model_id: str, max_new_tokens: int = 1, prompt: str = "hello w
     payload.pop("final_decode_state", None)
     payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
     payload["fp16_packed_cache_stats"] = fp16_packed_cache_stats().to_dict()
+    payload["q4_packed_cache_stats"] = q4_packed_cache_stats().to_dict()
     return payload
 
 
@@ -814,6 +816,7 @@ def _speculative_forward(
     payload = result.to_dict()
     payload["tensor_load_stats"] = tensor_load_stats_snapshot().to_dict()
     payload["fp16_packed_cache_stats"] = fp16_packed_cache_stats().to_dict()
+    payload["q4_packed_cache_stats"] = q4_packed_cache_stats().to_dict()
     payload["expert_telemetry"] = expert_residency_snapshot()
     return payload
 

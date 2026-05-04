@@ -29,6 +29,7 @@ DEFAULT_MAX_RESIDENT_EXPERTS_PER_LAYER = 4
 DEFAULT_EXPERT_DECAY_RATE = 0.98
 DEFAULT_ALWAYS_RESIDENT_TENSOR_MB = 16
 DEFAULT_FP16_PACKED_CACHE_CAP_MB = 8 * 1024
+DEFAULT_Q4_PACKED_CACHE_CAP_MB = 4 * 1024
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -268,6 +269,32 @@ class Fp16PackedCacheStats:
 
 
 @dataclass(slots=True)
+class Q4PackedCacheStats:
+    hits: int = 0
+    misses: int = 0
+    stores: int = 0
+    evictions: int = 0
+    disk_reads: int = 0
+    resident_bytes: int = 0
+    resident_count: int = 0
+    budget_bytes: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "stores": self.stores,
+            "evictions": self.evictions,
+            "disk_reads": self.disk_reads,
+            "resident_bytes": self.resident_bytes,
+            "resident_mb": round(self.resident_bytes / (1024**2), 2),
+            "resident_count": self.resident_count,
+            "budget_bytes": self.budget_bytes,
+            "budget_mb": round(self.budget_bytes / (1024**2), 2),
+        }
+
+
+@dataclass(slots=True)
 class _QuantizedQ4Tensor:
     packed: torch.Tensor
     scales: torch.Tensor
@@ -289,16 +316,23 @@ class _ResidentTensor:
 
 _CacheKey = tuple[str, str, str, int, int, str]
 _Fp16PackedCacheKey = tuple[str, str, str, int, int, int]
+_Q4PackedCacheKey = tuple[str, str, str, int, str, int]
 
 _cache_lock = threading.RLock()
 _resident_tensors: OrderedDict[_CacheKey, _ResidentTensor] = OrderedDict()
 _fp16_packed_cache: OrderedDict[_Fp16PackedCacheKey, bytearray] = OrderedDict()
+_q4_packed_cache: OrderedDict[_Q4PackedCacheKey, tuple[torch.Tensor, torch.Tensor, int]] = OrderedDict()
 _stats = TensorResidencyStats()
 _fp16_packed_stats = Fp16PackedCacheStats()
+_q4_packed_stats = Q4PackedCacheStats()
 _resident_bytes = 0
 _fp16_packed_cache_bytes = 0
 _fp16_packed_cache_budget_cached: int | None = None
+_q4_packed_cache_bytes = 0
+_q4_packed_cache_budget_cached: int | None = None
 _fp16_packed_context = threading.local()
+_q4_packed_context = threading.local()
+_q4_dequant_expert_context = threading.local()
 _resident_expert_bytes = 0
 _residency_step = 0
 _expert_activation_counts: dict[tuple[int, int], int] = {}
@@ -417,8 +451,28 @@ def _fp16_packed_cache_key(model_id: str, entry: TensorCatalogEntry) -> _Fp16Pac
     )
 
 
+def _q4_packed_cache_key(
+    model_id: str,
+    entry: TensorCatalogEntry,
+    q4_path: Path,
+    scale_path: Path,
+) -> _Q4PackedCacheKey:
+    return (
+        model_id,
+        entry.tensor_name,
+        str(q4_path.resolve()),
+        _path_mtime_ns(q4_path),
+        str(scale_path.resolve()),
+        _path_mtime_ns(scale_path),
+    )
+
+
 def _fp16_packed_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP16_PACKED_CACHE", "0").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _q4_packed_cache_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_Q4_PACKED_CACHE", "0").strip().lower() not in {"1", "true", "yes", "on"}
 
 
 def _fp16_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
@@ -437,6 +491,27 @@ def _fp16_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
     return True
 
 
+def _q4_packed_cache_enabled_for_entry(entry: TensorCatalogEntry) -> bool:
+    if not _q4_packed_cache_enabled():
+        return False
+    component_group = (entry.component_group or "").lower()
+    if component_group in {"expert", "expert_mlp"}:
+        if bool(getattr(_q4_packed_context, "enable_experts", False)):
+            return True
+        return os.environ.get("PCKETLM_ENABLE_Q4_PACKED_EXPERT_CACHE", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return os.environ.get("PCKETLM_ENABLE_Q4_PACKED_GLOBAL_CACHE", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @contextmanager
 def fp16_packed_expert_cache_scope(enabled: bool = True):
     """Temporarily allow fp16 packed caching for selected expert loads."""
@@ -446,6 +521,28 @@ def fp16_packed_expert_cache_scope(enabled: bool = True):
         yield
     finally:
         _fp16_packed_context.enable_experts = previous
+
+
+@contextmanager
+def q4_packed_expert_cache_scope(enabled: bool = True):
+    """Temporarily allow Q4 packed caching for selected expert loads."""
+    previous = getattr(_q4_packed_context, "enable_experts", False)
+    _q4_packed_context.enable_experts = bool(enabled)
+    try:
+        yield
+    finally:
+        _q4_packed_context.enable_experts = previous
+
+
+@contextmanager
+def q4_dequant_expert_residency_scope(enabled: bool = True):
+    """Temporarily allow fp16 residency for Q4 experts in selected decode loads."""
+    previous = getattr(_q4_dequant_expert_context, "enable_experts", False)
+    _q4_dequant_expert_context.enable_experts = bool(enabled)
+    try:
+        yield
+    finally:
+        _q4_dequant_expert_context.enable_experts = previous
 
 
 def _fp16_packed_cache_budget_bytes() -> int:
@@ -464,6 +561,22 @@ def _fp16_packed_cache_budget_bytes() -> int:
     return _fp16_packed_cache_budget_cached
 
 
+def _q4_packed_cache_budget_bytes() -> int:
+    global _q4_packed_cache_budget_cached
+    explicit_mb = _env_int("PCKETLM_Q4_PACKED_CACHE_MB", -1)
+    if explicit_mb >= 0:
+        return max(0, explicit_mb) * 1024 * 1024
+    if _q4_packed_cache_budget_cached is not None:
+        return _q4_packed_cache_budget_cached
+    cap_mb = max(0, _env_int("PCKETLM_Q4_PACKED_CACHE_CAP_MB", DEFAULT_Q4_PACKED_CACHE_CAP_MB))
+    free_bytes = _free_memory_bytes()
+    if free_bytes is None:
+        _q4_packed_cache_budget_cached = cap_mb * 1024 * 1024
+    else:
+        _q4_packed_cache_budget_cached = min(int(free_bytes * 0.5), cap_mb * 1024 * 1024)
+    return _q4_packed_cache_budget_cached
+
+
 def _is_fp16_packed_always_resident(entry: TensorCatalogEntry) -> bool:
     component_group = (entry.component_group or "").lower()
     if component_group in {"attention", "router", "embeddings", "lm_head", "final_norm"}:
@@ -472,10 +585,33 @@ def _is_fp16_packed_always_resident(entry: TensorCatalogEntry) -> bool:
     return tensor_name == "model.norm.weight" or tensor_name.startswith("lm_head.") or tensor_name.startswith("model.embed_tokens.")
 
 
+def _is_q4_packed_always_resident(entry: TensorCatalogEntry, nbytes: int) -> bool:
+    max_always_resident_bytes = max(
+        0,
+        _env_int("PCKETLM_Q4_ALWAYS_RESIDENT_TENSOR_MB", DEFAULT_ALWAYS_RESIDENT_TENSOR_MB),
+    ) * 1024 * 1024
+    if int(nbytes) > max_always_resident_bytes:
+        return False
+    component_group = (entry.component_group or "").lower()
+    if component_group in {"attention", "router", "final_norm", "layer_norm"}:
+        return True
+    tensor_name = entry.tensor_name
+    return tensor_name == "model.norm.weight"
+
+
 def _select_fp16_packed_eviction_key() -> _Fp16PackedCacheKey | None:
     for key in _fp16_packed_cache:
         entry = find_tensor_catalog_entry(key[0], key[1])
         if entry is not None and _is_fp16_packed_always_resident(entry):
+            continue
+        return key
+    return None
+
+
+def _select_q4_packed_eviction_key() -> _Q4PackedCacheKey | None:
+    for key, (_packed, _scales, nbytes) in _q4_packed_cache.items():
+        entry = find_tensor_catalog_entry(key[0], key[1])
+        if entry is not None and _is_q4_packed_always_resident(entry, nbytes):
             continue
         return key
     return None
@@ -536,6 +672,66 @@ def fp16_packed_cache_get_or_read(
         return raw
 
 
+def q4_packed_cache_get_or_load(
+    model_id: str,
+    entry: TensorCatalogEntry,
+    q4_path: Path,
+    scale_path: Path,
+    loader,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return packed Q4 bytes and scales, caching artifact tensors between loads."""
+    global _q4_packed_cache_bytes
+    if not _q4_packed_cache_enabled_for_entry(entry):
+        _q4_packed_stats.disk_reads += 1
+        return loader()
+
+    key = _q4_packed_cache_key(model_id, entry, q4_path, scale_path)
+    budget_bytes = _q4_packed_cache_budget_bytes()
+    with _cache_lock:
+        _q4_packed_stats.budget_bytes = budget_bytes
+        cached = _q4_packed_cache.get(key)
+        if cached is not None:
+            _q4_packed_cache.move_to_end(key)
+            _q4_packed_stats.hits += 1
+            _q4_packed_stats.resident_bytes = _q4_packed_cache_bytes
+            _q4_packed_stats.resident_count = len(_q4_packed_cache)
+            return cached[0], cached[1]
+        _q4_packed_stats.misses += 1
+
+    packed, scales = loader()
+    packed = packed.detach().cpu().contiguous().clone()
+    scales = scales.detach().cpu().contiguous().clone()
+    nbytes = int(packed.numel() * packed.element_size() + scales.numel() * scales.element_size())
+    if nbytes <= 0:
+        return packed, scales
+
+    with _cache_lock:
+        _q4_packed_stats.disk_reads += 1
+        if key in _q4_packed_cache:
+            cached = _q4_packed_cache[key]
+            _q4_packed_cache.move_to_end(key)
+            _q4_packed_stats.hits += 1
+            return cached[0], cached[1]
+        always_resident = _is_q4_packed_always_resident(entry, nbytes)
+        if not always_resident and nbytes > budget_bytes:
+            _q4_packed_stats.resident_bytes = _q4_packed_cache_bytes
+            _q4_packed_stats.resident_count = len(_q4_packed_cache)
+            return packed, scales
+        while _q4_packed_cache and _q4_packed_cache_bytes + nbytes > budget_bytes:
+            evict_key = _select_q4_packed_eviction_key()
+            if evict_key is None:
+                break
+            _old_packed, _old_scales, old_nbytes = _q4_packed_cache.pop(evict_key)
+            _q4_packed_cache_bytes -= old_nbytes
+            _q4_packed_stats.evictions += 1
+        _q4_packed_cache[key] = (packed, scales, nbytes)
+        _q4_packed_cache_bytes += nbytes
+        _q4_packed_stats.stores += 1
+        _q4_packed_stats.resident_bytes = _q4_packed_cache_bytes
+        _q4_packed_stats.resident_count = len(_q4_packed_cache)
+        return packed, scales
+
+
 def clear_fp16_packed_cache() -> None:
     """Release raw fp16/BF16 packed bytes and reset packed-cache counters."""
     global _fp16_packed_cache_bytes, _fp16_packed_stats, _fp16_packed_cache_budget_cached
@@ -544,6 +740,16 @@ def clear_fp16_packed_cache() -> None:
         _fp16_packed_cache_bytes = 0
         _fp16_packed_stats = Fp16PackedCacheStats()
         _fp16_packed_cache_budget_cached = None
+
+
+def clear_q4_packed_cache() -> None:
+    """Release raw Q4 packed tensors and reset Q4 packed-cache counters."""
+    global _q4_packed_cache_bytes, _q4_packed_stats, _q4_packed_cache_budget_cached
+    with _cache_lock:
+        _q4_packed_cache.clear()
+        _q4_packed_cache_bytes = 0
+        _q4_packed_stats = Q4PackedCacheStats()
+        _q4_packed_cache_budget_cached = None
 
 
 def fp16_packed_cache_stats() -> Fp16PackedCacheStats:
@@ -558,6 +764,22 @@ def fp16_packed_cache_stats() -> Fp16PackedCacheStats:
             resident_bytes=_fp16_packed_cache_bytes,
             resident_count=len(_fp16_packed_cache),
             budget_bytes=_fp16_packed_stats.budget_bytes,
+        )
+        return stats
+
+
+def q4_packed_cache_stats() -> Q4PackedCacheStats:
+    """Return Q4 packed-cache counters for diagnostics."""
+    with _cache_lock:
+        stats = Q4PackedCacheStats(
+            hits=_q4_packed_stats.hits,
+            misses=_q4_packed_stats.misses,
+            stores=_q4_packed_stats.stores,
+            evictions=_q4_packed_stats.evictions,
+            disk_reads=_q4_packed_stats.disk_reads,
+            resident_bytes=_q4_packed_cache_bytes,
+            resident_count=len(_q4_packed_cache),
+            budget_bytes=_q4_packed_stats.budget_bytes,
         )
         return stats
 
@@ -619,6 +841,7 @@ def _loaded_slice_with_tensor(loaded: LoadedTensorSlice, tensor: torch.Tensor) -
         blockers=list(loaded.blockers),
         ready=loaded.ready,
         borrowed_from_live_handle=loaded.borrowed_from_live_handle,
+        q4_loaded=loaded.q4_loaded,
     )
 
 
@@ -682,6 +905,16 @@ def _tensor_for_residency_store(tensor: torch.Tensor, loaded: LoadedTensorSlice)
     if loaded.borrowed_from_live_handle and tensor.data_ptr() == loaded.tensor.data_ptr():
         return tensor.clone()
     return tensor
+
+
+def _skip_dequantized_q4_expert_residency(loaded: LoadedTensorSlice, entry: TensorCatalogEntry) -> bool:
+    if not loaded.q4_loaded:
+        return False
+    if _expert_key(entry) is None:
+        return False
+    if bool(getattr(_q4_dequant_expert_context, "enable_experts", False)):
+        return False
+    return not _env_enabled("PCKETLM_ENABLE_Q4_DEQUANT_EXPERT_RESIDENCY", "0")
 
 
 def _is_cacheable(tensor: torch.Tensor, entry: TensorCatalogEntry, policy: TensorResidencyPolicy) -> bool:
@@ -913,7 +1146,7 @@ def load_resident_tensor(
 
     converted = _hot_tensor_for_compute(loaded, dtype)
     converted_slice = _loaded_slice_with_tensor(loaded, converted)
-    if _is_cacheable(converted, entry, effective_policy):
+    if not _skip_dequantized_q4_expert_residency(loaded, entry) and _is_cacheable(converted, entry, effective_policy):
         _store_resident_tensor(key, entry, _tensor_for_residency_store(converted, loaded), effective_policy)
     else:
         _stats.skips += 1
@@ -971,7 +1204,9 @@ def load_resident_tensors(
 
             converted = _hot_tensor_for_compute(loaded, dtype)
             converted_slice = _loaded_slice_with_tensor(loaded, converted)
-            if _is_cacheable(converted, entry, effective_policy):
+            if not _skip_dequantized_q4_expert_residency(loaded, entry) and _is_cacheable(
+                converted, entry, effective_policy
+            ):
                 _store_resident_tensor(
                     _cache_key(model_id, entry, dtype),
                     entry,
@@ -1001,6 +1236,7 @@ def clear_tensor_residency_cache() -> None:
         _stats = TensorResidencyStats()
         _memory_snapshot_cache = (0.0, None)
     clear_fp16_packed_cache()
+    clear_q4_packed_cache()
     clear_tensor_handle_cache()
 
 

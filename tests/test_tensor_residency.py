@@ -16,6 +16,10 @@ from pcketlm.core.runtime.tensor_residency import (
     fp16_packed_expert_cache_scope,
     load_resident_tensor,
     load_resident_tensors,
+    q4_dequant_expert_residency_scope,
+    q4_packed_cache_get_or_load,
+    q4_packed_cache_stats,
+    q4_packed_expert_cache_scope,
     record_expert_activation,
     tensor_residency_stats,
 )
@@ -39,7 +43,13 @@ def _entry(tmp_path: Path, tensor_name: str = "model.layers.0.self_attn.k_proj.w
     )
 
 
-def _loaded_tensor(model_id: str, entry: TensorCatalogEntry, value: float = 1.0) -> LoadedTensorSlice:
+def _loaded_tensor(
+    model_id: str,
+    entry: TensorCatalogEntry,
+    value: float = 1.0,
+    *,
+    q4_loaded: bool = False,
+) -> LoadedTensorSlice:
     tensor = torch.full((2, 2), value, dtype=torch.bfloat16)
     return LoadedTensorSlice(
         model_id=model_id,
@@ -53,6 +63,7 @@ def _loaded_tensor(model_id: str, entry: TensorCatalogEntry, value: float = 1.0)
         loaded_nbytes=tensor.element_size() * tensor.nelement(),
         blockers=[],
         ready=True,
+        q4_loaded=q4_loaded,
     )
 
 
@@ -229,6 +240,226 @@ def test_fp16_packed_expert_cache_scope_enables_selected_decode_cache(tmp_path: 
     assert calls["count"] == 2
     assert stats.hits == 1
     assert stats.stores == 1
+
+
+def test_q4_packed_cache_serves_repeated_request_without_disk_read(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_Q4_PACKED_CACHE", raising=False)
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.3.gate_proj.weight")
+    entry.component_group = "expert_mlp"
+    q4_path = tmp_path / "model.q4.safetensors"
+    scale_path = tmp_path / "model.scales.safetensors"
+    q4_path.write_bytes(b"q4")
+    scale_path.write_bytes(b"scales")
+    calls = {"count": 0}
+
+    def loader() -> tuple[torch.Tensor, torch.Tensor]:
+        calls["count"] += 1
+        return torch.arange(8, dtype=torch.uint8), torch.ones((4,), dtype=torch.float16)
+
+    with q4_packed_expert_cache_scope(enabled=True):
+        first_packed, first_scales = q4_packed_cache_get_or_load("q4-packed-test", entry, q4_path, scale_path, loader)
+        second_packed, second_scales = q4_packed_cache_get_or_load("q4-packed-test", entry, q4_path, scale_path, loader)
+    stats = q4_packed_cache_stats()
+
+    assert first_packed is second_packed
+    assert first_scales is second_scales
+    assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.misses == 1
+    assert stats.disk_reads == 1
+    assert stats.resident_count == 1
+
+
+def test_q4_packed_cache_lru_evicts_under_budget(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._q4_packed_cache_budget_bytes", lambda: 12)
+    q4_path = tmp_path / "model.q4.safetensors"
+    scale_path = tmp_path / "model.scales.safetensors"
+    q4_path.write_bytes(b"q4")
+    scale_path.write_bytes(b"scales")
+    entries = [
+        _entry(tmp_path, tensor_name=f"model.layers.0.mlp.experts.{index}.down_proj.weight")
+        for index in range(2)
+    ]
+    for index, entry in enumerate(entries):
+        entry.component_group = "expert_mlp"
+        entry.expert_index = index
+
+    def loader() -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.arange(8, dtype=torch.uint8), torch.ones((2,), dtype=torch.float16)
+
+    with q4_packed_expert_cache_scope(enabled=True):
+        q4_packed_cache_get_or_load("q4-packed-evict", entries[0], q4_path, scale_path, loader)
+        q4_packed_cache_get_or_load("q4-packed-evict", entries[1], q4_path, scale_path, loader)
+    stats = q4_packed_cache_stats()
+
+    assert stats.evictions >= 1
+    assert stats.resident_count <= 1
+
+
+def test_q4_packed_cache_kill_switch_forces_disk_read(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_PACKED_CACHE", "1")
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.3.up_proj.weight")
+    entry.component_group = "expert_mlp"
+    q4_path = tmp_path / "model.q4.safetensors"
+    scale_path = tmp_path / "model.scales.safetensors"
+    q4_path.write_bytes(b"q4")
+    scale_path.write_bytes(b"scales")
+    calls = {"count": 0}
+
+    def loader() -> tuple[torch.Tensor, torch.Tensor]:
+        calls["count"] += 1
+        return torch.arange(8, dtype=torch.uint8), torch.ones((4,), dtype=torch.float16)
+
+    first_packed, _first_scales = q4_packed_cache_get_or_load("q4-packed-off", entry, q4_path, scale_path, loader)
+    second_packed, _second_scales = q4_packed_cache_get_or_load("q4-packed-off", entry, q4_path, scale_path, loader)
+    stats = q4_packed_cache_stats()
+
+    assert first_packed is not second_packed
+    assert calls["count"] == 2
+    assert stats.hits == 0
+    assert stats.stores == 0
+    assert stats.disk_reads == 2
+
+
+def test_q4_packed_expert_cache_is_opt_in(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_Q4_PACKED_CACHE", raising=False)
+    monkeypatch.delenv("PCKETLM_ENABLE_Q4_PACKED_EXPERT_CACHE", raising=False)
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.4.gate_proj.weight")
+    entry.component_group = "expert_mlp"
+    q4_path = tmp_path / "model.q4.safetensors"
+    scale_path = tmp_path / "model.scales.safetensors"
+    q4_path.write_bytes(b"q4")
+    scale_path.write_bytes(b"scales")
+    calls = {"count": 0}
+
+    def loader() -> tuple[torch.Tensor, torch.Tensor]:
+        calls["count"] += 1
+        return torch.arange(8, dtype=torch.uint8), torch.ones((4,), dtype=torch.float16)
+
+    first_packed, _first_scales = q4_packed_cache_get_or_load("q4-packed-expert-off", entry, q4_path, scale_path, loader)
+    second_packed, _second_scales = q4_packed_cache_get_or_load("q4-packed-expert-off", entry, q4_path, scale_path, loader)
+    stats = q4_packed_cache_stats()
+
+    assert first_packed is not second_packed
+    assert calls["count"] == 2
+    assert stats.hits == 0
+    assert stats.stores == 0
+
+    clear_tensor_residency_cache()
+    calls["count"] = 0
+    with q4_packed_expert_cache_scope(enabled=True):
+        cached_first, _cached_first_scales = q4_packed_cache_get_or_load(
+            "q4-packed-expert-on", entry, q4_path, scale_path, loader
+        )
+        cached_second, _cached_second_scales = q4_packed_cache_get_or_load(
+            "q4-packed-expert-on", entry, q4_path, scale_path, loader
+        )
+    stats = q4_packed_cache_stats()
+
+    assert cached_first is cached_second
+    assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.stores == 1
+
+
+def test_q4_expert_dequantized_tensor_residency_is_opt_in(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.delenv("PCKETLM_ENABLE_Q4_DEQUANT_EXPERT_RESIDENCY", raising=False)
+    model_id = "q4-dequant-expert-resident-off"
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.2.down_proj.weight")
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 2
+    calls = {"count": 0}
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        calls["count"] += 1
+        assert tensor_name == entry.tensor_name
+        return _loaded_tensor(model_id_arg, entry, value=float(calls["count"]), q4_loaded=True)
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(max_resident_bytes=1024, max_tensor_bytes=1024, expert_max_resident_bytes=1024)
+    first = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+    second = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+    stats = tensor_residency_stats()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.q4_loaded is True
+    assert second.q4_loaded is True
+    assert calls["count"] == 2
+    assert stats.stores == 0
+    assert stats.hits == 0
+    assert stats.skips == 2
+    assert stats.expert_resident_count == 0
+
+
+def test_q4_expert_dequantized_tensor_residency_can_be_enabled(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.setenv("PCKETLM_ENABLE_Q4_DEQUANT_EXPERT_RESIDENCY", "1")
+    model_id = "q4-dequant-expert-resident-on"
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.6.gate_proj.weight")
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 6
+    calls = {"count": 0}
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        calls["count"] += 1
+        assert tensor_name == entry.tensor_name
+        return _loaded_tensor(model_id_arg, entry, q4_loaded=True)
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(max_resident_bytes=1024, max_tensor_bytes=1024, expert_max_resident_bytes=1024)
+    first = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+    second = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+    stats = tensor_residency_stats()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert calls["count"] == 1
+    assert stats.stores == 1
+    assert stats.hits == 1
+    assert stats.expert_hits == 1
+    assert stats.expert_resident_count == 1
+
+
+def test_q4_expert_dequantized_tensor_residency_scope_enables_decode_only(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    monkeypatch.delenv("PCKETLM_ENABLE_Q4_DEQUANT_EXPERT_RESIDENCY", raising=False)
+    model_id = "q4-dequant-expert-resident-scope"
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.9.up_proj.weight")
+    entry.component_group = "expert_mlp"
+    entry.expert_index = 9
+    calls = {"count": 0}
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        calls["count"] += 1
+        assert tensor_name == entry.tensor_name
+        return _loaded_tensor(model_id_arg, entry, value=float(calls["count"]), q4_loaded=True)
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    policy = TensorResidencyPolicy(max_resident_bytes=1024, max_tensor_bytes=1024, expert_max_resident_bytes=1024)
+    with q4_dequant_expert_residency_scope(enabled=True):
+        first = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+        second = load_resident_tensor(model_id, entry.tensor_name, policy=policy)
+    stats = tensor_residency_stats()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert calls["count"] == 1
+    assert stats.hits == 1
+    assert stats.expert_resident_count == 1
 
 
 def test_large_attention_tensor_is_evictable_under_memory_pressure(tmp_path: Path, monkeypatch) -> None:

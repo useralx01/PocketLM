@@ -25,6 +25,8 @@ from pcketlm.core.runtime.tensor_residency import (
     fp16_packed_expert_cache_scope,
     load_resident_tensor,
     load_resident_tensors,
+    q4_dequant_expert_residency_scope,
+    q4_packed_expert_cache_scope,
     record_expert_activation,
 )
 from pcketlm.core.runtime.tensor_catalog import TensorCatalogEntry, find_tensor_catalog_entry, load_tensor_catalog
@@ -1009,6 +1011,15 @@ def _runtime_math_dtype() -> torch.dtype:
 
 def _fp16_decode_expert_packed_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _q4_decode_dequant_expert_residency_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_Q4_DECODE_DEQUANT_EXPERT_RESIDENCY", "0").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2249,8 +2260,17 @@ def run_minimal_layer_forward_bridge(
             expert_name_map = _moe_expert_tensor_name_map(model_id, layer_index, expert_index)
             expert_name_maps[expert_index] = expert_name_map
             expert_tensor_names.extend(expert_name_map.values())
-        with fp16_packed_expert_cache_scope(enabled=_fp16_decode_expert_packed_cache_enabled()):
-            loaded_experts = load_required_many(expert_tensor_names)
+        decode_expert_cache = bool(
+            return_kv_cache
+            and sequence_length == 1
+            and (past_key_value is not None or native_kv_session is not None)
+        )
+        with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
+            with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
+                with q4_dequant_expert_residency_scope(
+                    enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
+                ):
+                    loaded_experts = load_required_many(expert_tensor_names)
         expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
         for expert_index in selected_expert_ids:
             expert_name_map = expert_name_maps[expert_index]
@@ -2558,10 +2578,13 @@ def run_minimal_layer_forward_bridge(
             return_kv_cache
             and sequence_length == 1
             and past_length > 0
-            and _fp16_decode_expert_packed_cache_enabled()
         )
-        with fp16_packed_expert_cache_scope(enabled=decode_expert_cache):
-            loaded_experts = load_required_many(expert_tensor_names)
+        with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
+            with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
+                with q4_dequant_expert_residency_scope(
+                    enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
+                ):
+                    loaded_experts = load_required_many(expert_tensor_names)
         expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
         for expert_index in selected_expert_ids:
             expert_name_map = expert_name_maps[expert_index]
