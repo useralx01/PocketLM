@@ -395,6 +395,20 @@ def _q4_source_enabled(model_id: str) -> bool:
     return source == "auto" and ready
 
 
+def _q4_payloads_for_source(model_id: str) -> dict:
+    source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+    if source in {"fp16", "bf16", "original", "safetensors"}:
+        return {}
+    manifest = _load_q4_manifest(model_id)
+    tensors = manifest.get("tensors") or {}
+    ready = manifest.get("format") == "pcketlm-q4" and bool(tensors)
+    if source == "q4":
+        return tensors if ready else {}
+    if source == "auto" and ready:
+        return tensors
+    return {}
+
+
 def q4_source_status(model_id: str) -> dict:
     """Return Q4 artifact readiness for diagnostics and tests."""
     manifest_path = _q4_manifest_path(model_id)
@@ -540,8 +554,7 @@ def _dequantize_q4_tensor_batch(
 
 
 def _q4_entry(model_id: str, tensor_name: str) -> dict | None:
-    manifest = _load_q4_manifest(model_id)
-    tensors = manifest.get("tensors") or {}
+    tensors = _q4_payloads_for_source(model_id)
     payload = tensors.get(tensor_name)
     return payload if isinstance(payload, dict) else None
 
@@ -551,22 +564,25 @@ def load_q4_packed_tensors_by_name(
     tensor_names: list[str],
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor, list[int]]]:
     """Load packed Q4 tensors without dequantizing them."""
-    if not _q4_source_enabled(model_id):
+    q4_tensors = _q4_payloads_for_source(model_id)
+    if not q4_tensors:
         return {}
     root = _q4_artifact_root(model_id)
     entries_by_name = load_tensor_entry_index(model_id)
-    groups: dict[tuple[Path, Path], list[TensorCatalogEntry]] = {}
+    groups: dict[tuple[Path, Path], list[tuple[TensorCatalogEntry, dict]]] = {}
     for tensor_name in dict.fromkeys(tensor_names):
         entry = entries_by_name.get(tensor_name)
-        payload = _q4_entry(model_id, tensor_name)
+        payload = q4_tensors.get(tensor_name)
         if entry is None or payload is None:
             continue
         groups.setdefault(
             (root / str(payload.get("q4_shard")), root / str(payload.get("scale_shard"))),
             [],
-        ).append(entry)
+        ).append((entry, payload))
 
     results: dict[str, tuple[torch.Tensor, torch.Tensor, list[int]]] = {}
+    from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
+
     for (q4_path, scale_path), entries in groups.items():
         with ExitStack() as stack:
             handles: dict[str, object] = {}
@@ -581,12 +597,7 @@ def load_q4_packed_tensors_by_name(
                     handles["scale"].get_tensor(entry.tensor_name),
                 )
 
-            for entry in entries:
-                payload = _q4_entry(model_id, entry.tensor_name)
-                if payload is None:
-                    continue
-                from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
-
+            for entry, payload in entries:
                 packed, scales = q4_packed_cache_get_or_load(
                     model_id,
                     entry,
@@ -605,8 +616,9 @@ def _load_q4_tensor_from_source(
     load_packed: Callable[[], tuple[torch.Tensor, torch.Tensor]],
     q4_path: Path | None = None,
     scale_path: Path | None = None,
+    payload: dict | None = None,
 ) -> LoadedTensorSlice:
-    payload = _q4_entry(model_id, entry.tensor_name)
+    payload = _q4_entry(model_id, entry.tensor_name) if payload is None else payload
     if payload is None:
         return _loaded_slice_from_entry(
             model_id,
@@ -632,9 +644,7 @@ def _load_q4_tensor_from_source(
 
 
 def _load_q4_tensor(model_id: str, entry: TensorCatalogEntry) -> LoadedTensorSlice | None:
-    if not _q4_source_enabled(model_id):
-        return None
-    payload = _q4_entry(model_id, entry.tensor_name)
+    payload = _q4_payloads_for_source(model_id).get(entry.tensor_name)
     if payload is None:
         return None
     root = _q4_artifact_root(model_id)
@@ -654,7 +664,7 @@ def _load_q4_tensor(model_id: str, entry: TensorCatalogEntry) -> LoadedTensorSli
                     handles["scale"].get_tensor(entry.tensor_name),
                 )
 
-            return _load_q4_tensor_from_source(model_id, entry, load_packed, q4_path, scale_path)
+            return _load_q4_tensor_from_source(model_id, entry, load_packed, q4_path, scale_path, payload)
     except Exception as exc:  # pragma: no cover - defensive Q4 IO path
         return _loaded_slice_from_entry(
             model_id,
@@ -861,6 +871,8 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
     q4_groups: dict[tuple[Path, Path], list[TensorCatalogEntry]] = {}
     shard_groups: dict[Path, list[TensorCatalogEntry]] = {}
     artifact_groups: dict[Path, list[TensorCatalogEntry]] = {}
+    q4_tensors = _q4_payloads_for_source(model_id)
+    q4_root = _q4_artifact_root(model_id) if q4_tensors else None
     for tensor_name in unique_tensor_names:
         entry = entries_by_name.get(tensor_name)
         if entry is None:
@@ -874,9 +886,9 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
                 ready=False,
             )
             continue
-        q4_payload = _q4_entry(model_id, entry.tensor_name) if _q4_source_enabled(model_id) else None
+        q4_payload = q4_tensors.get(entry.tensor_name) if q4_tensors else None
         if q4_payload is not None:
-            root = _q4_artifact_root(model_id)
+            root = q4_root if q4_root is not None else _q4_artifact_root(model_id)
             q4_groups.setdefault(
                 (root / str(q4_payload.get("q4_shard")), root / str(q4_payload.get("scale_shard"))),
                 [],
@@ -887,6 +899,10 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
             artifact_groups.setdefault(artifact_pack_path, []).append(entry)
             continue
         shard_groups.setdefault(entry.shard_path, []).append(entry)
+
+    q4_packed_cache_get_or_load = None
+    if q4_groups:
+        from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
 
     for (q4_path, scale_path), entries in q4_groups.items():
         try:
@@ -905,7 +921,7 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
 
                 q4_payloads: list[tuple[TensorCatalogEntry, torch.Tensor, torch.Tensor, list[int]]] = []
                 for entry in entries:
-                    payload = _q4_entry(model_id, entry.tensor_name)
+                    payload = q4_tensors.get(entry.tensor_name)
                     if payload is None:
                         results[entry.tensor_name] = _loaded_slice_from_entry(
                             model_id,
@@ -914,7 +930,6 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
                             ready=False,
                         )
                         continue
-                    from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
 
                     packed, scales = q4_packed_cache_get_or_load(
                         model_id,

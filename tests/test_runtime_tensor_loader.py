@@ -9,6 +9,7 @@ from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_pl
 from pcketlm.core.runtime.tensor_loader import (
     clear_runtime_pack_cache,
     load_execution_unit,
+    load_q4_packed_tensors_by_name,
     load_tensor_by_name,
     load_tensors_by_name,
     reset_tensor_load_stats,
@@ -84,6 +85,43 @@ def _bootstrap_tensor_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     return model_id, model_dir
 
 
+def _write_q4_artifact_for_fixture(tmp_path: Path, model_id: str) -> None:
+    q4_dir = tmp_path / "models" / model_id / "artifacts" / "q4"
+    q4_dir.mkdir(parents=True)
+    tensor_names = [
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+    ]
+    q4_shard = "model-00001-of-00001.q4.safetensors"
+    scale_shard = "model-00001-of-00001.scales.safetensors"
+    save_file(
+        {name: torch.full((4,), 0x11, dtype=torch.uint8) for name in tensor_names},
+        str(q4_dir / q4_shard),
+    )
+    save_file(
+        {name: torch.ones((8,), dtype=torch.float16) for name in tensor_names},
+        str(q4_dir / scale_shard),
+    )
+    (q4_dir / "q4_manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "pcketlm-q4",
+                "scheme": "per-channel-symmetric-int4",
+                "tensors": {
+                    name: {
+                        "shape": [8],
+                        "dtype": "BF16",
+                        "q4_shard": q4_shard,
+                        "scale_shard": scale_shard,
+                    }
+                    for name in tensor_names
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_load_tensor_by_name_reads_real_tensor(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)
 
@@ -151,6 +189,70 @@ def test_load_tensors_by_name_reads_real_tensors_in_one_call(tmp_path: Path, mon
     assert stats.batch_load_calls == 1
     assert stats.tensors_loaded == 2
     assert (stats.native_fp16_loads, stats.shard_opens) in {(2, 0), (0, 1)}
+
+
+def test_q4_batch_loader_reads_manifest_once_per_call(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)
+    _write_q4_artifact_for_fixture(tmp_path, model_id)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_NATIVE_Q4", "1")
+    calls = {"manifest": 0}
+
+    from pcketlm.core.runtime import tensor_loader
+
+    real_load = tensor_loader._load_q4_manifest
+
+    def counting_manifest(arg_model_id: str) -> dict:
+        calls["manifest"] += 1
+        return real_load(arg_model_id)
+
+    monkeypatch.setattr(tensor_loader, "_load_q4_manifest", counting_manifest)
+
+    loaded = load_tensors_by_name(
+        model_id,
+        [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+        ],
+    )
+
+    assert set(loaded) == {
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+    }
+    assert all(result.ready for result in loaded.values())
+    assert calls["manifest"] == 1
+
+
+def test_q4_packed_loader_reads_manifest_once_per_call(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)
+    _write_q4_artifact_for_fixture(tmp_path, model_id)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    calls = {"manifest": 0}
+
+    from pcketlm.core.runtime import tensor_loader
+
+    real_load = tensor_loader._load_q4_manifest
+
+    def counting_manifest(arg_model_id: str) -> dict:
+        calls["manifest"] += 1
+        return real_load(arg_model_id)
+
+    monkeypatch.setattr(tensor_loader, "_load_q4_manifest", counting_manifest)
+
+    loaded = load_q4_packed_tensors_by_name(
+        model_id,
+        [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+        ],
+    )
+
+    assert set(loaded) == {
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+    }
+    assert calls["manifest"] == 1
 
 
 def test_scoped_tensor_handle_cache_reuses_handle_across_load_calls(tmp_path: Path, monkeypatch) -> None:

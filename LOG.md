@@ -5357,3 +5357,18 @@ Result: 297 passed in 21.83s
 - Result: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `64.7181s`, token rows `55.7437s`, `8.9583s`, continuation_stack_op_load_tensors `3.9855s`, continuation_stack_op_mlp `3.8483s`, peak working set `3441 MB`, free RAM after `2380 MB`.
 - Probe with `PCKETLM_NATIVE_THREADS=4`: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `66.3818s`, token rows `56.8366s`, `9.5273s`, continuation_stack_op_load_tensors `4.9265s`, continuation_stack_op_mlp `3.5636s`.
 - Verdict: keep native thread count unchanged. Four native threads helps MLP a little but worsens tensor loading and total decode. Current best repeatable default row is `8.9583s` second token; the phase is closer but still not a stable under-8 unlock.
+
+## Phase Q4 MoE Fused Expert Load / longer decode cache check
+- Ran Qwen3-30B-A3B Q4 full with default guarded front-layer policy, `PCKETLM_Q4_PACKED_CACHE_MB=4096`, prompt `"The capital of France is"`, max_new_tokens `4`.
+- Result: coherent generated text `"<think>\nThe capital"`, layers_executed `192/192`, total `87.1716s`, token rows `56.9403s`, `10.7191s`, `9.9521s`, `9.5209s`, peak working set `4756 MB`, free RAM after `1768 MB`.
+- Continuation timing across `144` decode layers: total `28.4145s`, `load_tensors=13.5214s`, `mlp=12.4936s`, native attention `0.5982s`.
+- Q4 packed cache snapshot: budget `4096 MB`, resident `2416.16 MB`, resident_count `3061`, hits `1260`, misses `3061`, disk_reads `12835`, evictions `0`.
+- Finding: longer decode confirms the packed cache warms and correctness stays coherent, but stable under-8 decode is still not proven; selected-expert packed load orchestration and MLP math remain the two comparable bottlenecks.
+
+## Phase Q4 MoE Fused Expert Load / q4 manifest hot-loop cleanup
+- Change: Q4 batch loaders now load the Q4 manifest payload map once per call and reuse it while grouping tensors, instead of re-reading the cached manifest helper for every selected expert tensor. The Q4 packed-cache helper import also moved out of the per-entry loop.
+- Tests added: `test_q4_batch_loader_reads_manifest_once_per_call`, `test_q4_packed_loader_reads_manifest_once_per_call`.
+- Focused tests: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_tensor_loader.py tests\test_tensor_residency.py tests\test_runtime_layer_bridge.py -q` -> `115 passed in 4.23s`.
+- Full suite: `python -m pytest tests/ -q` -> `344 passed in 22.01s`.
+- Real Qwen3-30B-A3B Q4 check from a lower-RAM start (`2974 MB` free): coherent generated text `"<think>\n"`, layers_executed `96/96`, total `62.3715s`, token rows `52.923s`, `9.431s`, continuation_stack_op_load_tensors `4.4844s`, continuation_stack_op_mlp `3.5518s`, peak working set `3049 MB`, free RAM after `1800 MB`.
+- Verdict: correctness and tests are clean, but this is a bookkeeping cleanup rather than a proven speed unlock. The best repeatable row remains the prior `8.9583s` second token.
