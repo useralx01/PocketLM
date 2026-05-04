@@ -7,6 +7,7 @@ from safetensors.torch import save_file
 from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_plan
 from pcketlm.core.runtime.tensor_loader import (
     load_tensor_by_name,
+    load_tensors_by_name,
     q4_source_status,
     reset_tensor_load_stats,
     tensor_load_stats_snapshot,
@@ -104,6 +105,51 @@ def test_q4_loader_reuses_packed_cache_on_repeated_load(tmp_path: Path, monkeypa
     assert stats.hits == 1
     assert stats.disk_reads == 1
     assert load_stats.shard_opens == 2
+
+
+def test_q4_batch_loader_uses_native_many_dequant(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+    import pcketlm.native as native_module
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    model_id = "q4-loader-batch-test"
+    model_dir = _write_runtime_fixture(tmp_path, model_id)
+    build_tensor_execution_plan(model_id, model_dir)
+    quantize_model_dir_to_q4(model_dir, tmp_path / "models" / model_id / "artifacts" / "q4")
+    calls = {"count": 0, "item_count": 0}
+
+    def fake_many(items):
+        calls["count"] += 1
+        calls["item_count"] += len(items)
+        outputs = []
+        for packed, scales, num_channels, channel_size in items:
+            outputs.append(
+                dequantize_q4_tensor(
+                    packed,
+                    scales,
+                    [int(num_channels), int(channel_size)],
+                    dtype=torch.float16,
+                ).reshape(-1)
+            )
+        return outputs
+
+    monkeypatch.setattr(native_module, "q4_dequant_many_to_fp16", fake_many)
+    reset_tensor_load_stats()
+
+    loaded = load_tensors_by_name(
+        model_id,
+        [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.0.mlp.gate_proj.weight",
+        ],
+    )
+    stats = tensor_load_stats_snapshot()
+
+    assert calls == {"count": 1, "item_count": 2}
+    assert loaded["model.layers.0.self_attn.q_proj.weight"].ready is True
+    assert loaded["model.layers.0.mlp.gate_proj.weight"].ready is True
+    assert stats.q4_loads == 2
 
 
 def _write_quantizer_fixture(tmp_path: Path, tensor: torch.Tensor) -> Path:

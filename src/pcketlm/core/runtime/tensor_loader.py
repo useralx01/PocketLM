@@ -499,20 +499,44 @@ def _dequantize_q4_tensor(packed: torch.Tensor, scales: torch.Tensor, shape: lis
         try:
             from pcketlm.native import q4_dequant_to_fp16
 
-            value_count = int(math.prod(shape)) if shape else 1
-            if not shape:
-                num_channels = 1
-                channel_size = 1
-            elif len(shape) == 1:
-                num_channels = int(shape[0])
-                channel_size = 1
-            else:
-                num_channels = int(shape[0])
-                channel_size = max(1, value_count // num_channels)
+            num_channels, channel_size = _q4_dequant_shape_params(shape)
             return q4_dequant_to_fp16(packed, scales, num_channels, channel_size).reshape(shape).contiguous()
         except Exception:
             pass
     return _python_dequantize_q4_tensor(packed, scales, shape)
+
+
+def _q4_dequant_shape_params(shape: list[int]) -> tuple[int, int]:
+    value_count = int(math.prod(shape)) if shape else 1
+    if not shape:
+        return 1, 1
+    if len(shape) == 1:
+        return int(shape[0]), 1
+    num_channels = int(shape[0])
+    return num_channels, max(1, value_count // num_channels)
+
+
+def _dequantize_q4_tensor_batch(
+    payloads: list[tuple[TensorCatalogEntry, torch.Tensor, torch.Tensor, list[int]]],
+) -> dict[str, torch.Tensor] | None:
+    if not payloads or os.environ.get("PCKETLM_DISABLE_NATIVE_Q4"):
+        return None
+    try:
+        from pcketlm.native import q4_dequant_many_to_fp16
+
+        native_items = []
+        shapes: list[list[int]] = []
+        for _entry, packed, scales, shape in payloads:
+            num_channels, channel_size = _q4_dequant_shape_params(shape)
+            native_items.append((packed, scales, num_channels, channel_size))
+            shapes.append(shape)
+        outputs = q4_dequant_many_to_fp16(native_items)
+        return {
+            entry.tensor_name: output.reshape(shape).contiguous()
+            for (entry, _packed, _scales, _shape), output, shape in zip(payloads, outputs, shapes)
+        }
+    except Exception:
+        return None
 
 
 def _q4_entry(model_id: str, tensor_name: str) -> dict | None:
@@ -826,14 +850,35 @@ def load_tensors_by_name(model_id: str, tensor_names: list[str]) -> dict[str, Lo
                         handles["scale"].get_tensor(entry.tensor_name),
                     )
 
+                q4_payloads: list[tuple[TensorCatalogEntry, torch.Tensor, torch.Tensor, list[int]]] = []
                 for entry in entries:
-                    results[entry.tensor_name] = _load_q4_tensor_from_source(
+                    payload = _q4_entry(model_id, entry.tensor_name)
+                    if payload is None:
+                        results[entry.tensor_name] = _loaded_slice_from_entry(
+                            model_id,
+                            entry,
+                            blockers=[f"Q4 artifact does not contain tensor {entry.tensor_name}."],
+                            ready=False,
+                        )
+                        continue
+                    from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
+
+                    packed, scales = q4_packed_cache_get_or_load(
                         model_id,
                         entry,
-                        lambda entry=entry: load_packed(entry),
                         q4_path,
                         scale_path,
+                        lambda entry=entry: load_packed(entry),
                     )
+                    shape = [int(value) for value in payload.get("shape", entry.shape)]
+                    q4_payloads.append((entry, packed, scales, shape))
+                batched = _dequantize_q4_tensor_batch(q4_payloads)
+                for entry, packed, scales, shape in q4_payloads:
+                    tensor = None if batched is None else batched.get(entry.tensor_name)
+                    if tensor is None:
+                        tensor = _dequantize_q4_tensor(packed, scales, shape, entry.dtype)
+                    _update_load_stats(q4_loads=1, q4_loaded_nbytes=int(packed.nelement() * packed.element_size()))
+                    results[entry.tensor_name] = _loaded_slice_from_entry(model_id, entry, tensor, q4_loaded=True)
         except Exception as exc:  # pragma: no cover - defensive Q4 IO path
             for entry in entries:
                 results[entry.tensor_name] = _loaded_slice_from_entry(

@@ -204,3 +204,81 @@ extern "C" __declspec(dllexport) void q4_dequant_to_fp16(
         }
     }
 }
+
+extern "C" __declspec(dllexport) int q4_dequant_many_to_fp16(
+    const uint8_t** packed_ptrs,
+    const uint16_t** scale_ptrs,
+    uint16_t** out_ptrs,
+    const int64_t* num_channels,
+    const int64_t* channel_sizes,
+    int64_t tensor_count
+) {
+    if (
+        packed_ptrs == nullptr || scale_ptrs == nullptr || out_ptrs == nullptr ||
+        num_channels == nullptr || channel_sizes == nullptr
+    ) {
+        return 1;
+    }
+    if (tensor_count <= 0) {
+        return 2;
+    }
+
+    const char* thread_env = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (thread_env != nullptr) {
+        const int requested = std::atoi(thread_env);
+        if (requested > 0) {
+            omp_set_num_threads(requested);
+        }
+    }
+
+    if (!cpu_has_avx2_f16c()) {
+        for (int64_t t = 0; t < tensor_count; ++t) {
+            if (
+                packed_ptrs[t] == nullptr || scale_ptrs[t] == nullptr || out_ptrs[t] == nullptr ||
+                num_channels[t] <= 0 || channel_sizes[t] <= 0
+            ) {
+                return 3;
+            }
+            q4_dequant_to_fp16_scalar(
+                packed_ptrs[t],
+                scale_ptrs[t],
+                out_ptrs[t],
+                num_channels[t],
+                channel_sizes[t]
+            );
+        }
+        return 0;
+    }
+
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int64_t t = 0; t < tensor_count; ++t) {
+        if (
+            packed_ptrs[t] == nullptr || scale_ptrs[t] == nullptr || out_ptrs[t] == nullptr ||
+            num_channels[t] <= 0 || channel_sizes[t] <= 0
+        ) {
+            continue;
+        }
+        const uint8_t* packed = packed_ptrs[t];
+        const uint16_t* scales = scale_ptrs[t];
+        uint16_t* out_fp16 = out_ptrs[t];
+        const int64_t channels = num_channels[t];
+        const int64_t channel_size = channel_sizes[t];
+        for (int64_t c = 0; c < channels; ++c) {
+            const float scale = fp16_to_float(scales[c]);
+            const __m256 scale_v = _mm256_set1_ps(scale);
+            const int64_t channel_offset = c * channel_size;
+
+            int64_t i = 0;
+            if ((channel_offset % 2) == 0) {
+                for (; i + 16 <= channel_size; i += 16) {
+                    dequant_16_values_avx2(packed, out_fp16, channel_offset + i, scale_v);
+                }
+            }
+            for (; i < channel_size; ++i) {
+                const int64_t value_index = channel_offset + i;
+                out_fp16[value_index] = float_to_fp16(static_cast<float>(unpack_int4_scalar(packed, value_index)) * scale);
+            }
+        }
+    }
+    return 0;
+}

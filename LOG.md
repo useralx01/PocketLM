@@ -5319,3 +5319,12 @@ Result: 297 passed in 21.83s
 - Verdict: rejected as a default. It consumes too much RAM on this machine and is slower than the `106.8654s` default row. The behavior is retained only behind `PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY=1` for future long-generation profiling.
 - Focused tests after making it opt-in: `python -m pytest tests\test_tensor_residency.py tests\test_runtime_layer_bridge.py tests\test_q4_quantizer.py -q` -> `102 passed in 3.99s`.
 - Full suite: `python -m pytest tests/ -q` -> `340 passed in 22.40s`.
+
+## Phase Q4 MoE Fused Expert Load / native Q4 batch dequant
+- Change: added native `q4_dequant_many_to_fp16` and a tensor-loader batch path for Q4 shard groups. The loader now gathers packed/scales tensors and hydrates them in one native call per Q4 group instead of one ctypes/OpenMP setup per tensor.
+- Rebuilt `q4_dequant.dll`; focused tests: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_tensor_loader.py tests\test_tensor_residency.py -q` -> `65 passed in 3.51s`.
+- Real Qwen3-30B-A3B Q4 row, default native threads: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `101.3604s`, token rows `62.6989s`, `20.0662s`, `18.5593s`, continuation_stack_op_load_tensors `31.9667s`, prefill_stack_op_load_tensors `41.1823s`, peak working set `3490 MB`, free RAM after `2540 MB`.
+- Comparison to prior default: total `106.8654s` -> `101.3604s`; continuation `load_tensors` `33.811s` -> `31.9667s`; third-token wall `19.9999s` -> `18.5593s`.
+- Thread probe with `PCKETLM_NATIVE_THREADS=4`: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `103.5251s`, token rows `67.5245s`, `18.2083s`, `17.7610s`, continuation_stack_op_load_tensors `30.6497s`, prefill_stack_op_load_tensors `48.5498s`.
+- Verdict: batch dequant is a real speed win and should stay default. Four native threads improves warm decode but hurts prefill/total; keep thread count as an environment profiling knob rather than changing the default.
+- Full suite: `python -m pytest tests/ -q` -> `341 passed in 22.52s`.

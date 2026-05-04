@@ -104,6 +104,16 @@ def _load_q4_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.q4_dequant_to_fp16.restype = None
+        if hasattr(lib, "q4_dequant_many_to_fp16"):
+            lib.q4_dequant_many_to_fp16.argtypes = [
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_longlong),
+                ctypes.POINTER(ctypes.c_longlong),
+                ctypes.c_longlong,
+            ]
+            lib.q4_dequant_many_to_fp16.restype = ctypes.c_int
         lib.q4_cpu_has_avx2_f16c.argtypes = []
         lib.q4_cpu_has_avx2_f16c.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
@@ -1667,3 +1677,47 @@ def q4_dequant_to_fp16(
         ctypes.c_longlong(int(channel_size)),
     )
     return out
+
+
+def q4_dequant_many_to_fp16(
+    items: list[tuple[torch.Tensor, torch.Tensor, int, int]],
+) -> list[torch.Tensor]:
+    lib = _load_q4_lib()
+    if lib is None or not hasattr(lib, "q4_dequant_many_to_fp16"):
+        reason = "disabled" if _native_disabled() else _Q4_LOAD_ERROR
+        raise RuntimeError(f"Native Q4 batch dequant is unavailable: {reason}")
+    if not items:
+        return []
+
+    packed_tensors: list[torch.Tensor] = []
+    scale_tensors: list[torch.Tensor] = []
+    outputs: list[torch.Tensor] = []
+    packed_ptrs = (ctypes.c_void_p * len(items))()
+    scale_ptrs = (ctypes.c_void_p * len(items))()
+    out_ptrs = (ctypes.c_void_p * len(items))()
+    channels = (ctypes.c_longlong * len(items))()
+    channel_sizes = (ctypes.c_longlong * len(items))()
+    for index, (packed, scales, num_channels, channel_size) in enumerate(items):
+        packed_cpu = packed.detach().cpu().contiguous().to(torch.uint8)
+        scales_cpu = scales.detach().cpu().contiguous().to(torch.float16)
+        out = torch.empty((int(num_channels) * int(channel_size),), dtype=torch.float16)
+        packed_tensors.append(packed_cpu)
+        scale_tensors.append(scales_cpu)
+        outputs.append(out)
+        packed_ptrs[index] = ctypes.c_void_p(int(packed_cpu.data_ptr()))
+        scale_ptrs[index] = ctypes.c_void_p(int(scales_cpu.data_ptr()))
+        out_ptrs[index] = ctypes.c_void_p(int(out.data_ptr()))
+        channels[index] = ctypes.c_longlong(int(num_channels))
+        channel_sizes[index] = ctypes.c_longlong(int(channel_size))
+
+    code = lib.q4_dequant_many_to_fp16(
+        packed_ptrs,
+        scale_ptrs,
+        out_ptrs,
+        channels,
+        channel_sizes,
+        ctypes.c_longlong(len(items)),
+    )
+    if code != 0:
+        raise RuntimeError(f"Native Q4 batch dequant failed with code {code}")
+    return outputs
