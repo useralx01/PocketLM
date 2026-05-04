@@ -44,6 +44,7 @@ def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatc
         return SimpleNamespace(
             ready=True,
             generated_text="OK",
+            full_text=f"full-{len(calls)}",
             generated_token_ids=[1],
             steps_completed=1,
             max_new_tokens=kwargs["max_new_tokens"],
@@ -70,12 +71,80 @@ def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatc
 
     assert first.ready is True
     assert second.ready is True
+    assert first.full_text == "full-1"
+    assert first.to_dict()["full_text"] == "full-1"
     assert calls[0]["initial_decode_state"] is None
     assert calls[1]["initial_decode_state"] is first_state
     assert calls[1]["initial_token_ids"] == [1, 2, 1]
     assert calls[1]["apply_chat_format"] is True
     assert second.prefix_reuse["used"] is True
     assert second.performance_summary["bottleneck"] == "tensor loading"
+
+
+def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> None:
+    from pcketlm.app.chat_shell import warm_runner_cli
+
+    calls = []
+
+    def fake_start(model_id: str):
+        return {"model_id": model_id, "state": "ready"}
+
+    def fake_status(model_id: str):
+        return {"model_id": model_id, "state": "ready", "request_count": 2}
+
+    def fake_run(
+        model_id: str,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        min_free_memory_mb: int,
+        apply_chat_format: bool,
+    ):
+        calls.append(
+            {
+                "model_id": model_id,
+                "prompt": prompt,
+                "max_new_tokens": max_new_tokens,
+                "min_free_memory_mb": min_free_memory_mb,
+                "apply_chat_format": apply_chat_format,
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            full_text="hello OK" if len(calls) == 1 else prompt + " OK",
+            to_dict=lambda: {"ready": True, "prompt": prompt, "full_text": "hello OK"},
+        )
+
+    monkeypatch.setattr(warm_runner_cli, "start_warm_runner", fake_start)
+    monkeypatch.setattr(warm_runner_cli, "warm_runner_status", fake_status)
+    monkeypatch.setattr(warm_runner_cli, "run_warm_agent_prompt", fake_run)
+
+    exit_code = warm_runner_cli.main(
+        [
+            "sequence",
+            "--model",
+            "qwen-test",
+            "--prompt",
+            "hello",
+            "--second-prompt",
+            "again",
+            "--max-new-tokens",
+            "2",
+            "--min-free-memory-mb",
+            "1024",
+            "--raw",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0]["prompt"] == "hello"
+    assert calls[0]["max_new_tokens"] == 2
+    assert calls[0]["min_free_memory_mb"] == 1024
+    assert calls[0]["apply_chat_format"] is False
+    assert calls[1]["prompt"] == "hello OK\nagain"
+    assert calls[1]["apply_chat_format"] is False
+    payload = capsys.readouterr().out
+    assert '"second_prompt_chained": true' in payload
 
 
 def test_warm_runner_blocks_low_memory_before_generation(tmp_path, monkeypatch) -> None:

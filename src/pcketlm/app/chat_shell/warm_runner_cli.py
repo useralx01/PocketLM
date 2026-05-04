@@ -15,7 +15,8 @@ def _print(payload: dict) -> None:
 def _usage() -> str:
     return (
         "Usage: py -m pcketlm.app.chat_shell.warm_runner_cli "
-        "<start|run|status|stop|sequence> --model <id> [--prompt <text>] [--second-prompt <text>] [--max-new-tokens <n>]"
+        "<start|run|status|stop|sequence> --model <id> [--prompt <text>] [--second-prompt <text>] "
+        "[--max-new-tokens <n>] [--min-free-memory-mb <n>] [--raw] [--independent-second]"
     )
 
 
@@ -23,7 +24,15 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
     if not args:
         return None, {}
     command = args[0].strip().lower()
-    options: dict = {"model": "qwen2.5-14b-instruct", "prompt": "hello world", "second_prompt": "reply ok only", "max_new_tokens": 2}
+    options: dict = {
+        "model": "qwen2.5-14b-instruct",
+        "prompt": "hello world",
+        "second_prompt": "reply ok only",
+        "max_new_tokens": 2,
+        "min_free_memory_mb": 4096,
+        "apply_chat_format": True,
+        "chain_second": True,
+    }
     index = 1
     while index < len(args):
         flag = args[index]
@@ -42,6 +51,18 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
         if flag == "--max-new-tokens" and index + 1 < len(args):
             options["max_new_tokens"] = max(1, int(args[index + 1]))
             index += 2
+            continue
+        if flag == "--min-free-memory-mb" and index + 1 < len(args):
+            options["min_free_memory_mb"] = max(0, int(args[index + 1]))
+            index += 2
+            continue
+        if flag == "--raw":
+            options["apply_chat_format"] = False
+            index += 1
+            continue
+        if flag == "--independent-second":
+            options["chain_second"] = False
+            index += 1
             continue
         raise ValueError(_usage())
     return command, options
@@ -72,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             model_id,
             str(options["prompt"]),
             max_new_tokens=int(options["max_new_tokens"]),
+            min_free_memory_mb=int(options["min_free_memory_mb"]),
+            apply_chat_format=bool(options["apply_chat_format"]),
         )
         _print(result.to_dict())
         return 0 if result.ready else 2
@@ -81,14 +104,34 @@ def main(argv: list[str] | None = None) -> int:
             model_id,
             str(options["prompt"]),
             max_new_tokens=int(options["max_new_tokens"]),
+            min_free_memory_mb=int(options["min_free_memory_mb"]),
+            apply_chat_format=bool(options["apply_chat_format"]),
         )
+        second_prompt = str(options["second_prompt"])
+        if bool(options["chain_second"]) and first.ready:
+            full_text = str(first.full_text or options["prompt"])
+            separator = "" if full_text.endswith(("\n", " ")) else "\n"
+            second_prompt = f"{full_text}{separator}{second_prompt}"
         second = run_warm_agent_prompt(
             model_id,
-            str(options["second_prompt"]),
+            second_prompt,
             max_new_tokens=int(options["max_new_tokens"]),
+            min_free_memory_mb=int(options["min_free_memory_mb"]),
+            apply_chat_format=bool(options["apply_chat_format"]),
         )
         status = warm_runner_status(model_id)
-        _print({"start": start, "first": first.to_dict(), "second": second.to_dict(), "status": status})
+        _print(
+            {
+                "start": start,
+                "first": first.to_dict(),
+                "second": second.to_dict(),
+                "status": status,
+                "sequence": {
+                    "second_prompt_chained": bool(options["chain_second"]) and first.ready,
+                    "second_prompt_token_prefix_expected": bool(options["chain_second"]) and first.ready,
+                },
+            }
+        )
         return 0 if first.ready and second.ready else 2
 
     print(_usage())

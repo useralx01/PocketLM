@@ -34,6 +34,7 @@ class WarmRunnerRequestResult:
     elapsed_seconds: float
     max_new_tokens: int
     steps_completed: int
+    full_text: str = ""
     generated_token_ids: list[int] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     prefix_reuse: dict = field(default_factory=dict)
@@ -49,6 +50,7 @@ class WarmRunnerRequestResult:
             "prompt": self.prompt,
             "ready": self.ready,
             "generated_text": self.generated_text,
+            "full_text": self.full_text,
             "elapsed_seconds": self.elapsed_seconds,
             "max_new_tokens": self.max_new_tokens,
             "steps_completed": self.steps_completed,
@@ -284,6 +286,7 @@ def _blocked_result(runner: WarmRunner, prompt: str, max_new_tokens: int, blocke
         prompt=prompt,
         ready=False,
         generated_text="",
+        full_text=prompt,
         elapsed_seconds=0.0,
         max_new_tokens=max_new_tokens,
         steps_completed=0,
@@ -358,6 +361,7 @@ def run_warm_agent_prompt(
                 prompt=prompt,
                 ready=False,
                 generated_text="",
+                full_text=prompt,
                 elapsed_seconds=elapsed,
                 max_new_tokens=max_new_tokens,
                 steps_completed=0,
@@ -395,6 +399,7 @@ def run_warm_agent_prompt(
             prompt=prompt,
             ready=bool(getattr(result, "ready", False)),
             generated_text=str(getattr(result, "generated_text", "") or ""),
+            full_text=str(getattr(result, "full_text", prompt) or prompt),
             elapsed_seconds=elapsed,
             max_new_tokens=int(getattr(result, "max_new_tokens", max_new_tokens) or max_new_tokens),
             steps_completed=int(getattr(result, "steps_completed", 0) or 0),

@@ -5422,3 +5422,11 @@ Result: 297 passed in 21.83s
 - Test added: `test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers`.
 - Focused tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_uses_real_prompt_tokenization tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers tests/test_warm_runner.py -q` -> `5 passed in 1.52s`.
 - Full suite: `python -m pytest tests/ -q` -> `348 passed in 7.93s`.
+
+## Phase Q4 MoE Fused Expert Load / real prefix reuse probe
+- Change: `warm_runner_cli sequence` now returns full decoded text from the first turn and, by default, chains the second prompt onto that text so the second request can share a token prefix. Added `--raw`, `--independent-second`, and `--min-free-memory-mb` for controlled local probes.
+- First real Qwen3-30B-A3B Q4 two-turn probe: prompt `"The capital of France is"`, second prompt `"Continue."`, max_new_tokens `2`, raw mode, `PCKETLM_Q4_PACKED_CACHE_MB=2048`. First turn generated `" Paris."` in `27.955s`; second turn reused `6` prompt tokens and appended `3`, but generated ugly text `"�**"`. Tensor loading still dropped from `15.895s` to `8.422s`.
+- Cleaner real Qwen3-30B-A3B Q4 probe: prompt `"The capital of France is"`, second prompt `"It is known for"`, max_new_tokens `1`, raw mode, `PCKETLM_Q4_PACKED_CACHE_MB=2048`. First turn generated `" Paris"` in `21.301s`; second turn generated `" the"` in `13.991s`, reused `5` prompt tokens and appended `6`.
+- Cleaner probe timing: first turn stack `20.157s`, tensor load `12.092s`; second turn stack `13.401s`, tensor load `3.957s`. Memory after first turn `3583 MB` free, after second `3502 MB` free.
+- Verdict: prefix/KV reuse now works on a real Qwen3-30B-A3B Q4 two-turn run and cuts repeated tensor loading significantly. It is not a universal first-token fix; it helps follow-up chat/agent turns when the new prompt begins with the previous reusable token prefix.
+- Full suite after CLI and warm-runner changes: `python -m pytest tests/ -q` -> `349 passed in 11.18s`.
