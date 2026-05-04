@@ -5205,3 +5205,19 @@ Result: 297 passed in 21.83s
 - Real Qwen 14B three-token probe with safe row8 tensor cache: generated `Hello! How`, layers_executed `144/144`, result total `87.3980s`, continuation `load_packed_artifact=3.2396s`.
 - Full suite: `python -m pytest tests/ -q` -> `321 passed in 22.88s`.
 - Verdict: artifact routing is correct and avoids original projection loads for covered layers, but the safe Python tensor clone erases the disk-read saving on this machine. The next speed step needs a native-owned packed artifact mapping/pointer table, not Python tensor cloning.
+
+## Phase Native Row8 Artifact Handles / Setup
+- Branch: `phase-native-row8-artifact-handles`.
+- Goal: make row8 artifact bytes native-owned so layer decode can pass stable C pointers instead of cloning `torch.uint16` packed tensors.
+
+## Phase Native Row8 Artifact Handles / native pointer path
+- Added `row8_artifact_cache.dll`, built from `row8_artifact_cache.cpp`, with native C-owned artifact tensor handles and stable `uint16_t*` data pointers.
+- Added `NativeRow8Tensor`, `load_native_row8_tensor`, and `NativeKvSession.dense_layer_decode_packed_rows8_ptrs`.
+- Added runtime `load_row8_native_packed_tensor`; the bridge now prefers native row8 handles and falls back to the torch tensor artifact path if unavailable.
+- Focused tests: `python -m pytest tests\test_native_row8_artifact_cache.py tests\test_packed_artifact_loader.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_row8_artifact_without_original_projection_load -q` -> `5 passed`.
+- Native pointer ABI real-layer smoke: Qwen 14B layer-0 artifact handles for q/k/v/o/gate/up/down loaded and `dense_layer_decode_packed_rows8_ptrs` returned `torch.bfloat16` output for `[5120]`.
+- RAM note: two-token real rows failed while free RAM was ~6.6 GB and passed after closing `msedge`/`RobloxPlayerBeta`, raising free RAM to `8.82 GB`.
+- Baseline Qwen 14B two-token row after RAM cleanup: generated `Hello!`, layers_executed `96/96`, result total `35.0999s`, continuation `14.7824s`.
+- Native row8 handle Qwen 14B two-token row using layer-0 artifact: generated `Hello!`, layers_executed `96/96`, result total `38.3431s`, continuation `17.7185s`, `load_packed_artifact_native=1.4518s`.
+- Full suite: `python -m pytest tests/ -q` -> `323 passed in 26.18s`.
+- Verdict: C-owned row8 handles fix the Python clone/lifetime issue, but a layer-0-only artifact is not a speed win. The next meaningful test needs a multi-layer or whole-model row8 artifact so the native handle path replaces enough projection loads to matter.

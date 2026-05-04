@@ -18,6 +18,7 @@ _FP16_ATTENTION_DLL = _NATIVE_DIR / "fp16_attention.dll"
 _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
 _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
+_ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
@@ -32,6 +33,8 @@ _FP16_KV_LIB: ctypes.CDLL | None = None
 _FP16_KV_ERROR: Exception | None = None
 _FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
 _FP16_PACKED_GEMV_ERROR: Exception | None = None
+_ROW8_ARTIFACT_LIB: ctypes.CDLL | None = None
+_ROW8_ARTIFACT_ERROR: Exception | None = None
 _PACKED_GEMV_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 _PACKED_GEMV_CACHE_BYTES = 0
 _PACKED_GEMV_CACHE_STATS = {
@@ -68,6 +71,10 @@ def _native_kv_disabled() -> bool:
 
 def _native_packed_gemv_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_PACKED_GEMV", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_row8_artifact_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_ROW8_ARTIFACT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _u16_storage_dtype_code(dtype: torch.dtype) -> int:
@@ -254,6 +261,88 @@ def native_fp16_packed_gemv_available() -> bool:
 def native_fp16_packed_gemv_error() -> Exception | None:
     _load_fp16_packed_gemv_lib()
     return _FP16_PACKED_GEMV_ERROR
+
+
+def _load_row8_artifact_lib() -> ctypes.CDLL | None:
+    global _ROW8_ARTIFACT_LIB, _ROW8_ARTIFACT_ERROR
+    if _native_row8_artifact_disabled():
+        return None
+    if _ROW8_ARTIFACT_LIB is not None:
+        return _ROW8_ARTIFACT_LIB
+    if not _ROW8_ARTIFACT_DLL.exists():
+        _ROW8_ARTIFACT_ERROR = FileNotFoundError(str(_ROW8_ARTIFACT_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_ROW8_ARTIFACT_DLL))
+        lib.row8_artifact_load_tensor.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_ulonglong,
+            ctypes.c_ulonglong,
+        ]
+        lib.row8_artifact_load_tensor.restype = ctypes.c_void_p
+        lib.row8_artifact_free_tensor.argtypes = [ctypes.c_void_p]
+        lib.row8_artifact_free_tensor.restype = None
+        lib.row8_artifact_tensor_data.argtypes = [ctypes.c_void_p]
+        lib.row8_artifact_tensor_data.restype = ctypes.c_void_p
+        lib.row8_artifact_tensor_nbytes.argtypes = [ctypes.c_void_p]
+        lib.row8_artifact_tensor_nbytes.restype = ctypes.c_ulonglong
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _ROW8_ARTIFACT_ERROR = exc
+        return None
+    _ROW8_ARTIFACT_LIB = lib
+    _ROW8_ARTIFACT_ERROR = None
+    return lib
+
+
+def native_row8_artifact_available() -> bool:
+    return _load_row8_artifact_lib() is not None
+
+
+def native_row8_artifact_error() -> Exception | None:
+    _load_row8_artifact_lib()
+    return _ROW8_ARTIFACT_ERROR
+
+
+class NativeRow8Tensor:
+    def __init__(self, path: str | Path, offset: int, nbytes: int):
+        lib = _load_row8_artifact_lib()
+        if lib is None:
+            reason = "disabled" if _native_row8_artifact_disabled() else _ROW8_ARTIFACT_ERROR
+            raise RuntimeError(f"Native row8 artifact cache is unavailable: {reason}")
+        path_bytes = str(Path(path)).encode("utf-8")
+        handle = lib.row8_artifact_load_tensor(
+            ctypes.c_char_p(path_bytes),
+            ctypes.c_ulonglong(int(offset)),
+            ctypes.c_ulonglong(int(nbytes)),
+        )
+        if not handle:
+            raise OSError(f"row8_artifact_load_tensor failed for {path}")
+        self._lib = lib
+        self._handle = ctypes.c_void_p(handle)
+        self.nbytes = int(lib.row8_artifact_tensor_nbytes(self._handle))
+        ptr = lib.row8_artifact_tensor_data(self._handle)
+        if not ptr or self.nbytes != int(nbytes):
+            self.close()
+            raise OSError(f"row8_artifact_tensor_data failed for {path}")
+        self.ptr = int(ptr)
+        self.path = str(path)
+        self.offset = int(offset)
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._lib.row8_artifact_free_tensor(self._handle)
+            self._handle = None
+            self.ptr = 0
+
+    def __del__(self):  # pragma: no cover - GC safety net
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def load_native_row8_tensor(path: str | Path, offset: int, nbytes: int) -> NativeRow8Tensor:
+    return NativeRow8Tensor(path, offset, nbytes)
 
 
 def _packed_gemv_cache_disabled() -> bool:
@@ -1223,6 +1312,87 @@ class NativeKvSession:
             ctypes.c_void_p(int(packed_cpu[4].data_ptr())),
             ctypes.c_void_p(int(packed_cpu[5].data_ptr())),
             ctypes.c_void_p(int(packed_cpu[6].data_ptr())),
+            ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),
+            ctypes.c_void_p(0 if q_norm_cpu is None else int(q_norm_cpu.data_ptr())),
+            ctypes.c_void_p(0 if k_norm_cpu is None else int(k_norm_cpu.data_ptr())),
+            ctypes.c_void_p(int(out.data_ptr())),
+            ctypes.c_longlong(int(hidden_size)),
+            ctypes.c_longlong(int(intermediate_size)),
+            ctypes.c_longlong(int(num_heads)),
+            ctypes.c_longlong(int(num_kv_heads)),
+            ctypes.c_float(float(rms_eps)),
+            ctypes.c_float(float(rope_theta)),
+        )
+        if code != 0:
+            raise RuntimeError(f"kv_dense_layer_decode_u16_ext_packed_rows8 failed with code {code}")
+        return out
+
+    def dense_layer_decode_packed_rows8_ptrs(
+        self,
+        layer: int,
+        hidden: torch.Tensor,
+        input_norm_weight: torch.Tensor,
+        post_norm_weight: torch.Tensor,
+        q_weight_packed_ptr: int,
+        k_weight_packed_ptr: int,
+        v_weight_packed_ptr: int,
+        o_weight_packed_ptr: int,
+        gate_weight_packed_ptr: int,
+        up_weight_packed_ptr: int,
+        down_weight_packed_ptr: int,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rms_eps: float,
+        rope_theta: float,
+        q_bias: torch.Tensor | None = None,
+        k_bias: torch.Tensor | None = None,
+        v_bias: torch.Tensor | None = None,
+        q_norm_weight: torch.Tensor | None = None,
+        k_norm_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del head_dim
+        if not hasattr(self._lib, "kv_dense_layer_decode_u16_ext_packed_rows8"):
+            raise RuntimeError("kv_dense_layer_decode_u16_ext_packed_rows8 is unavailable")
+        raw_tensors = [hidden, input_norm_weight, post_norm_weight]
+        if any(tensor.dtype != self.dtype for tensor in raw_tensors):
+            raise TypeError(f"dense_layer_decode_packed_rows8_ptrs requires {self.dtype} raw tensors")
+        ptrs = [
+            q_weight_packed_ptr,
+            k_weight_packed_ptr,
+            v_weight_packed_ptr,
+            o_weight_packed_ptr,
+            gate_weight_packed_ptr,
+            up_weight_packed_ptr,
+            down_weight_packed_ptr,
+        ]
+        if any(int(ptr) == 0 for ptr in ptrs):
+            raise ValueError("packed row8 pointer must be non-zero")
+        raw_cpu = [tensor.detach().cpu().contiguous() for tensor in raw_tensors]
+        q_bias_cpu = None if q_bias is None else q_bias.detach().cpu().contiguous().reshape(-1)
+        k_bias_cpu = None if k_bias is None else k_bias.detach().cpu().contiguous().reshape(-1)
+        v_bias_cpu = None if v_bias is None else v_bias.detach().cpu().contiguous().reshape(-1)
+        q_norm_cpu = None if q_norm_weight is None else q_norm_weight.detach().cpu().contiguous().reshape(-1)
+        k_norm_cpu = None if k_norm_weight is None else k_norm_weight.detach().cpu().contiguous().reshape(-1)
+        out = torch.empty((int(hidden_size),), dtype=self.dtype)
+        code = self._lib.kv_dense_layer_decode_u16_ext_packed_rows8(
+            self._handle,
+            ctypes.c_longlong(int(layer)),
+            ctypes.c_void_p(int(raw_cpu[0].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(raw_cpu[1].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(raw_cpu[2].reshape(-1).data_ptr())),
+            ctypes.c_void_p(int(q_weight_packed_ptr)),
+            ctypes.c_void_p(int(k_weight_packed_ptr)),
+            ctypes.c_void_p(int(v_weight_packed_ptr)),
+            ctypes.c_void_p(int(o_weight_packed_ptr)),
+            ctypes.c_void_p(int(gate_weight_packed_ptr)),
+            ctypes.c_void_p(int(up_weight_packed_ptr)),
+            ctypes.c_void_p(int(down_weight_packed_ptr)),
             ctypes.c_void_p(0 if q_bias_cpu is None else int(q_bias_cpu.data_ptr())),
             ctypes.c_void_p(0 if k_bias_cpu is None else int(k_bias_cpu.data_ptr())),
             ctypes.c_void_p(0 if v_bias_cpu is None else int(v_bias_cpu.data_ptr())),

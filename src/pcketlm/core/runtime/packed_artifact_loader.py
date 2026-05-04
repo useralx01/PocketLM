@@ -17,6 +17,8 @@ ROW8_ARTIFACT_DIRNAME = "row8"
 ROW8_MANIFEST_NAME = "row8_manifest.json"
 _ROW8_TENSOR_CACHE: OrderedDict[tuple[str, str, str], tuple[torch.Tensor, dict, int]] = OrderedDict()
 _ROW8_TENSOR_CACHE_BYTES = 0
+_ROW8_NATIVE_TENSOR_CACHE: OrderedDict[tuple[str, str, str], tuple[object, dict, int]] = OrderedDict()
+_ROW8_NATIVE_TENSOR_CACHE_BYTES = 0
 
 
 @lru_cache(maxsize=16)
@@ -90,11 +92,43 @@ def load_row8_packed_tensor(
     return tensor, entry
 
 
+def load_row8_native_packed_tensor(
+    model_id: str,
+    tensor_name: str,
+    artifact_name: str = ROW8_ARTIFACT_DIRNAME,
+) -> tuple[object, dict]:
+    cache_key = (str(model_id), str(artifact_name), str(tensor_name))
+    if _row8_tensor_cache_enabled():
+        cached = _ROW8_NATIVE_TENSOR_CACHE.get(cache_key)
+        if cached is not None:
+            native_tensor, entry, _nbytes = cached
+            _ROW8_NATIVE_TENSOR_CACHE.move_to_end(cache_key)
+            return native_tensor, dict(entry)
+
+    manifest = _row8_manifest(model_id, artifact_name)
+    if not manifest.get("ready"):
+        raise FileNotFoundError(str(manifest.get("path", "")))
+    tensors = manifest.get("tensors") or {}
+    if tensor_name not in tensors:
+        raise KeyError(tensor_name)
+    entry = dict(tensors[tensor_name])
+    artifact_dir = Path(str(manifest["path"])).parent
+    data_file = artifact_dir / str(manifest["data_file"])
+    from pcketlm.native import load_native_row8_tensor
+
+    native_tensor = load_native_row8_tensor(data_file, int(entry["offset"]), int(entry["nbytes"]))
+    _store_row8_native_tensor_cache(cache_key, native_tensor, entry)
+    return native_tensor, entry
+
+
 def row8_tensor_cache_stats() -> dict[str, int | float]:
     return {
         "resident_count": len(_ROW8_TENSOR_CACHE),
         "resident_bytes": int(_ROW8_TENSOR_CACHE_BYTES),
         "resident_mb": round(_ROW8_TENSOR_CACHE_BYTES / (1024 * 1024), 3),
+        "native_resident_count": len(_ROW8_NATIVE_TENSOR_CACHE),
+        "native_resident_bytes": int(_ROW8_NATIVE_TENSOR_CACHE_BYTES),
+        "native_resident_mb": round(_ROW8_NATIVE_TENSOR_CACHE_BYTES / (1024 * 1024), 3),
         "budget_bytes": int(_row8_tensor_cache_budget_bytes()),
         "budget_mb": round(_row8_tensor_cache_budget_bytes() / (1024 * 1024), 3),
     }
@@ -105,9 +139,11 @@ def clear_row8_manifest_cache() -> None:
 
 
 def clear_row8_tensor_cache() -> None:
-    global _ROW8_TENSOR_CACHE_BYTES
+    global _ROW8_TENSOR_CACHE_BYTES, _ROW8_NATIVE_TENSOR_CACHE_BYTES
     _ROW8_TENSOR_CACHE.clear()
     _ROW8_TENSOR_CACHE_BYTES = 0
+    _ROW8_NATIVE_TENSOR_CACHE.clear()
+    _ROW8_NATIVE_TENSOR_CACHE_BYTES = 0
 
 
 def _row8_tensor_cache_enabled() -> bool:
@@ -141,3 +177,21 @@ def _store_row8_tensor_cache(cache_key: tuple[str, str, str], tensor: torch.Tens
     while _ROW8_TENSOR_CACHE_BYTES > budget and _ROW8_TENSOR_CACHE:
         _old_key, (_old_tensor, _old_entry, old_nbytes) = _ROW8_TENSOR_CACHE.popitem(last=False)
         _ROW8_TENSOR_CACHE_BYTES -= int(old_nbytes)
+
+
+def _store_row8_native_tensor_cache(cache_key: tuple[str, str, str], native_tensor: object, entry: dict) -> None:
+    global _ROW8_NATIVE_TENSOR_CACHE_BYTES
+    if not _row8_tensor_cache_enabled():
+        return
+    nbytes = int(getattr(native_tensor, "nbytes"))
+    budget = _row8_tensor_cache_budget_bytes()
+    if nbytes > budget:
+        return
+    existing = _ROW8_NATIVE_TENSOR_CACHE.pop(cache_key, None)
+    if existing is not None:
+        _ROW8_NATIVE_TENSOR_CACHE_BYTES -= int(existing[2])
+    _ROW8_NATIVE_TENSOR_CACHE[cache_key] = (native_tensor, dict(entry), nbytes)
+    _ROW8_NATIVE_TENSOR_CACHE_BYTES += nbytes
+    while _ROW8_NATIVE_TENSOR_CACHE_BYTES > budget and _ROW8_NATIVE_TENSOR_CACHE:
+        _old_key, (_old_tensor, _old_entry, old_nbytes) = _ROW8_NATIVE_TENSOR_CACHE.popitem(last=False)
+        _ROW8_NATIVE_TENSOR_CACHE_BYTES -= int(old_nbytes)

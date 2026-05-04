@@ -277,3 +277,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: Qwen 14B `--slice=full`, `max_new_tokens=3`, with `PCKETLM_ENABLE_NATIVE_PACKED_ARTIFACT_LAYER=1` and row8 tensor cache enabled exited with code `1` after the diagnostic `before` row.
 - Root cause: cached `torch.uint16` tensors were passed by raw ctypes pointer into the native packed layer across decode calls. The C path should be const, but this pointer reuse was not stable in the real runtime process.
 - Fix: row8 cache hits now return a fresh cloned tensor. This keeps disk reads out of the hot path and restores correctness, but it is not a speed win; native-owned artifact mapping is required next.
+
+## Phase Native Row8 Artifact Handles / low-RAM full-run exits
+- Symptom: Qwen 14B two-token rows exited after the diagnostic `before` event when free RAM was around `6.6 GB`, including with artifact routing disabled.
+- Root cause: full continuation rows peak around `10 GB` working set on this machine; the process was running too close to the RAM ceiling after repeated native probes.
+- Fix: closed non-workload `msedge` and `RobloxPlayerBeta`, raising free RAM to `8.82 GB`; baseline and native row8 handle two-token rows then completed.

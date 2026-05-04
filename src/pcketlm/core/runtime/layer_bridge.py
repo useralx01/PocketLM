@@ -1345,38 +1345,77 @@ def _try_native_dense_decode_bridge(
         }
         if packed_artifact_enabled and hasattr(session, "dense_layer_decode_packed_rows8"):
             load_packed_started = time.perf_counter()
-            from pcketlm.core.runtime.packed_artifact_loader import load_row8_packed_tensor
+            output = None
+            if hasattr(session, "dense_layer_decode_packed_rows8_ptrs"):
+                try:
+                    from pcketlm.core.runtime.packed_artifact_loader import load_row8_native_packed_tensor
 
-            q_packed, _ = load_row8_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
-            k_packed, _ = load_row8_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
-            v_packed, _ = load_row8_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
-            o_packed, _ = load_row8_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
-            gate_packed, _ = load_row8_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
-            up_packed, _ = load_row8_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
-            down_packed, _ = load_row8_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
-            timings["load_packed_artifact"] = round(
-                timings.get("load_packed_artifact", 0.0) + (time.perf_counter() - load_packed_started),
-                4,
-            )
-            output = session.dense_layer_decode_packed_rows8(
-                0,
-                hidden_flat,
-                input_norm,
-                post_norm,
-                q_packed,
-                k_packed,
-                v_packed,
-                o_packed,
-                gate_packed,
-                up_packed,
-                down_packed,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=config.num_key_value_heads,
-                head_dim=head_dim,
-                **common_kwargs,
-            )
+                    q_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
+                    k_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
+                    v_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
+                    o_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
+                    gate_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
+                    up_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
+                    down_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
+                    timings["load_packed_artifact_native"] = round(
+                        timings.get("load_packed_artifact_native", 0.0) + (time.perf_counter() - load_packed_started),
+                        4,
+                    )
+                    output = session.dense_layer_decode_packed_rows8_ptrs(
+                        0,
+                        hidden_flat,
+                        input_norm,
+                        post_norm,
+                        int(getattr(q_packed, "ptr")),
+                        int(getattr(k_packed, "ptr")),
+                        int(getattr(v_packed, "ptr")),
+                        int(getattr(o_packed, "ptr")),
+                        int(getattr(gate_packed, "ptr")),
+                        int(getattr(up_packed, "ptr")),
+                        int(getattr(down_packed, "ptr")),
+                        hidden_size=config.hidden_size,
+                        intermediate_size=config.intermediate_size,
+                        num_heads=config.num_attention_heads,
+                        num_kv_heads=config.num_key_value_heads,
+                        head_dim=head_dim,
+                        **common_kwargs,
+                    )
+                except Exception:
+                    output = None
+                    load_packed_started = time.perf_counter()
+            if output is None:
+                from pcketlm.core.runtime.packed_artifact_loader import load_row8_packed_tensor
+
+                q_packed, _ = load_row8_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
+                k_packed, _ = load_row8_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
+                v_packed, _ = load_row8_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
+                o_packed, _ = load_row8_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
+                gate_packed, _ = load_row8_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
+                up_packed, _ = load_row8_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
+                down_packed, _ = load_row8_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
+                timings["load_packed_artifact"] = round(
+                    timings.get("load_packed_artifact", 0.0) + (time.perf_counter() - load_packed_started),
+                    4,
+                )
+                output = session.dense_layer_decode_packed_rows8(
+                    0,
+                    hidden_flat,
+                    input_norm,
+                    post_norm,
+                    q_packed,
+                    k_packed,
+                    v_packed,
+                    o_packed,
+                    gate_packed,
+                    up_packed,
+                    down_packed,
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    num_heads=config.num_attention_heads,
+                    num_kv_heads=config.num_key_value_heads,
+                    head_dim=head_dim,
+                    **common_kwargs,
+                )
         elif _native_packed_gemv_layer_enabled() and hasattr(session, "dense_layer_decode_packed_rows8"):
             q_weight = tensors[f"model.layers.{layer_index}.self_attn.q_proj.weight"]
             k_weight = tensors[f"model.layers.{layer_index}.self_attn.k_proj.weight"]

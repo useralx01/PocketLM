@@ -1247,3 +1247,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - A direct cached-tensor reuse attempt failed a real Qwen 14B three-token row before the diagnostic `after` event. Since the native packed layer consumes raw ctypes pointers, the safe runtime choice is to return a fresh clone on cache hits until C owns the artifact mapping lifecycle.
 - This preserves correctness and avoids disk reads, but it is not a speed win: the safe clone of the `550502400` byte layer-0 artifact costs roughly the same as the avoided read for this small probe.
 - Next direction: move row8 artifact residency into native C/C++ as a persistent mmap or file-backed pointer table, so decode can reuse stable packed pointers without Python tensor cloning.
+
+## Phase Native Row8 Artifact Handles / pointer ownership
+- Chose native-owned heap buffers for the first row8 handle path instead of Windows file mappings. Heap buffers keep the ABI small (`load_tensor`, `data`, `nbytes`, `free`) and prove the Python-to-C pointer path before adding mmap lifecycle complexity.
+- `NativeKvSession.dense_layer_decode_packed_rows8_ptrs` reuses the existing packed dense C function. This avoids another math implementation and isolates the change to pointer ownership.
+- Real model result: correct but not faster on a layer-0-only artifact. This is expected: layer 0 pays native artifact load overhead while layers 1-47 still use the normal path. Build a larger artifact before making speed conclusions.
