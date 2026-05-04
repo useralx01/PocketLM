@@ -5381,3 +5381,10 @@ Result: 297 passed in 21.83s
 - Full suite: `python -m pytest tests/ -q` -> `345 passed in 22.06s`.
 - Verdict: keep. This is a small but real repeatable-direction improvement over the prior clean `8.9583s` row, while preserving coherent output and anti-cheat `96/96`.
 - Rejected follow-up batched Q4 packed-cache lookup: focused tests passed, but real Qwen3-30B-A3B Q4 row regressed to `8.838s` second token and `5.1809s` continuation load_tensors from `4022 MB` free. The uncommitted change was reverted; one-at-a-time cache lookup with path identity caching remains faster on this hardware.
+
+## Phase Q4 MoE Fused Expert Load / 4-token warm unlock row
+- Ran Qwen3-30B-A3B Q4 full with default guarded front-layer policy, `PCKETLM_Q4_PACKED_CACHE_MB=4096`, prompt `"The capital of France is"`, max_new_tokens `4`, from `4685 MB` free RAM.
+- Result: coherent generated text `"<think>\nThe capital"`, layers_executed `192/192`, total `68.3588s`, token rows `45.9472s`, `7.994s`, `6.8843s`, `7.504s`, peak working set `4399 MB`, free RAM after `1420 MB`.
+- Continuation timing across `144` decode layers: total `22.3821s`, stack `20.9614s`, `load_tensors=13.0318s`, `mlp=6.0108s`, native attention `0.413s`.
+- Q4 packed cache snapshot: budget `4096 MB`, resident `2416.16 MB`, resident_count `3061`, hits `1366`, misses `3061`, disk_reads `12835`, evictions `0`.
+- Verdict: warm decode now meets the `<=8s/token` target after the first token on this 4-token row. First-token/prompt prefill remains expensive, but continued generation is now in the target band.
