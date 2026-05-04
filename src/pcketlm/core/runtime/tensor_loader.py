@@ -546,6 +546,59 @@ def _q4_entry(model_id: str, tensor_name: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def load_q4_packed_tensors_by_name(
+    model_id: str,
+    tensor_names: list[str],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor, list[int]]]:
+    """Load packed Q4 tensors without dequantizing them."""
+    if not _q4_source_enabled(model_id):
+        return {}
+    root = _q4_artifact_root(model_id)
+    entries_by_name = load_tensor_entry_index(model_id)
+    groups: dict[tuple[Path, Path], list[TensorCatalogEntry]] = {}
+    for tensor_name in dict.fromkeys(tensor_names):
+        entry = entries_by_name.get(tensor_name)
+        payload = _q4_entry(model_id, tensor_name)
+        if entry is None or payload is None:
+            continue
+        groups.setdefault(
+            (root / str(payload.get("q4_shard")), root / str(payload.get("scale_shard"))),
+            [],
+        ).append(entry)
+
+    results: dict[str, tuple[torch.Tensor, torch.Tensor, list[int]]] = {}
+    for (q4_path, scale_path), entries in groups.items():
+        with ExitStack() as stack:
+            handles: dict[str, object] = {}
+
+            def load_packed(entry: TensorCatalogEntry) -> tuple[torch.Tensor, torch.Tensor]:
+                if "q4" not in handles:
+                    handles["q4"] = stack.enter_context(safe_open(q4_path, framework="pt", device="cpu"))
+                    handles["scale"] = stack.enter_context(safe_open(scale_path, framework="pt", device="cpu"))
+                    _update_load_stats(shard_opens=2)
+                return (
+                    handles["q4"].get_tensor(entry.tensor_name),
+                    handles["scale"].get_tensor(entry.tensor_name),
+                )
+
+            for entry in entries:
+                payload = _q4_entry(model_id, entry.tensor_name)
+                if payload is None:
+                    continue
+                from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
+
+                packed, scales = q4_packed_cache_get_or_load(
+                    model_id,
+                    entry,
+                    q4_path,
+                    scale_path,
+                    lambda entry=entry: load_packed(entry),
+                )
+                shape = [int(value) for value in payload.get("shape", entry.shape)]
+                results[entry.tensor_name] = (packed, scales, shape)
+    return results
+
+
 def _load_q4_tensor_from_source(
     model_id: str,
     entry: TensorCatalogEntry,

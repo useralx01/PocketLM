@@ -1,8 +1,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <immintrin.h>
 #include <intrin.h>
+#include <new>
 #include <omp.h>
 
 static float fp16_to_float(uint16_t h) {
@@ -280,5 +282,186 @@ extern "C" __declspec(dllexport) int q4_dequant_many_to_fp16(
             }
         }
     }
+    return 0;
+}
+
+static inline float q4_dot_row_scalar(
+    const uint8_t* packed,
+    const uint16_t* scales,
+    int64_t row,
+    int64_t row_size,
+    const float* input
+) {
+    const float scale = fp16_to_float(scales[row]);
+    const int64_t row_offset = row * row_size;
+    float sum = 0.0f;
+    for (int64_t i = 0; i < row_size; ++i) {
+        const int64_t value_index = row_offset + i;
+        sum += static_cast<float>(unpack_int4_scalar(packed, value_index)) * scale * input[i];
+    }
+    return sum;
+}
+
+static inline float hsum256_ps(__m256 value) {
+    __m128 low = _mm256_castps256_ps128(value);
+    __m128 high = _mm256_extractf128_ps(value, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
+static inline float q4_dot_row_avx2(
+    const uint8_t* packed,
+    const uint16_t* scales,
+    int64_t row,
+    int64_t row_size,
+    const float* input
+) {
+    const float scale_f = fp16_to_float(scales[row]);
+    const __m256 scale = _mm256_set1_ps(scale_f);
+    const int64_t row_offset = row * row_size;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int64_t i = 0;
+    for (; i + 15 < row_size; i += 16) {
+        const int64_t value_index = row_offset + i;
+        const __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(packed + value_index / 2));
+        const __m128i mask = _mm_set1_epi8(0x0F);
+        const __m128i bias = _mm_set1_epi8(0x08);
+        const __m128i low_unsigned = _mm_and_si128(bytes, mask);
+        const __m128i high_unsigned = _mm_and_si128(_mm_srli_epi16(bytes, 4), mask);
+        const __m128i low_signed = _mm_sub_epi8(_mm_xor_si128(low_unsigned, bias), bias);
+        const __m128i high_signed = _mm_sub_epi8(_mm_xor_si128(high_unsigned, bias), bias);
+
+        const __m256 low_f = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(low_signed)), scale);
+        const __m256 high_f = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(high_signed)), scale);
+        const __m256 interleaved_lo = _mm256_unpacklo_ps(low_f, high_f);
+        const __m256 interleaved_hi = _mm256_unpackhi_ps(low_f, high_f);
+        const __m256 q0 = _mm256_permute2f128_ps(interleaved_lo, interleaved_hi, 0x20);
+        const __m256 q1 = _mm256_permute2f128_ps(interleaved_lo, interleaved_hi, 0x31);
+
+        const __m256 in0 = _mm256_loadu_ps(input + i);
+        const __m256 in1 = _mm256_loadu_ps(input + i + 8);
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(q0, in0));
+        acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(q1, in1));
+    }
+    float sum = hsum256_ps(_mm256_add_ps(acc0, acc1));
+    for (; i < row_size; ++i) {
+        const int64_t value_index = row_offset + i;
+        sum += static_cast<float>(unpack_int4_scalar(packed, value_index)) * scale_f * input[i];
+    }
+    return sum;
+}
+
+extern "C" __declspec(dllexport) int q4_moe_selected_forward_u16(
+    const uint16_t* hidden,
+    const uint8_t** gate_packed_ptrs,
+    const uint16_t** gate_scale_ptrs,
+    const uint8_t** up_packed_ptrs,
+    const uint16_t** up_scale_ptrs,
+    const uint8_t** down_packed_ptrs,
+    const uint16_t** down_scale_ptrs,
+    const float* route_weights,
+    uint16_t* out_fp16,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t selected_count
+) {
+    if (
+        hidden == nullptr || gate_packed_ptrs == nullptr || gate_scale_ptrs == nullptr ||
+        up_packed_ptrs == nullptr || up_scale_ptrs == nullptr ||
+        down_packed_ptrs == nullptr || down_scale_ptrs == nullptr ||
+        route_weights == nullptr || out_fp16 == nullptr ||
+        hidden_size <= 0 || intermediate_size <= 0 || selected_count <= 0
+    ) {
+        return 1;
+    }
+
+    const char* thread_env = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (thread_env != nullptr) {
+        const int requested = std::atoi(thread_env);
+        if (requested > 0) {
+            omp_set_num_threads(requested);
+        }
+    }
+    const bool use_avx2 = cpu_has_avx2_f16c();
+
+    float* hidden_f = new (std::nothrow) float[hidden_size];
+    float* combined = new (std::nothrow) float[hidden_size];
+    float* gate_values = new (std::nothrow) float[intermediate_size];
+    float* up_values = new (std::nothrow) float[intermediate_size];
+    float* expert_hidden = new (std::nothrow) float[intermediate_size];
+    if (
+        hidden_f == nullptr || combined == nullptr || gate_values == nullptr ||
+        up_values == nullptr || expert_hidden == nullptr
+    ) {
+        delete[] hidden_f;
+        delete[] combined;
+        delete[] gate_values;
+        delete[] up_values;
+        delete[] expert_hidden;
+        return 2;
+    }
+
+    for (int64_t i = 0; i < hidden_size; ++i) {
+        hidden_f[i] = fp16_to_float(hidden[i]);
+        combined[i] = 0.0f;
+    }
+
+    for (int64_t expert = 0; expert < selected_count; ++expert) {
+        const uint8_t* gate_packed = gate_packed_ptrs[expert];
+        const uint16_t* gate_scales = gate_scale_ptrs[expert];
+        const uint8_t* up_packed = up_packed_ptrs[expert];
+        const uint16_t* up_scales = up_scale_ptrs[expert];
+        const uint8_t* down_packed = down_packed_ptrs[expert];
+        const uint16_t* down_scales = down_scale_ptrs[expert];
+        if (
+            gate_packed == nullptr || gate_scales == nullptr || up_packed == nullptr ||
+            up_scales == nullptr || down_packed == nullptr || down_scales == nullptr
+        ) {
+            delete[] hidden_f;
+            delete[] combined;
+            delete[] gate_values;
+            delete[] up_values;
+            delete[] expert_hidden;
+            return 3;
+        }
+
+#pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < intermediate_size; ++row) {
+            gate_values[row] = use_avx2
+                ? q4_dot_row_avx2(gate_packed, gate_scales, row, hidden_size, hidden_f)
+                : q4_dot_row_scalar(gate_packed, gate_scales, row, hidden_size, hidden_f);
+            up_values[row] = use_avx2
+                ? q4_dot_row_avx2(up_packed, up_scales, row, hidden_size, hidden_f)
+                : q4_dot_row_scalar(up_packed, up_scales, row, hidden_size, hidden_f);
+        }
+
+        for (int64_t row = 0; row < intermediate_size; ++row) {
+            const float gate = gate_values[row];
+            const float silu = gate / (1.0f + std::exp(-gate));
+            expert_hidden[row] = silu * up_values[row];
+        }
+
+        const float route = route_weights[expert];
+#pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < hidden_size; ++row) {
+            const float down = use_avx2
+                ? q4_dot_row_avx2(down_packed, down_scales, row, intermediate_size, expert_hidden)
+                : q4_dot_row_scalar(down_packed, down_scales, row, intermediate_size, expert_hidden);
+            combined[row] += route * down;
+        }
+    }
+
+    for (int64_t i = 0; i < hidden_size; ++i) {
+        out_fp16[i] = float_to_fp16(combined[i]);
+    }
+
+    delete[] hidden_f;
+    delete[] combined;
+    delete[] gate_values;
+    delete[] up_values;
+    delete[] expert_hidden;
     return 0;
 }

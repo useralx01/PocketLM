@@ -5328,3 +5328,16 @@ Result: 297 passed in 21.83s
 - Thread probe with `PCKETLM_NATIVE_THREADS=4`: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `103.5251s`, token rows `67.5245s`, `18.2083s`, `17.7610s`, continuation_stack_op_load_tensors `30.6497s`, prefill_stack_op_load_tensors `48.5498s`.
 - Verdict: batch dequant is a real speed win and should stay default. Four native threads improves warm decode but hurts prefill/total; keep thread count as an environment profiling knob rather than changing the default.
 - Full suite: `python -m pytest tests/ -q` -> `341 passed in 22.52s`.
+
+## Phase Q4 MoE Fused Expert Load / direct packed-Q4 selected experts
+- Change: added native `q4_moe_selected_forward_u16` and a tensor-loader API for loading selected expert Q4 packed bytes without first dequantizing full fp16 expert tensors. The native-attention decode branch now calls this direct Q4 selected-MoE path for Q4 single-token decode.
+- Guardrail: `PCKETLM_DISABLE_NATIVE_Q4_MOE=1` disables this path. `PCKETLM_ENABLE_NATIVE_Q4_MOE` defaults to enabled for Q4 decode after the measured win below.
+- Correctness test: `python -m pytest tests\test_q4_quantizer.py::test_native_q4_selected_moe_matches_dequantized_path -q` -> `1 passed in 1.51s`.
+- Focused regression set: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_layer_bridge.py -q` -> `54 passed in 2.61s`.
+- Real Qwen3-30B-A3B Q4 row before wiring the native-attention branch: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `74.7304s`, token rows `56.9689s`, `17.7421s`, continuation_stack_op_load_tensors `15.0003s`, continuation_stack_op_mlp `1.3197s`, no native-Q4-MoE success counter present.
+- Real Qwen3-30B-A3B Q4 row after direct packed-Q4 selected experts: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `60.7209s`, token rows `51.6033s`, `9.1017s`, continuation_stack_op_load_tensors `4.7030s`, continuation_stack_op_mlp `3.3122s`, continuation_stack_op_mlp_native_q4_success_count `48.0`, peak working set `3097 MB`, free RAM after `3153 MB`.
+- Comparison: second-token wall `17.7421s` -> `9.1017s`; total `74.7304s` -> `60.7209s`; Q4 tensor loads `11647` -> `10495`; Q4 loaded bytes `9064.61 MB` -> `8200.61 MB`.
+- Rechecked opt-in Q4 attention residency with the direct expert path: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `62.0530s`, second token `9.6837s`, peak working set `4736 MB`; still rejected as a default because it is slower and uses more memory than the direct-Q4 default.
+- AVX2 Q4 dot probe for the selected expert kernel stayed correct but did not materially improve the real row under low free RAM: coherent generated text `"<think>\n"`, total `70.1478s`, second token `10.4585s`, continuation_stack_op_mlp `3.2641s`. The useful win remains bypassing fp16 expert materialization, not the current AVX dot micro-loop.
+- Focused tests after all changes: `python -m pytest tests\test_q4_quantizer.py tests\test_runtime_layer_bridge.py tests\test_runtime_tensor_loader.py tests\test_tensor_residency.py -q` -> `113 passed in 4.20s`.
+- Full suite: `python -m pytest tests/ -q` -> `342 passed in 21.32s`.

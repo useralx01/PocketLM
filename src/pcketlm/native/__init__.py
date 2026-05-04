@@ -114,6 +114,22 @@ def _load_q4_lib() -> ctypes.CDLL | None:
                 ctypes.c_longlong,
             ]
             lib.q4_dequant_many_to_fp16.restype = ctypes.c_int
+        if hasattr(lib, "q4_moe_selected_forward_u16"):
+            lib.q4_moe_selected_forward_u16.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.q4_moe_selected_forward_u16.restype = ctypes.c_int
         lib.q4_cpu_has_avx2_f16c.argtypes = []
         lib.q4_cpu_has_avx2_f16c.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
@@ -1721,3 +1737,69 @@ def q4_dequant_many_to_fp16(
     if code != 0:
         raise RuntimeError(f"Native Q4 batch dequant failed with code {code}")
     return outputs
+
+
+def q4_moe_selected_forward_u16(
+    hidden: torch.Tensor,
+    experts: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    route_weights: torch.Tensor,
+    *,
+    hidden_size: int,
+    intermediate_size: int,
+) -> torch.Tensor:
+    lib = _load_q4_lib()
+    if lib is None or not hasattr(lib, "q4_moe_selected_forward_u16"):
+        reason = "disabled" if _native_disabled() else _Q4_LOAD_ERROR
+        raise RuntimeError(f"Native Q4 MoE selected forward is unavailable: {reason}")
+    if not experts:
+        raise ValueError("experts must not be empty")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1).to(torch.float16)
+    if hidden_cpu.numel() != int(hidden_size):
+        raise ValueError("hidden size mismatch")
+    route_cpu = route_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if route_cpu.numel() != len(experts):
+        raise ValueError("route weight count must match selected experts")
+
+    selected_count = len(experts)
+    gate_packed_ptrs = (ctypes.c_void_p * selected_count)()
+    gate_scale_ptrs = (ctypes.c_void_p * selected_count)()
+    up_packed_ptrs = (ctypes.c_void_p * selected_count)()
+    up_scale_ptrs = (ctypes.c_void_p * selected_count)()
+    down_packed_ptrs = (ctypes.c_void_p * selected_count)()
+    down_scale_ptrs = (ctypes.c_void_p * selected_count)()
+    keepalive: list[torch.Tensor] = [hidden_cpu, route_cpu]
+    for index, (gate_packed, gate_scales, up_packed, up_scales, down_packed, down_scales) in enumerate(experts):
+        tensors = [
+            gate_packed.detach().cpu().contiguous().to(torch.uint8),
+            gate_scales.detach().cpu().contiguous().to(torch.float16),
+            up_packed.detach().cpu().contiguous().to(torch.uint8),
+            up_scales.detach().cpu().contiguous().to(torch.float16),
+            down_packed.detach().cpu().contiguous().to(torch.uint8),
+            down_scales.detach().cpu().contiguous().to(torch.float16),
+        ]
+        keepalive.extend(tensors)
+        gate_packed_ptrs[index] = ctypes.c_void_p(int(tensors[0].data_ptr()))
+        gate_scale_ptrs[index] = ctypes.c_void_p(int(tensors[1].data_ptr()))
+        up_packed_ptrs[index] = ctypes.c_void_p(int(tensors[2].data_ptr()))
+        up_scale_ptrs[index] = ctypes.c_void_p(int(tensors[3].data_ptr()))
+        down_packed_ptrs[index] = ctypes.c_void_p(int(tensors[4].data_ptr()))
+        down_scale_ptrs[index] = ctypes.c_void_p(int(tensors[5].data_ptr()))
+
+    out = torch.empty((int(hidden_size),), dtype=torch.float16)
+    code = lib.q4_moe_selected_forward_u16(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        gate_packed_ptrs,
+        gate_scale_ptrs,
+        up_packed_ptrs,
+        up_scale_ptrs,
+        down_packed_ptrs,
+        down_scale_ptrs,
+        ctypes.c_void_p(int(route_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(hidden_size)),
+        ctypes.c_longlong(int(intermediate_size)),
+        ctypes.c_longlong(selected_count),
+    )
+    if code != 0:
+        raise RuntimeError(f"Native Q4 MoE selected forward failed with code {code}")
+    return out

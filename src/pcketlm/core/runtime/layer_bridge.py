@@ -18,7 +18,11 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from pcketlm.core.runtime.tensor_loader import open_scoped_tensor_handle, scoped_tensor_handle_cache
+from pcketlm.core.runtime.tensor_loader import (
+    load_q4_packed_tensors_by_name,
+    open_scoped_tensor_handle,
+    scoped_tensor_handle_cache,
+)
 from pcketlm.core.runtime.tensor_residency import (
     TensorResidencyPolicy,
     expert_residency_snapshot,
@@ -1034,6 +1038,17 @@ def _native_moe_selected_enabled_for_current_source() -> bool:
     if os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4":
         return True
     return os.environ.get("PCKETLM_ENABLE_NATIVE_MOE_FOR_Q4", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _native_q4_moe_selected_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_Q4_MOE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_Q4_MOE", "1").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2270,11 +2285,14 @@ def run_minimal_layer_forward_bridge(
             )
         with torch.no_grad():
             router_probs = torch.softmax(F.linear(normed_post_attention.float(), router_weight.float()), dim=-1)
-            selected_experts = torch.topk(
+            routing_weights, selected_experts = torch.topk(
                 router_probs,
                 max(1, min(config.num_experts_per_tok, config.num_experts)),
                 dim=-1,
-            ).indices
+            )
+            if config.norm_topk_prob:
+                routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            selected_expert_order = [int(value) for value in selected_experts.detach().cpu().flatten().tolist()]
             selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
         expert_tensor_names: list[str] = []
         expert_name_maps: dict[int, dict[str, str]] = {}
@@ -2288,51 +2306,107 @@ def run_minimal_layer_forward_bridge(
             and sequence_length == 1
             and (past_key_value is not None or native_kv_session is not None)
         )
-        with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
-            with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
-                with q4_dequant_expert_residency_scope(
-                    enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
-                ):
-                    loaded_experts = load_required_many(expert_tensor_names)
-        expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
-        for expert_index in selected_expert_ids:
-            expert_name_map = expert_name_maps[expert_index]
-            gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
-            up_weight = loaded_experts.get(expert_name_map["up_proj"])
-            down_weight = loaded_experts.get(expert_name_map["down_proj"])
-            if gate_weight is None or up_weight is None or down_weight is None:
-                blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
-                continue
-            expert_tensors[expert_index] = {
-                "gate_proj": gate_weight,
-                "up_proj": up_weight,
-                "down_proj": down_weight,
-            }
-        if blockers or not expert_tensors:
-            return LayerBridgeResult(
-                model_id=model_id,
-                layer_index=layer_index,
-                input_mode=input_mode,
-                input_shape=[int(value) for value in hidden_states.shape],
-                output_shape=[],
-                output_dtype="unknown",
-                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
-                blockers=blockers,
-                attention_head_dim=head_dim,
-                cache_sequence_length=cache_sequence_length,
-                ready=False,
-                timings=timings,
+        native_q4_mlp_done = False
+        if (
+            decode_expert_cache
+            and os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() == "q4"
+            and _native_q4_moe_selected_enabled()
+            and list(normed_post_attention.shape[:2]) == [1, 1]
+        ):
+            phase_started = time.perf_counter()
+            try:
+                from pcketlm.native import q4_moe_selected_forward_u16
+
+                ordered_names: list[str] = []
+                for expert_index in selected_expert_order:
+                    expert_name_map = expert_name_maps[expert_index]
+                    ordered_names.extend(
+                        [
+                            expert_name_map["gate_proj"],
+                            expert_name_map["up_proj"],
+                            expert_name_map["down_proj"],
+                        ]
+                    )
+                with q4_packed_expert_cache_scope(enabled=True):
+                    packed_by_name = load_q4_packed_tensors_by_name(model_id, ordered_names)
+                native_experts = []
+                for expert_index in selected_expert_order:
+                    expert_name_map = expert_name_maps[expert_index]
+                    gate_payload = packed_by_name[expert_name_map["gate_proj"]]
+                    up_payload = packed_by_name[expert_name_map["up_proj"]]
+                    down_payload = packed_by_name[expert_name_map["down_proj"]]
+                    native_experts.append(
+                        (
+                            gate_payload[0],
+                            gate_payload[1],
+                            up_payload[0],
+                            up_payload[1],
+                            down_payload[0],
+                            down_payload[1],
+                        )
+                    )
+                native_out = q4_moe_selected_forward_u16(
+                    normed_post_attention.reshape(1, -1).to(dtype=torch.float16),
+                    native_experts,
+                    routing_weights.reshape(-1).float(),
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.moe_intermediate_size,
+                )
+                mlp_output = native_out.view_as(normed_post_attention).to(dtype=normed_post_attention.dtype)
+                native_q4_mlp_done = True
+                timings["mlp_native_q4_success_count"] = timings.get("mlp_native_q4_success_count", 0.0) + 1.0
+                record_phase("mlp", phase_started)
+            except Exception:
+                timings["mlp_native_q4_fallback_count"] = timings.get("mlp_native_q4_fallback_count", 0.0) + 1.0
+                record_phase("mlp_native_q4_fallback", phase_started)
+        if native_q4_mlp_done:
+            del router_weight, normed_post_attention
+        else:
+            with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
+                with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
+                    with q4_dequant_expert_residency_scope(
+                        enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
+                    ):
+                        loaded_experts = load_required_many(expert_tensor_names)
+            expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
+            for expert_index in selected_expert_ids:
+                expert_name_map = expert_name_maps[expert_index]
+                gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
+                up_weight = loaded_experts.get(expert_name_map["up_proj"])
+                down_weight = loaded_experts.get(expert_name_map["down_proj"])
+                if gate_weight is None or up_weight is None or down_weight is None:
+                    blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
+                    continue
+                expert_tensors[expert_index] = {
+                    "gate_proj": gate_weight,
+                    "up_proj": up_weight,
+                    "down_proj": down_weight,
+                }
+            if blockers or not expert_tensors:
+                return LayerBridgeResult(
+                    model_id=model_id,
+                    layer_index=layer_index,
+                    input_mode=input_mode,
+                    input_shape=[int(value) for value in hidden_states.shape],
+                    output_shape=[],
+                    output_dtype="unknown",
+                    loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                    blockers=blockers,
+                    attention_head_dim=head_dim,
+                    cache_sequence_length=cache_sequence_length,
+                    ready=False,
+                    timings=timings,
+                )
+            phase_started = time.perf_counter()
+            mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
+                hidden_states=normed_post_attention,
+                router_weight=router_weight,
+                expert_tensors=expert_tensors,
+                top_k=config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob,
             )
-        phase_started = time.perf_counter()
-        mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
-            hidden_states=normed_post_attention,
-            router_weight=router_weight,
-            expert_tensors=expert_tensors,
-            top_k=config.num_experts_per_tok,
-            norm_topk_prob=config.norm_topk_prob,
-        )
-        record_phase("mlp", phase_started)
-        del router_weight, loaded_experts, expert_tensors, normed_post_attention
+            record_phase("mlp", phase_started)
+            del router_weight, loaded_experts, expert_tensors, normed_post_attention
         layer_output = residual_after_attention + mlp_output
         del residual_after_attention, mlp_output
         output_mean_abs = float(layer_output.abs().mean().item()) if collect_metrics else 0.0
@@ -2588,7 +2662,14 @@ def run_minimal_layer_forward_bridge(
             )
         with torch.no_grad():
             router_probs = torch.softmax(F.linear(normed_post_attention.float(), router_weight.float()), dim=-1)
-            selected_experts = torch.topk(router_probs, max(1, min(config.num_experts_per_tok, config.num_experts)), dim=-1).indices
+            routing_weights, selected_experts = torch.topk(
+                router_probs,
+                max(1, min(config.num_experts_per_tok, config.num_experts)),
+                dim=-1,
+            )
+            if config.norm_topk_prob:
+                routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            selected_expert_order = [int(value) for value in selected_experts.detach().cpu().flatten().tolist()]
             selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
         expert_tensor_names: list[str] = []
         expert_name_maps: dict[int, dict[str, str]] = {}
@@ -2600,53 +2681,109 @@ def run_minimal_layer_forward_bridge(
         decode_expert_cache = bool(
             return_kv_cache
             and sequence_length == 1
-            and past_length > 0
+            and (past_key_value is not None or native_kv_session is not None)
         )
-        with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
-            with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
-                with q4_dequant_expert_residency_scope(
-                    enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
-                ):
-                    loaded_experts = load_required_many(expert_tensor_names)
-        expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
-        for expert_index in selected_expert_ids:
-            expert_name_map = expert_name_maps[expert_index]
-            gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
-            up_weight = loaded_experts.get(expert_name_map["up_proj"])
-            down_weight = loaded_experts.get(expert_name_map["down_proj"])
-            if gate_weight is None or up_weight is None or down_weight is None:
-                blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
-                continue
-            expert_tensors[expert_index] = {
-                "gate_proj": gate_weight,
-                "up_proj": up_weight,
-                "down_proj": down_weight,
-            }
-        if blockers or not expert_tensors:
-            return LayerBridgeResult(
-                model_id=model_id,
-                layer_index=layer_index,
-                input_mode=input_mode,
-                input_shape=[int(value) for value in hidden_states.shape],
-                output_shape=[],
-                output_dtype="unknown",
-                loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
-                blockers=blockers,
-                attention_head_dim=head_dim,
-                cache_sequence_length=cache_sequence_length,
-                ready=False,
-                timings=timings,
+        native_q4_mlp_done = False
+        if (
+            decode_expert_cache
+            and os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() == "q4"
+            and _native_q4_moe_selected_enabled()
+            and list(normed_post_attention.shape[:2]) == [1, 1]
+        ):
+            phase_started = time.perf_counter()
+            try:
+                from pcketlm.native import q4_moe_selected_forward_u16
+
+                ordered_names: list[str] = []
+                for expert_index in selected_expert_order:
+                    expert_name_map = expert_name_maps[expert_index]
+                    ordered_names.extend(
+                        [
+                            expert_name_map["gate_proj"],
+                            expert_name_map["up_proj"],
+                            expert_name_map["down_proj"],
+                        ]
+                    )
+                with q4_packed_expert_cache_scope(enabled=True):
+                    packed_by_name = load_q4_packed_tensors_by_name(model_id, ordered_names)
+                native_experts = []
+                for expert_index in selected_expert_order:
+                    expert_name_map = expert_name_maps[expert_index]
+                    gate_payload = packed_by_name[expert_name_map["gate_proj"]]
+                    up_payload = packed_by_name[expert_name_map["up_proj"]]
+                    down_payload = packed_by_name[expert_name_map["down_proj"]]
+                    native_experts.append(
+                        (
+                            gate_payload[0],
+                            gate_payload[1],
+                            up_payload[0],
+                            up_payload[1],
+                            down_payload[0],
+                            down_payload[1],
+                        )
+                    )
+                native_out = q4_moe_selected_forward_u16(
+                    normed_post_attention.reshape(1, -1).to(dtype=torch.float16),
+                    native_experts,
+                    routing_weights.reshape(-1).float(),
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.moe_intermediate_size,
+                )
+                mlp_output = native_out.view_as(normed_post_attention).to(dtype=normed_post_attention.dtype)
+                native_q4_mlp_done = True
+                timings["mlp_native_q4_success_count"] = timings.get("mlp_native_q4_success_count", 0.0) + 1.0
+                record_phase("mlp", phase_started)
+            except Exception:
+                timings["mlp_native_q4_fallback_count"] = timings.get("mlp_native_q4_fallback_count", 0.0) + 1.0
+                record_phase("mlp_native_q4_fallback", phase_started)
+        if native_q4_mlp_done:
+            del router_weight, normed_post_attention
+        else:
+            with fp16_packed_expert_cache_scope(enabled=decode_expert_cache and _fp16_decode_expert_packed_cache_enabled()):
+                with q4_packed_expert_cache_scope(enabled=decode_expert_cache):
+                    with q4_dequant_expert_residency_scope(
+                        enabled=decode_expert_cache and _q4_decode_dequant_expert_residency_enabled()
+                    ):
+                        loaded_experts = load_required_many(expert_tensor_names)
+            expert_tensors: dict[int, dict[str, torch.Tensor]] = {}
+            for expert_index in selected_expert_ids:
+                expert_name_map = expert_name_maps[expert_index]
+                gate_weight = loaded_experts.get(expert_name_map["gate_proj"])
+                up_weight = loaded_experts.get(expert_name_map["up_proj"])
+                down_weight = loaded_experts.get(expert_name_map["down_proj"])
+                if gate_weight is None or up_weight is None or down_weight is None:
+                    blockers.append(f"Expert {expert_index} in layer {layer_index} did not load all required tensors.")
+                    continue
+                expert_tensors[expert_index] = {
+                    "gate_proj": gate_weight,
+                    "up_proj": up_weight,
+                    "down_proj": down_weight,
+                }
+            if blockers or not expert_tensors:
+                return LayerBridgeResult(
+                    model_id=model_id,
+                    layer_index=layer_index,
+                    input_mode=input_mode,
+                    input_shape=[int(value) for value in hidden_states.shape],
+                    output_shape=[],
+                    output_dtype="unknown",
+                    loaded_unit_ids=[layer_norm_unit_id, attention_unit_id, mlp_unit_id],
+                    blockers=blockers,
+                    attention_head_dim=head_dim,
+                    cache_sequence_length=cache_sequence_length,
+                    ready=False,
+                    timings=timings,
+                )
+            phase_started = time.perf_counter()
+            mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
+                hidden_states=normed_post_attention,
+                router_weight=router_weight,
+                expert_tensors=expert_tensors,
+                top_k=config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob,
             )
-        phase_started = time.perf_counter()
-        mlp_output, _touched_experts, _selected_experts = _run_moe_mlp(
-            hidden_states=normed_post_attention,
-            router_weight=router_weight,
-            expert_tensors=expert_tensors,
-            top_k=config.num_experts_per_tok,
-            norm_topk_prob=config.norm_topk_prob,
-        )
-        record_phase("mlp", phase_started)
-        del router_weight, loaded_experts, expert_tensors, normed_post_attention
+            record_phase("mlp", phase_started)
+            del router_weight, loaded_experts, expert_tensors, normed_post_attention
     else:
         mlp_tensor_names = [
             f"model.layers.{layer_index}.mlp.gate_proj.weight",

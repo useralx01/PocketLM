@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
 
 from pcketlm.core.runtime.tensor_execution_plan import build_tensor_execution_plan
@@ -45,6 +46,49 @@ def test_q4_round_trip_grid_tensor_has_low_relative_error() -> None:
     rel = ((restored.float() - tensor.float()).abs() / tensor.float().abs().clamp_min(1e-6)).max().item()
 
     assert rel < 0.02
+
+
+def test_native_q4_selected_moe_matches_dequantized_path() -> None:
+    from pcketlm.native import q4_moe_selected_forward_u16
+
+    torch.manual_seed(123)
+    hidden_size = 16
+    intermediate_size = 12
+    selected_count = 2
+    hidden = torch.randn((1, hidden_size), dtype=torch.float16)
+    route_weights = torch.tensor([0.7, 0.3], dtype=torch.float32)
+    native_experts = []
+    python_experts = []
+    for _index in range(selected_count):
+        gate = torch.randn((intermediate_size, hidden_size), dtype=torch.float16)
+        up = torch.randn((intermediate_size, hidden_size), dtype=torch.float16)
+        down = torch.randn((hidden_size, intermediate_size), dtype=torch.float16)
+        gate_packed, gate_scales, gate_meta = quantize_tensor_to_q4(gate)
+        up_packed, up_scales, up_meta = quantize_tensor_to_q4(up)
+        down_packed, down_scales, down_meta = quantize_tensor_to_q4(down)
+        native_experts.append((gate_packed, gate_scales, up_packed, up_scales, down_packed, down_scales))
+        python_experts.append(
+            (
+                dequantize_q4_tensor(gate_packed, gate_scales, gate_meta["shape"], dtype=torch.float16),
+                dequantize_q4_tensor(up_packed, up_scales, up_meta["shape"], dtype=torch.float16),
+                dequantize_q4_tensor(down_packed, down_scales, down_meta["shape"], dtype=torch.float16),
+            )
+        )
+
+    expected = torch.zeros((1, hidden_size), dtype=torch.float32)
+    for expert_index, (gate, up, down) in enumerate(python_experts):
+        expert_hidden = F.silu(F.linear(hidden.float(), gate.float())) * F.linear(hidden.float(), up.float())
+        expected = expected + F.linear(expert_hidden, down.float()) * route_weights[expert_index]
+
+    actual = q4_moe_selected_forward_u16(
+        hidden,
+        native_experts,
+        route_weights,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+
+    assert torch.allclose(actual.float(), expected.to(torch.float16).float(), atol=1e-2, rtol=1e-2)
 
 
 def test_q4_artifact_size_is_about_quarter_fp16(tmp_path: Path) -> None:
