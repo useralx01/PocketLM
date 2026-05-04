@@ -5474,3 +5474,9 @@ Result: 297 passed in 21.83s
 - Real Qwen3-30B-A3B Q4 same-session row, no explicit cache env except `PCKETLM_TENSOR_SOURCE=q4`: first turn generated `" Paris"` in `19.955s`; second turn generated `" the"` in `7.484s`, prefix reuse matched `5` tokens and appended `6`, `q4_prefix_scoped_handles=true`, tensor load second `0.223s`, stack second `7.132s`, free RAM after second `3874 MB`.
 - Full suite: `python -m pytest tests/ -q` -> `355 passed in 9.94s`.
 - Verdict: accepted as a real follow-up speed win over the locked `8.840s` row. It still does not solve first-token/prompt cost, but it moves same-session Q4 MoE follow-up latency below `8s` without a RAM spike.
+
+## Phase Q4 MoE Expert Kernel / rejected follow-up probes
+- Direct bridge timing after scoped handles: first turn generated `" Paris"` in `18.7796s`; second turn generated `" the"` in `7.8655s`. Second-turn timing was dominated by `prefix_append_stack_op_mlp=4.8555s`, split into `mlp_q4_native_compute=2.9995s` and `mlp_q4_packed_load=1.8533s`; `prefill_decode_tail=0.5395s`.
+- Rechecked generated-token prefix commit under the scoped-handle path. It reused `6` prompt tokens instead of `5`, but second turn regressed to `9.679s`, generated `" its"` instead of `" the"`, and working set rose to `4149 MB`. Verdict: keep `PCKETLM_WARM_RUNNER_COMMIT_GENERATED_PREFIX=1` as diagnostic only.
+- Rebuilt and tested a one-call native Q4 selected-expert batch entry point that matched row-by-row native output in focused tests, then measured it on the real same-session Qwen3 Q4 path. It regressed the second turn to `10.371s`, so the C++/Python changes and rebuilt DLLs were reverted.
+- Focused post-revert tests: `python -m pytest tests/test_q4_quantizer.py::test_native_q4_selected_moe_matches_dequantized_path tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts -q` -> `2 passed in 3.94s`.
