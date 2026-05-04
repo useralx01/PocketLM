@@ -120,3 +120,4 @@
 - Replace Python Q4 dequant in the paged runtime with native/fused dequant or a larger persistent dequantized fp16 window; current Qwen 32B Q4 artifacts are correct and coherent but slower than fp16.
 - Replace the first scalar ctypes Q4 dequant kernel with SIMD/threaded fused unpack+dequant or a grouped packed executor; scalar native dequant is correct but slower than PyTorch vectorized dequant on Qwen 32B.
 - Move Q4 speed work from raw dequant into grouped bridge/residency loading. SIMD dequant is fast now, but full Qwen 32B still spends `56.8791s` in layer-loop tensor loading where a standalone grouped Q4 pass takes `12.629s`.
+- Add a fused/native multi-token Q4 MoE expert/layer compute path for appended prompt tokens. The latest warm-runner Q4 MoE row has tensor load down to `0.234s`, so the remaining `8.304s` second-turn wall is layer/expert math, not disk loading.

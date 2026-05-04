@@ -4223,6 +4223,7 @@ def run_prompt_decode_loop(
     should_cancel: Callable[[], bool] | None = None,
     initial_decode_state: KVDecodeState | None = None,
     initial_token_ids: list[int] | None = None,
+    commit_generated_prefix: bool = False,
 ) -> PromptDecodeLoopResult:
     """Run one prompt generation with request-scoped safetensors handle reuse."""
     kwargs = {
@@ -4245,6 +4246,7 @@ def run_prompt_decode_loop(
         "should_cancel": should_cancel,
         "initial_decode_state": initial_decode_state,
         "initial_token_ids": initial_token_ids,
+        "commit_generated_prefix": commit_generated_prefix,
     }
     effective_steps = steps if max_new_tokens is None else max_new_tokens
     use_scoped_handles = _use_scoped_safetensor_handles(model_id, effective_steps)
@@ -4295,6 +4297,7 @@ def _run_prompt_decode_loop(
     should_cancel: Callable[[], bool] | None = None,
     initial_decode_state: KVDecodeState | None = None,
     initial_token_ids: list[int] | None = None,
+    commit_generated_prefix: bool = False,
 ) -> PromptDecodeLoopResult:
     """Run the first real text-prompt entry path on top of the K/V decode session."""
     total_started = time.perf_counter()
@@ -4755,6 +4758,62 @@ def _run_prompt_decode_loop(
         generated_text, triggered_stop_string = _trim_generated_text_at_stop_string(generated_text, effective_stop_strings)
         if not decode_state.finished and triggered_stop_string is not None:
             decode_state.stop_reason = "stop-string"
+        reusable_token_ids = list(prompt_token_ids)
+        prefix_commit_blockers: list[str] = []
+        if commit_generated_prefix and not decode_state.finished:
+            phase_started = time.perf_counter()
+            generated_hidden_state, generated_hidden_blockers = load_token_entry_hidden_state(
+                model_id,
+                [first_generated_token_id],
+            )
+            if generated_hidden_blockers or generated_hidden_state is None:
+                prefix_commit_blockers.extend(generated_hidden_blockers or ["Generated-token prefix commit entry failed."])
+            elif _cancel_requested(should_cancel):
+                return canceled_result(
+                    generated_token_ids=generated_token_ids,
+                    full_chain=first_generated_chain,
+                    cache_sequence_lengths=dict(decode_state.cache_sequence_lengths),
+                    steps_completed=1,
+                )
+            else:
+                commit_stack = run_layer_bridge_stack(
+                    model_id,
+                    start_layer=start_layer,
+                    layer_count=effective_layer_count,
+                    input_hidden=generated_hidden_state,
+                    past_key_values=decode_state.kv_caches,
+                    position_offset=decode_state.next_position,
+                    return_kv_cache=True,
+                    native_kv_sessions=decode_state.native_kv_sessions,
+                    should_cancel=should_cancel,
+                    collect_step_summaries=False,
+                    collect_metrics=False,
+                )
+                add_nested_timings("prefix_commit_stack", commit_stack.timings)
+                if commit_stack.ready and commit_stack.output_tensor is not None:
+                    layers_executed_total += len(commit_stack.executed_layers)
+                    decode_state = KVDecodeState(
+                        model_id=model_id,
+                        next_token_id=first_generated_token_id,
+                        next_position=decode_state.next_position + 1,
+                        generated_token_ids=list(first_generated_chain),
+                        cache_sequence_lengths=dict(commit_stack.cache_sequence_lengths),
+                        kv_caches=dict(commit_stack.next_kv_caches),
+                        native_kv_sessions=dict(commit_stack.next_native_kv_sessions),
+                        finished=decode_state.finished,
+                        stop_reason=decode_state.stop_reason,
+                        ready=True,
+                        blockers=[],
+                    )
+                    reusable_token_ids = list(first_generated_chain)
+                    prefix_reuse["committed_generated_token_count"] = 1
+                else:
+                    prefix_commit_blockers.extend(
+                        commit_stack.blockers or ["Generated-token prefix commit stack failed."]
+                    )
+            record_phase("prefix_commit_generated", phase_started)
+        if prefix_commit_blockers:
+            prefix_reuse["generated_token_commit_blockers"] = list(prefix_commit_blockers)
         return PromptDecodeLoopResult(
             model_id=model_id,
             prompt=prepared_prompt_result.prepared_prompt,
@@ -4776,7 +4835,7 @@ def _run_prompt_decode_loop(
             timings=finish_timings(),
             token_summaries=token_summaries,
             prefix_reuse=prefix_reuse,
-            reusable_token_ids=list(prompt_token_ids),
+            reusable_token_ids=reusable_token_ids,
             configured_layer_count=configured_layer_count,
             prompt_layer_count=effective_layer_count,
             layers_executed=layers_executed_total,

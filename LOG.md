@@ -5441,3 +5441,17 @@ Result: 297 passed in 21.83s
 - Verdict: same-session KV/prefix reuse is now product-safe and measurably reduces repeated prompt tensor loading on real Qwen3 Q4. It does not make unrelated prompts faster, by design.
 - Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_web_main.py::test_agent_mode_can_use_opt_in_warm_runner tests/test_web_main.py::test_warm_runner_control_start_and_stop tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers -q` -> `8 passed in 2.40s`.
 - Full suite: `python -m pytest tests/ -q` -> `350 passed in 9.28s`.
+
+## Phase Q4 MoE Fused Expert Load / q4 warm follow-up cache policy
+- Generated-token prefix commit experiment: real Qwen3-30B-A3B Q4 row under low RAM generated `" Paris"` then `" its"`, but regressed badly: first turn `113.070s`, second turn `63.309s`. Verdict: do not default this path; keep `PCKETLM_WARM_RUNNER_COMMIT_GENERATED_PREFIX=1` as an opt-in diagnostic only.
+- Default no-commit control row: first turn `25.559s`, second same-session turn `13.728s`, prefix reuse matched `5` tokens and appended `6`, tensor load `12.640s -> 3.763s`.
+- Cache tuning rows for same prompt `"The capital of France is"` then `"It is known for"`, max_new_tokens `1`, Q4 source:
+  - `PCKETLM_Q4_PACKED_CACHE_MB=4096`: first `18.912s`, second `12.003s`, tensor load second `3.617s`.
+  - front-layer fp16 attention cache `24` layers / `1024 MB`: first `19.185s`, second `10.893s`, tensor load second `2.562s`.
+  - front-layer fp16 attention cache `32` layers / `1536 MB`: first `19.712s`, second `10.147s`, tensor load second `1.840s`.
+  - front-layer fp16 attention cache `48` layers / `2048 MB`: first `19.880s`, second `8.603s`, tensor load second `0.226s`, stack second `8.111s`.
+- Change: warm runner now applies Q4 MoE-only scoped defaults for short same-session Q4 runs when the operator has not set explicit values: `PCKETLM_Q4_PACKED_CACHE_MB=4096`, `PCKETLM_TENSOR_CACHE_MB=2048`, and `PCKETLM_TENSOR_CACHE_FRONT_LAYERS=<full MoE layer count>`. These env values are scoped to the single runner call and restored afterward.
+- Real automatic-default proof with no explicit cache env except `PCKETLM_TENSOR_SOURCE=q4`: first turn generated `" Paris"` in `19.118s`; second turn generated `" the"` in `8.840s`, prefix reuse matched `5` tokens and appended `6`, tensor load dropped to `0.234s`, layers stayed full via the existing anti-cheat path.
+- Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_can_commit_single_generated_token_for_reuse tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers -q` -> `10 passed in 2.52s`.
+- Full suite: `python -m pytest tests/ -q` -> `354 passed in 12.12s`.
+- Verdict: this is a real product win for follow-up turns, not a full chat-speed finish. Tensor loading is almost gone on the second turn (`0.234s`), so the remaining bottleneck is layer/expert math for the six appended prompt tokens (`8.304s` layer stack).

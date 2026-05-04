@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from ctypes import wintypes
@@ -20,6 +21,8 @@ from pcketlm.core.storage.paths import state_root
 WARM_RUNNER_MIN_FREE_MEMORY_MB = 4 * 1024
 WARM_RUNNER_AGENT_MAX_NEW_TOKENS = 2
 WARM_RUNNER_STATUS_DIR_NAME = "warm-runner"
+Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
+Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
 
 
 @dataclass(slots=True)
@@ -227,6 +230,63 @@ def _runner_key(model_id: str, session_id: str = "default") -> str:
     return f"{model_id.strip().lower()}::{(session_id or 'default').strip().lower()}"
 
 
+def _commit_generated_prefix_enabled() -> bool:
+    return os.environ.get("PCKETLM_WARM_RUNNER_COMMIT_GENERATED_PREFIX", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _q4_moe_warm_cache_defaults(model_id: str) -> dict[str, str]:
+    """Return scoped cache defaults for Q4 MoE warm sessions.
+
+    The warm runner is the repeated short-prompt path. For Q4 MoE, the measured
+    win comes from keeping packed Q4 bytes plus all front-layer fp16 attention
+    tensors warm between turns. Caller-provided env settings always win.
+    """
+    tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+    if tensor_source != "q4":
+        return {}
+    try:
+        from pcketlm.core.runtime.layer_bridge import load_layer_bridge_config
+
+        config = load_layer_bridge_config(model_id)
+    except Exception:
+        return {}
+    if not getattr(config, "ready", False):
+        return {}
+    if int(getattr(config, "num_experts", 0) or 0) <= 0:
+        return {}
+    if int(getattr(config, "num_experts_per_tok", 0) or 0) <= 0:
+        return {}
+
+    defaults: dict[str, str] = {}
+    if not os.environ.get("PCKETLM_Q4_PACKED_CACHE_MB", "").strip():
+        defaults["PCKETLM_Q4_PACKED_CACHE_MB"] = str(Q4_MOE_WARM_PACKED_CACHE_MB)
+    if not os.environ.get("PCKETLM_TENSOR_CACHE_MB", "").strip():
+        defaults["PCKETLM_TENSOR_CACHE_MB"] = str(Q4_MOE_WARM_TENSOR_CACHE_MB)
+    if not os.environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", "").strip():
+        defaults["PCKETLM_TENSOR_CACHE_FRONT_LAYERS"] = str(int(getattr(config, "num_hidden_layers", 0) or 0))
+    return defaults
+
+
+@contextmanager
+def _scoped_environment(updates: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            os.environ[key] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def start_warm_runner(model_id: str, mode: str = "Agent", session_id: str = "default") -> dict:
     """Start or return the in-process warm runner for a model."""
     with _RUNNERS_LOCK:
@@ -347,21 +407,23 @@ def run_warm_agent_prompt(
         runner.blockers = []
         _write_runner_status(runner)
 
-        previous_handle_cache = os.environ.get("PCKETLM_SAFETENSOR_HANDLE_CACHE")
-        os.environ["PCKETLM_SAFETENSOR_HANDLE_CACHE"] = "0"
+        scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
+        scoped_env.update(_q4_moe_warm_cache_defaults(model_id))
         started = time.perf_counter()
         try:
-            runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
-            result = runner_fn(
-                model_id,
-                prompt=prompt,
-                max_new_tokens=max(1, min(int(max_new_tokens), WARM_RUNNER_AGENT_MAX_NEW_TOKENS)),
-                min_new_tokens=1,
-                selection_policy="greedy",
-                apply_chat_format=apply_chat_format,
-                initial_decode_state=runner.decode_state,
-                initial_token_ids=runner.reusable_token_ids,
-            )
+            with _scoped_environment(scoped_env):
+                runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
+                result = runner_fn(
+                    model_id,
+                    prompt=prompt,
+                    max_new_tokens=max(1, min(int(max_new_tokens), WARM_RUNNER_AGENT_MAX_NEW_TOKENS)),
+                    min_new_tokens=1,
+                    selection_policy="greedy",
+                    apply_chat_format=apply_chat_format,
+                    initial_decode_state=runner.decode_state,
+                    initial_token_ids=runner.reusable_token_ids,
+                    commit_generated_prefix=_commit_generated_prefix_enabled(),
+                )
         except Exception as exc:
             elapsed = round(time.perf_counter() - started, 3)
             runner.state = "failed"
@@ -385,12 +447,6 @@ def run_warm_agent_prompt(
                 memory_after=dict(runner.memory),
                 runner_status=runner.to_dict(),
             )
-        finally:
-            if previous_handle_cache is None:
-                os.environ.pop("PCKETLM_SAFETENSOR_HANDLE_CACHE", None)
-            else:
-                os.environ["PCKETLM_SAFETENSOR_HANDLE_CACHE"] = previous_handle_cache
-
         elapsed = round(time.perf_counter() - started, 3)
         memory_after = warm_runner_memory_snapshot()
         runner.request_count += 1

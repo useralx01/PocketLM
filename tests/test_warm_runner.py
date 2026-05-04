@@ -77,9 +77,181 @@ def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatc
     assert calls[0]["initial_decode_state"] is None
     assert calls[1]["initial_decode_state"] is first_state
     assert calls[1]["initial_token_ids"] == [1, 2, 1]
+    assert calls[1]["commit_generated_prefix"] is False
     assert calls[1]["apply_chat_format"] is True
     assert second.prefix_reuse["used"] is True
     assert second.performance_summary["bottleneck"] == "tensor loading"
+
+
+def test_warm_runner_can_opt_into_generated_token_prefix_commit(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+
+    calls = []
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setenv("PCKETLM_WARM_RUNNER_COMMIT_GENERATED_PREFIX", "1")
+
+    result = run_warm_agent_prompt(
+        "qwen-test-commit",
+        "hello",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert calls[0]["commit_generated_prefix"] is True
+
+
+def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    captured_env = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        del model_id, kwargs
+        captured_env.update(
+            {
+                "PCKETLM_Q4_PACKED_CACHE_MB": __import__("os").environ.get("PCKETLM_Q4_PACKED_CACHE_MB"),
+                "PCKETLM_TENSOR_CACHE_MB": __import__("os").environ.get("PCKETLM_TENSOR_CACHE_MB"),
+                "PCKETLM_TENSOR_CACHE_FRONT_LAYERS": __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS"),
+                "PCKETLM_SAFETENSOR_HANDLE_CACHE": __import__("os").environ.get("PCKETLM_SAFETENSOR_HANDLE_CACHE"),
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=1,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.delenv("PCKETLM_Q4_PACKED_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", raising=False)
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-test",
+        "hello",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert captured_env["PCKETLM_Q4_PACKED_CACHE_MB"] == "4096"
+    assert captured_env["PCKETLM_TENSOR_CACHE_MB"] == "2048"
+    assert captured_env["PCKETLM_TENSOR_CACHE_FRONT_LAYERS"] == "48"
+    assert captured_env["PCKETLM_SAFETENSOR_HANDLE_CACHE"] == "0"
+    assert __import__("os").environ.get("PCKETLM_Q4_PACKED_CACHE_MB") is None
+    assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_MB") is None
+    assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS") is None
+
+
+def test_warm_runner_preserves_explicit_q4_moe_cache_settings(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    captured_env = {}
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        del model_id, kwargs
+        captured_env.update(
+            {
+                "PCKETLM_Q4_PACKED_CACHE_MB": __import__("os").environ.get("PCKETLM_Q4_PACKED_CACHE_MB"),
+                "PCKETLM_TENSOR_CACHE_MB": __import__("os").environ.get("PCKETLM_TENSOR_CACHE_MB"),
+                "PCKETLM_TENSOR_CACHE_FRONT_LAYERS": __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS"),
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=1,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1024")
+    monkeypatch.setenv("PCKETLM_TENSOR_CACHE_MB", "768")
+    monkeypatch.setenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", "12")
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-test",
+        "hello",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert captured_env["PCKETLM_Q4_PACKED_CACHE_MB"] == "1024"
+    assert captured_env["PCKETLM_TENSOR_CACHE_MB"] == "768"
+    assert captured_env["PCKETLM_TENSOR_CACHE_FRONT_LAYERS"] == "12"
 
 
 def test_warm_runner_keeps_decode_state_scoped_to_session(tmp_path, monkeypatch) -> None:
