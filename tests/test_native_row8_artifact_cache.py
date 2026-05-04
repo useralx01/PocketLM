@@ -7,7 +7,7 @@ from tools.pack_weights_row8 import pack_rows8_tensor
 
 
 def test_native_row8_artifact_handle_loads_stable_bytes(tmp_path: Path) -> None:
-    from pcketlm.native import load_native_row8_tensor, native_row8_artifact_available
+    from pcketlm.native import load_native_row8_tensor, map_native_row8_file, native_row8_artifact_available
 
     assert native_row8_artifact_available()
     packed = torch.arange(32, dtype=torch.int32).to(torch.uint16)
@@ -20,6 +20,13 @@ def test_native_row8_artifact_handle_loads_stable_bytes(tmp_path: Path) -> None:
         assert payload == path.read_bytes()
     finally:
         handle.close()
+
+    mapped = map_native_row8_file(path)
+    try:
+        ptr = mapped.data_ptr(0, packed.numel() * packed.element_size())
+        assert ctypes.string_at(ptr, packed.numel() * packed.element_size()) == path.read_bytes()
+    finally:
+        mapped.close()
 
 
 def test_dense_layer_decode_packed_rows8_ptrs_matches_tensor_path(tmp_path: Path) -> None:

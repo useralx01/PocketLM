@@ -5227,3 +5227,10 @@ Result: 297 passed in 21.83s
 - First run started with only `5131 MB` free RAM and exited before `after`; after closing `msedge`, free RAM rose to `8.76 GB`.
 - Qwen 14B two-token row with `row8_layers0_3`, native handles, cache budget `0 MB`: generated `Hello!`, layers_executed `96/96`, result total `37.4794s`, continuation `17.2998s`, `load_packed_artifact_native=2.5323s`.
 - Comparison: same-session baseline after RAM cleanup was `35.0999s` total and `14.7824s` continuation. Four-layer row8 handles are correct but still slower because artifact bytes are reloaded for each covered layer/token instead of mmap-reused.
+
+## Phase Native Row8 Artifact Handles / mmap artifact probe
+- Added native whole-file mapping for row8 artifacts. The bridge now receives pointers into one mapped artifact file instead of per-tensor heap reads when native row8 is available.
+- Focused tests after mmap: `python -m pytest tests\test_native_row8_artifact_cache.py tests\test_packed_artifact_loader.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_row8_artifact_without_original_projection_load -q` -> `6 passed`.
+- Qwen 14B two-token row with `row8_layers0_3`, native mmap handles: generated `Hello!`, layers_executed `96/96`, result total `41.5054s`, continuation `18.0344s`, `load_packed_artifact_native=0.0101s`.
+- Full suite: `python -m pytest tests/ -q` -> `324 passed in 23.25s`.
+- Verdict: mmap fixes artifact load overhead. The remaining regression is inside packed full-layer math/dispatch (`native_layer=14.2126s` vs baseline continuation native layer `11.9142s` on the comparable two-token row), not artifact I/O.

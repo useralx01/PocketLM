@@ -71,6 +71,30 @@ def test_row8_runtime_loader_caches_repeated_tensor_reads(tmp_path: Path, monkey
     assert row8_tensor_cache_stats()["resident_count"] == 1
 
 
+def test_row8_runtime_loader_maps_artifact_file_once(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+    from pcketlm.core.runtime.packed_artifact_loader import (
+        clear_row8_manifest_cache,
+        clear_row8_tensor_cache,
+        load_row8_mapped_packed_tensor,
+    )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "row8-mapped-test"
+    model_dir = _write_model_fixture(tmp_path, model_id)
+    out_dir = tmp_path / "models" / model_id / "artifacts" / "row8"
+    build_row8_packed_artifact(model_dir, out_dir, include_patterns=["down_proj"])
+    clear_row8_manifest_cache()
+    clear_row8_tensor_cache()
+
+    tensor_name = "model.layers.0.mlp.down_proj.weight"
+    first, _ = load_row8_mapped_packed_tensor(model_id, tensor_name)
+    second, _ = load_row8_mapped_packed_tensor(model_id, tensor_name)
+
+    assert int(getattr(first, "ptr")) == int(getattr(second, "ptr"))
+    assert int(getattr(first, "nbytes")) == int(getattr(second, "nbytes"))
+
+
 def _write_model_fixture(tmp_path: Path, model_id: str) -> Path:
     model_dir = tmp_path / "models" / model_id / "original"
     model_dir.mkdir(parents=True)

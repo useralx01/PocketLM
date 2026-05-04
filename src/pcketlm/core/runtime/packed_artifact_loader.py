@@ -19,6 +19,7 @@ _ROW8_TENSOR_CACHE: OrderedDict[tuple[str, str, str], tuple[torch.Tensor, dict, 
 _ROW8_TENSOR_CACHE_BYTES = 0
 _ROW8_NATIVE_TENSOR_CACHE: OrderedDict[tuple[str, str, str], tuple[object, dict, int]] = OrderedDict()
 _ROW8_NATIVE_TENSOR_CACHE_BYTES = 0
+_ROW8_MAPPED_FILES: dict[str, object] = {}
 
 
 @lru_cache(maxsize=16)
@@ -121,6 +122,26 @@ def load_row8_native_packed_tensor(
     return native_tensor, entry
 
 
+def load_row8_mapped_packed_tensor(
+    model_id: str,
+    tensor_name: str,
+    artifact_name: str = ROW8_ARTIFACT_DIRNAME,
+) -> tuple[object, dict]:
+    manifest = _row8_manifest(model_id, artifact_name)
+    if not manifest.get("ready"):
+        raise FileNotFoundError(str(manifest.get("path", "")))
+    tensors = manifest.get("tensors") or {}
+    if tensor_name not in tensors:
+        raise KeyError(tensor_name)
+    entry = dict(tensors[tensor_name])
+    artifact_dir = Path(str(manifest["path"])).parent
+    data_file = artifact_dir / str(manifest["data_file"])
+    mapped_file = _mapped_row8_file(data_file)
+    from pcketlm.native import NativeRow8MappedTensor
+
+    return NativeRow8MappedTensor(mapped_file, int(entry["offset"]), int(entry["nbytes"])), entry
+
+
 def row8_tensor_cache_stats() -> dict[str, int | float]:
     return {
         "resident_count": len(_ROW8_TENSOR_CACHE),
@@ -144,6 +165,7 @@ def clear_row8_tensor_cache() -> None:
     _ROW8_TENSOR_CACHE_BYTES = 0
     _ROW8_NATIVE_TENSOR_CACHE.clear()
     _ROW8_NATIVE_TENSOR_CACHE_BYTES = 0
+    _ROW8_MAPPED_FILES.clear()
 
 
 def _row8_tensor_cache_enabled() -> bool:
@@ -195,3 +217,15 @@ def _store_row8_native_tensor_cache(cache_key: tuple[str, str, str], native_tens
     while _ROW8_NATIVE_TENSOR_CACHE_BYTES > budget and _ROW8_NATIVE_TENSOR_CACHE:
         _old_key, (_old_tensor, _old_entry, old_nbytes) = _ROW8_NATIVE_TENSOR_CACHE.popitem(last=False)
         _ROW8_NATIVE_TENSOR_CACHE_BYTES -= int(old_nbytes)
+
+
+def _mapped_row8_file(path: Path) -> object:
+    key = str(path.resolve())
+    mapped = _ROW8_MAPPED_FILES.get(key)
+    if mapped is not None:
+        return mapped
+    from pcketlm.native import map_native_row8_file
+
+    mapped = map_native_row8_file(path)
+    _ROW8_MAPPED_FILES[key] = mapped
+    return mapped

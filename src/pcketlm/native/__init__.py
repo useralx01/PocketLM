@@ -286,6 +286,18 @@ def _load_row8_artifact_lib() -> ctypes.CDLL | None:
         lib.row8_artifact_tensor_data.restype = ctypes.c_void_p
         lib.row8_artifact_tensor_nbytes.argtypes = [ctypes.c_void_p]
         lib.row8_artifact_tensor_nbytes.restype = ctypes.c_ulonglong
+        lib.row8_artifact_map_file.argtypes = [ctypes.c_char_p]
+        lib.row8_artifact_map_file.restype = ctypes.c_void_p
+        lib.row8_artifact_unmap_file.argtypes = [ctypes.c_void_p]
+        lib.row8_artifact_unmap_file.restype = None
+        lib.row8_artifact_mapped_data.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulonglong,
+            ctypes.c_ulonglong,
+        ]
+        lib.row8_artifact_mapped_data.restype = ctypes.c_void_p
+        lib.row8_artifact_mapped_nbytes.argtypes = [ctypes.c_void_p]
+        lib.row8_artifact_mapped_nbytes.restype = ctypes.c_ulonglong
     except Exception as exc:  # pragma: no cover - defensive platform path
         _ROW8_ARTIFACT_ERROR = exc
         return None
@@ -343,6 +355,55 @@ class NativeRow8Tensor:
 
 def load_native_row8_tensor(path: str | Path, offset: int, nbytes: int) -> NativeRow8Tensor:
     return NativeRow8Tensor(path, offset, nbytes)
+
+
+class NativeRow8MappedFile:
+    def __init__(self, path: str | Path):
+        lib = _load_row8_artifact_lib()
+        if lib is None:
+            reason = "disabled" if _native_row8_artifact_disabled() else _ROW8_ARTIFACT_ERROR
+            raise RuntimeError(f"Native row8 artifact cache is unavailable: {reason}")
+        path_bytes = str(Path(path)).encode("utf-8")
+        handle = lib.row8_artifact_map_file(ctypes.c_char_p(path_bytes))
+        if not handle:
+            raise OSError(f"row8_artifact_map_file failed for {path}")
+        self._lib = lib
+        self._handle = ctypes.c_void_p(handle)
+        self.nbytes = int(lib.row8_artifact_mapped_nbytes(self._handle))
+        self.path = str(path)
+
+    def data_ptr(self, offset: int, nbytes: int) -> int:
+        ptr = self._lib.row8_artifact_mapped_data(
+            self._handle,
+            ctypes.c_ulonglong(int(offset)),
+            ctypes.c_ulonglong(int(nbytes)),
+        )
+        if not ptr:
+            raise ValueError("row8 mapped tensor range is invalid")
+        return int(ptr)
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._lib.row8_artifact_unmap_file(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC safety net
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class NativeRow8MappedTensor:
+    def __init__(self, mapped_file: NativeRow8MappedFile, offset: int, nbytes: int):
+        self._mapped_file = mapped_file
+        self.offset = int(offset)
+        self.nbytes = int(nbytes)
+        self.ptr = mapped_file.data_ptr(offset, nbytes)
+
+
+def map_native_row8_file(path: str | Path) -> NativeRow8MappedFile:
+    return NativeRow8MappedFile(path)
 
 
 def _packed_gemv_cache_disabled() -> bool:

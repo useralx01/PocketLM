@@ -1348,15 +1348,15 @@ def _try_native_dense_decode_bridge(
             output = None
             if hasattr(session, "dense_layer_decode_packed_rows8_ptrs"):
                 try:
-                    from pcketlm.core.runtime.packed_artifact_loader import load_row8_native_packed_tensor
+                    from pcketlm.core.runtime.packed_artifact_loader import load_row8_mapped_packed_tensor
 
-                    q_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
-                    k_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
-                    v_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
-                    o_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
-                    gate_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
-                    up_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
-                    down_packed, _ = load_row8_native_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
+                    q_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["q"], packed_artifact_name)
+                    k_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["k"], packed_artifact_name)
+                    v_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["v"], packed_artifact_name)
+                    o_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["o"], packed_artifact_name)
+                    gate_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["gate"], packed_artifact_name)
+                    up_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["up"], packed_artifact_name)
+                    down_packed, _ = load_row8_mapped_packed_tensor(model_id, projection_names["down"], packed_artifact_name)
                     timings["load_packed_artifact_native"] = round(
                         timings.get("load_packed_artifact_native", 0.0) + (time.perf_counter() - load_packed_started),
                         4,
