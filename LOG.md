@@ -5234,3 +5234,18 @@ Result: 297 passed in 21.83s
 - Qwen 14B two-token row with `row8_layers0_3`, native mmap handles: generated `Hello!`, layers_executed `96/96`, result total `41.5054s`, continuation `18.0344s`, `load_packed_artifact_native=0.0101s`.
 - Full suite: `python -m pytest tests/ -q` -> `324 passed in 23.25s`.
 - Verdict: mmap fixes artifact load overhead. The remaining regression is inside packed full-layer math/dispatch (`native_layer=14.2126s` vs baseline continuation native layer `11.9142s` on the comparable two-token row), not artifact I/O.
+
+## Phase Native Row8 Packed Fusion / Setup
+- Branch: `phase-native-row8-packed-fusion`.
+- Goal: reduce packed full-layer dispatch overhead now that row8 artifact mmap makes packed tensor loading effectively free.
+
+## Phase Native Row8 Packed Fusion / fused dispatch probe
+- Changed the native dense decode packed path so Q/K/V and gate/up projections dispatch as fused OpenMP block loops when row8 packed pointers are active.
+- Focused tests after rebuild: `python -m pytest tests\test_native_packed_gemv_cache.py tests\test_native_row8_artifact_cache.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_row8_artifact_without_original_projection_load -q` -> `7 passed`.
+- Windows Application Control blocked the first rebuilt `fp16_kv_cache.dll`; recovery was delete, rebuild only that DLL, then `Unblock-File`.
+- Qwen 14B two-token row with `row8_layers0_3`: generated `Hello!`, layers_executed `96/96`, result total `37.5530s`, continuation `15.9513s`, continuation `native_layer=13.2233s`, `load_packed_artifact_native=0.0101s`.
+- Fresh same-branch Qwen 14B two-token baseline without artifact: generated `Hello!`, layers_executed `96/96`, result total `38.7550s`, continuation `14.7576s`, continuation `native_layer=11.8836s`.
+- Qwen 14B three-token row with `row8_layers0_3`: generated `Hello! How`, layers_executed `144/144`, result total `52.7822s`, continuation total `31.7091s`, continuation `native_layer=26.6370s`.
+- Fresh same-branch Qwen 14B three-token baseline without artifact: generated `Hello! How`, layers_executed `144/144`, result total `61.2291s`, continuation total `35.4866s`, continuation `native_layer=29.0539s`.
+- Full suite: `python -m pytest tests/ -q` -> `324 passed in 23.52s`.
+- Verdict: fused packed dispatch is correct and starts to pay off over multiple continuation tokens. It is not chat speed yet; the next probe should expand artifact coverage beyond layers 0-3 and keep comparing against fresh same-session baselines.

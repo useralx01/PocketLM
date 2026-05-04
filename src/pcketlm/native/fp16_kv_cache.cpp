@@ -179,6 +179,124 @@ static bool packed_rows8_gemv_float_hidden(
     return true;
 }
 
+static void packed_rows8_gemv_u16_hidden_block(
+    const uint16_t* hidden,
+    const uint16_t* packed,
+    const uint16_t* bias,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int64_t block,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t row_base = block * row_block;
+    const uint16_t* weight_block = packed + block * in_features * row_block;
+    __m256 acc = _mm256_setzero_ps();
+    for (int64_t col = 0; col < in_features; ++col) {
+        const __m256 w = load_u16_as_ps(weight_block + col * row_block, dtype_code);
+        const __m256 h = _mm256_set1_ps(read_u16(hidden[col], dtype_code));
+        acc = _mm256_fmadd_ps(h, w, acc);
+    }
+    float sums[row_block];
+    _mm256_storeu_ps(sums, acc);
+    for (int64_t lane = 0; lane < row_block; ++lane) {
+        const int64_t row = row_base + lane;
+        if (row < out_features) {
+            out[row] = sums[lane] + (bias != nullptr ? read_u16(bias[row], dtype_code) : 0.0f);
+        }
+    }
+}
+
+static void packed_rows8_gemv_float_hidden_block(
+    const float* hidden,
+    const uint16_t* packed,
+    float* out,
+    int64_t in_features,
+    int64_t out_features,
+    int64_t block,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t row_base = block * row_block;
+    const uint16_t* weight_block = packed + block * in_features * row_block;
+    __m256 acc = _mm256_setzero_ps();
+    for (int64_t col = 0; col < in_features; ++col) {
+        const __m256 w = load_u16_as_ps(weight_block + col * row_block, dtype_code);
+        const __m256 h = _mm256_set1_ps(hidden[col]);
+        acc = _mm256_fmadd_ps(h, w, acc);
+    }
+    float sums[row_block];
+    _mm256_storeu_ps(sums, acc);
+    for (int64_t lane = 0; lane < row_block; ++lane) {
+        const int64_t row = row_base + lane;
+        if (row < out_features) {
+            out[row] = sums[lane];
+        }
+    }
+}
+
+static bool packed_rows8_gemv_two_u16_hidden(
+    const uint16_t* hidden,
+    const uint16_t* weight_a,
+    const uint16_t* weight_b,
+    float* out_a,
+    float* out_b,
+    int64_t in_features,
+    int64_t out_features,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t block_count = (out_features + row_block - 1) / row_block;
+    #pragma omp parallel for schedule(static)
+    for (int64_t block = 0; block < block_count * 2; ++block) {
+        if (block < block_count) {
+            packed_rows8_gemv_u16_hidden_block(
+                hidden, weight_a, nullptr, out_a, in_features, out_features, block, dtype_code);
+        } else {
+            packed_rows8_gemv_u16_hidden_block(
+                hidden, weight_b, nullptr, out_b, in_features, out_features, block - block_count, dtype_code);
+        }
+    }
+    return true;
+}
+
+static bool packed_rows8_gemv_three_u16_hidden(
+    const uint16_t* hidden,
+    const uint16_t* weight_q,
+    const uint16_t* weight_k,
+    const uint16_t* weight_v,
+    const uint16_t* bias_q,
+    const uint16_t* bias_k,
+    const uint16_t* bias_v,
+    float* out_q,
+    float* out_k,
+    float* out_v,
+    int64_t in_features,
+    int64_t q_features,
+    int64_t kv_features,
+    int dtype_code
+) {
+    constexpr int64_t row_block = 8;
+    const int64_t q_blocks = (q_features + row_block - 1) / row_block;
+    const int64_t kv_blocks = (kv_features + row_block - 1) / row_block;
+    const int64_t total_blocks = q_blocks + 2 * kv_blocks;
+    #pragma omp parallel for schedule(static)
+    for (int64_t block = 0; block < total_blocks; ++block) {
+        if (block < q_blocks) {
+            packed_rows8_gemv_u16_hidden_block(
+                hidden, weight_q, bias_q, out_q, in_features, q_features, block, dtype_code);
+        } else if (block < q_blocks + kv_blocks) {
+            packed_rows8_gemv_u16_hidden_block(
+                hidden, weight_k, bias_k, out_k, in_features, kv_features, block - q_blocks, dtype_code);
+        } else {
+            packed_rows8_gemv_u16_hidden_block(
+                hidden, weight_v, bias_v, out_v, in_features, kv_features, block - q_blocks - kv_blocks, dtype_code);
+        }
+    }
+    return true;
+}
+
 static void load_vector_u16_as_float(const uint16_t* values, float* out, int64_t count, int dtype_code) {
     int64_t index = 0;
     for (; index + 8 <= count; index += 8) {
@@ -304,6 +422,11 @@ static void linear_two_same_input(
     int64_t out_features,
     int dtype_code
 ) {
+    if (g_use_prepacked_rows8) {
+        packed_rows8_gemv_two_u16_hidden(
+            hidden, weight_a, weight_b, out_a, out_b, in_features, out_features, dtype_code);
+        return;
+    }
     if (
         linear_one_blas(hidden, weight_a, nullptr, out_a, in_features, out_features, dtype_code) &&
         linear_one_blas(hidden, weight_b, nullptr, out_b, in_features, out_features, dtype_code)
@@ -336,6 +459,25 @@ static void linear_three_same_input(
     int64_t kv_features,
     int dtype_code
 ) {
+    if (g_use_prepacked_rows8) {
+        packed_rows8_gemv_three_u16_hidden(
+            hidden,
+            weight_q,
+            weight_k,
+            weight_v,
+            bias_q,
+            bias_k,
+            bias_v,
+            out_q,
+            out_k,
+            out_v,
+            in_features,
+            q_features,
+            kv_features,
+            dtype_code
+        );
+        return;
+    }
     if (
         linear_one_blas(hidden, weight_q, bias_q, out_q, in_features, q_features, dtype_code) &&
         linear_one_blas(hidden, weight_k, bias_k, out_k, in_features, kv_features, dtype_code) &&

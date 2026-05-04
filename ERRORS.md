@@ -282,3 +282,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: Qwen 14B two-token rows exited after the diagnostic `before` event when free RAM was around `6.6 GB`, including with artifact routing disabled.
 - Root cause: full continuation rows peak around `10 GB` working set on this machine; the process was running too close to the RAM ceiling after repeated native probes.
 - Fix: closed non-workload `msedge` and `RobloxPlayerBeta`, raising free RAM to `8.82 GB`; baseline and native row8 handle two-token rows then completed.
+
+## Phase Native Row8 Packed Fusion / DLL rebuild block
+- Symptom: after rebuilding `fp16_kv_cache.dll`, native imports failed with Windows Application Control blocking the file.
+- Root cause: rebuilt DLL churn on this machine can leave the file marked or blocked by policy.
+- Fix: delete the DLL, rebuild only `fp16_kv_cache.cpp`, then run `Unblock-File src\pcketlm\native\fp16_kv_cache.dll`; focused native tests passed afterward.

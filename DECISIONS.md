@@ -1254,3 +1254,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Real model result: correct but not faster on a layer-0-only artifact. This is expected: layer 0 pays native artifact load overhead while layers 1-47 still use the normal path. Build a larger artifact before making speed conclusions.
 - Four-layer artifact result: still correct but slower than baseline. The issue is not packed GEMV math anymore; it is artifact residency. Native heap handles loaded per request still pay I/O/lifecycle cost. Next step must keep the artifact file mapped/reused across decode tokens.
 - Mmap result: artifact load overhead is effectively gone (`0.0101s` for four covered layers in the continuation stack), but end-to-end still regresses. The bottleneck moved to the packed dense full-layer dispatch itself, so the next phase should compare packed vs unpacked per-layer native timings and fix the packed C path before building whole-model artifacts.
+
+## Phase Native Row8 Packed Fusion / dispatch shape
+- Fused only the projection groups that share the same input vector: Q/K/V after input norm and gate/up after post-attention norm. Output projection and down projection stay single calls because they consume different intermediate vectors.
+- Kept the row8 artifact route opt-in. The two-token row still has slightly slower continuation native-layer time than the fresh baseline, even though total time improved; the three-token row is the first real row where the packed route beats the fresh baseline.
+- Decision: do not promote packed artifacts to default yet. The direction is promising, but it needs more layer coverage and repeated warm rows before becoming the production path.
