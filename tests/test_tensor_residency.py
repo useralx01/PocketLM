@@ -23,7 +23,7 @@ from pcketlm.core.runtime.tensor_residency import (
     record_expert_activation,
     tensor_residency_stats,
 )
-from pcketlm.core.runtime.tensor_residency import _dequantize_q4_tensor, _quantize_q4_tensor
+from pcketlm.core.runtime.tensor_residency import _dequantize_q4_tensor, _is_cacheable, _quantize_q4_tensor
 
 
 def _entry(tmp_path: Path, tensor_name: str = "model.layers.0.self_attn.k_proj.weight") -> TensorCatalogEntry:
@@ -65,6 +65,65 @@ def _loaded_tensor(
         ready=True,
         q4_loaded=q4_loaded,
     )
+
+
+def test_q4_moe_policy_expands_attention_cache_across_all_layers(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY", "1")
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", raising=False)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 6 * 1024**3)
+    fake_catalog = SimpleNamespace(
+        num_hidden_layers=48,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_catalog.load_tensor_catalog", lambda _model_id: fake_catalog)
+
+    policy = TensorResidencyPolicy.from_environment("q4-moe-policy-test")
+
+    assert policy.max_resident_bytes >= 2048 * 1024**2
+    assert policy.front_layer_count >= 48
+    assert policy.model_aware_budget_active is True
+
+
+def test_q4_moe_policy_keeps_late_attention_cacheable(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY", "1")
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 6 * 1024**3)
+    fake_catalog = SimpleNamespace(
+        num_hidden_layers=48,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_catalog.load_tensor_catalog", lambda _model_id: fake_catalog)
+    entry = _entry(tmp_path, tensor_name="model.layers.47.self_attn.q_proj.weight")
+    entry.layer_index = 47
+    entry.component_group = "attention"
+    tensor = torch.empty((2048, 2048), dtype=torch.float16)
+
+    policy = TensorResidencyPolicy.from_environment("q4-moe-policy-test")
+
+    assert _is_cacheable(tensor, entry, policy) is True
+
+
+def test_q4_moe_attention_residency_is_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.delenv("PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", raising=False)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 6 * 1024**3)
+    fake_catalog = SimpleNamespace(
+        num_hidden_layers=48,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_catalog.load_tensor_catalog", lambda _model_id: fake_catalog)
+
+    policy = TensorResidencyPolicy.from_environment("q4-moe-policy-test")
+
+    assert policy.max_resident_bytes == 256 * 1024**2
+    assert policy.front_layer_count == 12
 
 
 def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_path: Path, monkeypatch) -> None:

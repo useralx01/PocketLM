@@ -5311,3 +5311,11 @@ Result: 297 passed in 21.83s
 - Q4 cache telemetry on that row: hits `966`, misses `2347`, disk_reads `12121`, resident `1879.03 MB`; tensor_load_stats q4_loads `13087`, shard_opens `742`.
 - Verdict: best current Qwen3-30B-A3B Q4 row is coherent and modestly faster (`117.2170s` -> `106.8654s` total), but target speed is not met. Remaining wall is the high count of small expert Q4 load/dequant calls, not the selected-MoE math wrapper.
 - Full suite: `python -m pytest tests/ -q` -> `337 passed in 22.45s`.
+
+## Phase Q4 MoE Fused Expert Load / rejected attention fp16 residency
+- Hypothesis: cache dequantized Q4 attention weights across all Qwen3-30B-A3B layers, because attention weights are about `1728 MB` fp16 total while expert weights are about `55296 MB`.
+- Focused tests for the policy: `python -m pytest tests\test_tensor_residency.py tests\test_runtime_layer_bridge.py tests\test_q4_quantizer.py -q` -> `101 passed in 2.62s`.
+- Real Qwen3-30B-A3B Q4 row with attention residency enabled: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `111.7271s`, token rows `70.9196s`, `20.3614s`, `20.4032s`, continuation_stack_op_load_tensors `34.6882s`, prefill_stack_op_load_tensors `49.5910s`, peak working set `5001 MB`, free RAM after `1383 MB`.
+- Verdict: rejected as a default. It consumes too much RAM on this machine and is slower than the `106.8654s` default row. The behavior is retained only behind `PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY=1` for future long-generation profiling.
+- Focused tests after making it opt-in: `python -m pytest tests\test_tensor_residency.py tests\test_runtime_layer_bridge.py tests\test_q4_quantizer.py -q` -> `102 passed in 3.99s`.
+- Full suite: `python -m pytest tests/ -q` -> `340 passed in 22.40s`.

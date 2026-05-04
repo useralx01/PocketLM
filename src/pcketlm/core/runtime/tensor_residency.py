@@ -30,6 +30,7 @@ DEFAULT_EXPERT_DECAY_RATE = 0.98
 DEFAULT_ALWAYS_RESIDENT_TENSOR_MB = 16
 DEFAULT_FP16_PACKED_CACHE_CAP_MB = 8 * 1024
 DEFAULT_Q4_PACKED_CACHE_CAP_MB = 4 * 1024
+DEFAULT_Q4_MOE_ATTENTION_CACHE_MB = 2 * 1024
 BOOSTED_TENSOR_CACHE_MB = 288
 BOOSTED_FRONT_LAYER_COUNT = 13
 LOW_MEMORY_CACHE_MB = 128
@@ -104,6 +105,9 @@ class TensorResidencyPolicy:
     def from_environment(cls, model_id: str | None = None) -> "TensorResidencyPolicy":
         requested_preset = os.environ.get("PCKETLM_TENSOR_CACHE_PRESET", "standard").strip().lower() or "standard"
         tensor_cache_preset = "boosted" if requested_preset in {"boost", "boosted", "high-ram", "high_ram"} else "standard"
+        tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+        q4_source_requested = tensor_source == "q4"
+        q4_moe_attention_residency = _env_enabled("PCKETLM_ENABLE_Q4_MOE_ATTENTION_RESIDENCY", "0")
         max_resident_mb = max(0, _env_int("PCKETLM_TENSOR_CACHE_MB", DEFAULT_TENSOR_CACHE_MB))
         max_tensor_mb = max(0, _env_int("PCKETLM_TENSOR_CACHE_TENSOR_MB", DEFAULT_MAX_TENSOR_CACHE_MB))
         all_layer_small_tensor_kb = max(0, _env_int("PCKETLM_TENSOR_CACHE_ALL_LAYER_SMALL_KB", 1024))
@@ -113,6 +117,8 @@ class TensorResidencyPolicy:
         model_aware_budget_active = False
         guard_threshold_mb = max(0, _env_int("PCKETLM_TENSOR_CACHE_LOW_MEMORY_GUARD_MB", LOW_MEMORY_GUARD_THRESHOLD_MB))
         free_memory_bytes = _free_memory_bytes() if _env_enabled("PCKETLM_TENSOR_CACHE_MEMORY_GUARD") else None
+        if q4_source_requested and free_memory_bytes is None:
+            free_memory_bytes = _free_memory_bytes()
         if free_memory_bytes is not None and free_memory_bytes < guard_threshold_mb * 1024 * 1024:
             memory_guard_active = True
             if not _env_is_set("PCKETLM_TENSOR_CACHE_MB"):
@@ -140,6 +146,8 @@ class TensorResidencyPolicy:
                 model_aware_budget_active = True
         expert_cache_mb = max(0, _env_int("PCKETLM_EXPERT_TENSOR_CACHE_MB", DEFAULT_EXPERT_CACHE_MB))
         moe_top_k = 0
+        is_moe_model = False
+        num_hidden_layers = 0
         if (
             model_id
             and free_memory_bytes is not None
@@ -150,12 +158,24 @@ class TensorResidencyPolicy:
                 catalog = load_tensor_catalog(model_id)
                 is_moe_model = bool(catalog.num_experts and catalog.num_experts_per_tok)
                 moe_top_k = int(catalog.num_experts_per_tok or 0)
+                num_hidden_layers = int(catalog.num_hidden_layers or 0)
             except Exception:
                 is_moe_model = False
             if is_moe_model and not _env_is_set("PCKETLM_EXPERT_TENSOR_CACHE_MB"):
                 free_mb = int(free_memory_bytes // (1024**2))
                 adaptive_expert_mb = max(DEFAULT_EXPERT_CACHE_MB, min(max(0, free_mb - 2048), 2048))
                 expert_cache_mb = max(expert_cache_mb, adaptive_expert_mb)
+            if q4_source_requested and q4_moe_attention_residency and is_moe_model:
+                free_mb = int(free_memory_bytes // (1024**2))
+                attention_cache_mb = max(
+                    DEFAULT_TENSOR_CACHE_MB,
+                    min(max(0, free_mb - 2048), DEFAULT_Q4_MOE_ATTENTION_CACHE_MB),
+                )
+                if not _env_is_set("PCKETLM_TENSOR_CACHE_MB"):
+                    max_resident_mb = max(max_resident_mb, attention_cache_mb)
+                    model_aware_budget_active = True
+                if num_hidden_layers and not _env_is_set("PCKETLM_TENSOR_CACHE_FRONT_LAYERS"):
+                    front_layer_count = max(front_layer_count, num_hidden_layers)
 
         expert_decay_rate = max(0.0, min(1.0, _env_float("PCKETLM_EXPERT_CACHE_DECAY", DEFAULT_EXPERT_DECAY_RATE)))
         expert_q4_residency = _env_enabled("PCKETLM_EXPERT_Q4_CACHE", "0")
