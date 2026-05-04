@@ -1431,6 +1431,46 @@ def test_load_resident_tensor_clones_same_dtype_safetensors_view(tmp_path: Path,
     assert loaded.tensor.data_ptr() != source_tensor.data_ptr()
 
 
+def test_load_resident_tensor_does_not_clone_q4_loaded_compute_tensor(tmp_path: Path, monkeypatch) -> None:
+    clear_tensor_residency_cache()
+    model_id = "resident-q4-no-clone-test"
+    entry = _entry(tmp_path, tensor_name="model.layers.0.mlp.experts.1.down_proj.weight")
+    entry.component_group = "expert"
+    entry.expert_index = 1
+    source_tensor = torch.ones((2, 2), dtype=torch.float16)
+
+    def fake_load_tensor_by_name(model_id_arg: str, tensor_name: str) -> LoadedTensorSlice:
+        return LoadedTensorSlice(
+            model_id=model_id_arg,
+            tensor_name=tensor_name,
+            shard_name=entry.shard_name,
+            dtype=str(source_tensor.dtype),
+            shape=[2, 2],
+            tensor=source_tensor,
+            layer_index=entry.layer_index,
+            component_group=entry.component_group,
+            loaded_nbytes=source_tensor.element_size() * source_tensor.nelement(),
+            blockers=[],
+            ready=True,
+            q4_loaded=True,
+        )
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._find_tensor_entry", lambda *_args: entry)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency.load_tensor_by_name", fake_load_tensor_by_name)
+
+    loaded = load_resident_tensor(
+        model_id,
+        entry.tensor_name,
+        dtype=torch.float16,
+        policy=TensorResidencyPolicy(max_resident_bytes=1024, max_tensor_bytes=1024),
+    )
+
+    assert loaded.ready is True
+    assert loaded.tensor is not None
+    assert loaded.tensor.dtype == torch.float16
+    assert loaded.tensor.data_ptr() == source_tensor.data_ptr()
+
+
 def test_clear_tensor_residency_cache_resets_counters(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-clear-test"

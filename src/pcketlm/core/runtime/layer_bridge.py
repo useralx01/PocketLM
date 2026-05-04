@@ -851,7 +851,7 @@ def _run_moe_mlp(
         hidden_states.ndim == 3
         and list(hidden_states.shape[:2]) == [1, 1]
         and output_dtype in {torch.float16, torch.bfloat16}
-        and os.environ.get("PCKETLM_DISABLE_NATIVE_MOE", "").strip().lower() not in {"1", "true", "yes", "on"}
+        and _native_moe_selected_enabled_for_current_source()
     ):
         selected_ids = [int(value) for value in selected_experts.reshape(-1).tolist()]
         if all(expert_id in expert_tensors for expert_id in selected_ids):
@@ -1021,6 +1021,19 @@ def _runtime_math_dtype() -> torch.dtype:
 
 def _fp16_decode_expert_packed_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _native_moe_selected_enabled_for_current_source() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_MOE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    if os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4":
+        return True
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_MOE_FOR_Q4", "0").strip().lower() in {
         "1",
         "true",
         "yes",

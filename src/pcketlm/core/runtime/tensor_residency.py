@@ -855,6 +855,8 @@ def _hot_tensor_for_compute(loaded: LoadedTensorSlice, dtype: torch.dtype) -> to
     tensor = loaded.tensor.detach().cpu().to(dtype=dtype)
     if tensor.data_ptr() != loaded.tensor.data_ptr():
         return tensor
+    if loaded.q4_loaded:
+        return tensor
     if loaded.borrowed_from_live_handle and _zero_copy_hot_tensors_enabled():
         return tensor
     return tensor.clone()

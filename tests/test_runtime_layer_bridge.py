@@ -1069,6 +1069,77 @@ def test_explicit_runtime_dtype_overrides_q4_default(monkeypatch) -> None:
     assert runtime_math_dtype_name() == "bfloat16"
 
 
+def test_q4_tensor_source_skips_stack_heavy_native_moe_by_default(monkeypatch) -> None:
+    import pcketlm.native as native_module
+
+    class NativeMoeCalled(BaseException):
+        pass
+
+    def fail_native(*_args, **_kwargs):
+        raise NativeMoeCalled()
+
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.delenv("PCKETLM_ENABLE_NATIVE_MOE_FOR_Q4", raising=False)
+    monkeypatch.setattr(native_module, "moe_selected_forward_u16", fail_native)
+    hidden = torch.tensor([[[0.1, -0.2, 0.3, -0.4]]], dtype=torch.float16)
+    router = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=torch.float16)
+    expert_tensors = {
+        expert: {
+            "gate_proj": torch.ones((3, 4), dtype=torch.float16) * (expert + 1),
+            "up_proj": torch.ones((3, 4), dtype=torch.float16) * 0.5,
+            "down_proj": torch.ones((4, 3), dtype=torch.float16) * 0.25,
+        }
+        for expert in (0, 1)
+    }
+
+    output, touched, selected = _run_moe_mlp(
+        hidden_states=hidden,
+        router_weight=router,
+        expert_tensors=expert_tensors,
+        top_k=1,
+        norm_topk_prob=True,
+    )
+
+    assert output.shape == hidden.shape
+    assert touched
+    assert selected.shape == (1, 1, 1)
+
+
+def test_q4_tensor_source_can_opt_into_native_moe(monkeypatch) -> None:
+    import pcketlm.native as native_module
+
+    calls = {"count": 0}
+
+    def fake_native(hidden, _gate, _up, _down, _route):
+        calls["count"] += 1
+        return torch.zeros_like(hidden)
+
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_MOE_FOR_Q4", "1")
+    monkeypatch.setattr(native_module, "moe_selected_forward_u16", fake_native)
+    hidden = torch.tensor([[[0.1, -0.2, 0.3, -0.4]]], dtype=torch.float16)
+    router = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=torch.float16)
+    expert_tensors = {
+        expert: {
+            "gate_proj": torch.ones((3, 4), dtype=torch.float16),
+            "up_proj": torch.ones((3, 4), dtype=torch.float16),
+            "down_proj": torch.ones((4, 3), dtype=torch.float16),
+        }
+        for expert in (0, 1)
+    }
+
+    output, _touched, _selected = _run_moe_mlp(
+        hidden_states=hidden,
+        router_weight=router,
+        expert_tensors=expert_tensors,
+        top_k=1,
+        norm_topk_prob=True,
+    )
+
+    assert calls["count"] == 1
+    assert torch.equal(output, torch.zeros_like(hidden))
+
+
 def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
 

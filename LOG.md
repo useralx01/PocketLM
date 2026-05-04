@@ -5290,3 +5290,24 @@ Result: 297 passed in 21.83s
 - Timing comparison vs prior Q4 packed-cache row: total `125.2272s` -> `117.2170s`; continuation_stack_op_load_tensors `40.2723s` -> `35.7300s`.
 - Verdict: real improvement, but not enough. Warm decode is now about `20.3s/token`, still dominated by MoE expert tensor load/dequant orchestration.
 - Full suite: `python -m pytest tests/ -q` -> `334 passed in 22.62s`.
+
+## Phase Q4 MoE Fused Expert Load / Setup
+- Branch: `phase-q4-moe-fused-expert-load`.
+- Starting point: Qwen3-30B-A3B Q4 is coherent with packed cache and fp16 math default, but warm decode remains about `20.3s/token`; measured continuation `load_tensors` still dominates at `35.7300s` across two decode tokens.
+- Goal for this package: reduce per-expert Python loader overhead by batching Q4 expert packed-cache lookup and dequant for selected expert tensors.
+
+## Phase Q4 MoE Fused Expert Load / no-clone handoff
+- Change: Q4-loaded tensors now skip the defensive same-dtype clone in `load_resident_tensor`. Q4 dequant already returns an owned fp16 tensor, so cloning it again is wasted memory bandwidth.
+- Focused tests: `python -m pytest tests\test_tensor_residency.py tests\test_q4_quantizer.py tests\test_runtime_layer_bridge.py -q` -> `97 passed in 3.41s`.
+- Real Qwen3-30B-A3B Q4 row: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `115.0796s`, token rows `71.5458s`, `21.4427s`, `22.0567s`, continuation_stack_op_load_tensors `37.6046s`.
+- Verdict: safe cleanup and slight total improvement, but warm decode did not materially move. The main bottleneck is still per-expert load/dequant orchestration.
+
+## Phase Q4 MoE Fused Expert Load / q4 native MoE stacking policy
+- Probe with `PCKETLM_DISABLE_NATIVE_MOE=1`: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `108.5433s`, token rows `69.0797s`, `19.2237s`, `20.2075s`, continuation_stack_op_load_tensors `33.712s`.
+- Finding: the native selected-MoE wrapper is slower for Q4 because it first dequants selected expert tensors and then stacks full fp16 gate/up/down weights before calling C.
+- Change: Q4 source now skips the stack-heavy native selected-MoE wrapper by default. `PCKETLM_ENABLE_NATIVE_MOE_FOR_Q4=1` keeps the old path available for profiling.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py tests\test_tensor_residency.py tests\test_q4_quantizer.py -q` -> `99 passed in 3.70s`.
+- Default Q4 real row after change: coherent generated text `"<think>\nThe"`, layers_executed `144/144`, total `106.8654s`, token rows `66.9278s`, `19.9113s`, `19.9999s`, continuation_stack_op_load_tensors `33.811s`, prefill_stack_op_load_tensors `47.5472s`, peak working set `3593 MB`, free RAM after `3490 MB`.
+- Q4 cache telemetry on that row: hits `966`, misses `2347`, disk_reads `12121`, resident `1879.03 MB`; tensor_load_stats q4_loads `13087`, shard_opens `742`.
+- Verdict: best current Qwen3-30B-A3B Q4 row is coherent and modestly faster (`117.2170s` -> `106.8654s` total), but target speed is not met. Remaining wall is the high count of small expert Q4 load/dequant calls, not the selected-MoE math wrapper.
+- Full suite: `python -m pytest tests/ -q` -> `337 passed in 22.45s`.
