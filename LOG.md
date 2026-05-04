@@ -5113,3 +5113,11 @@ Result: 297 passed in 21.83s
 - Thread probe: `PCKETLM_NATIVE_THREADS=8` regressed to `79.3329s` total, so default threading remains selected.
 - Full suite: `python -m pytest tests/ -q` -> `307 passed in 30.17s`.
 - Verdict: correctness intact and Qwen 14B improves by about `13.7%` versus the prior BLAS row, but the phase is not at chat speed. The remaining hot path is the memory-bandwidth-scale GEMV math inside the native dense layer.
+
+## Phase Native Packed Layer Executor / prefetched layer bundle bridge
+- Fix: the native dense bridge now accepts `prefetched_tensors` from `run_layer_bridge_stack` and consumes the ready bundle directly instead of calling `load_resident_tensors` again.
+- Test: `test_native_dense_decode_uses_prefetched_tensor_bundle` asserts a prefetched native dense layer does not touch the loader and records no `load_tensors` time.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_prefetched_tensor_bundle tests\test_runtime_layer_bridge.py::test_native_dense_decode_dispatch_runs_one_token_dense_layer tests\test_native_fp16_kv_cache.py -q` -> `13 passed`.
+- Real prefetch probe after the fix (`PCKETLM_ENABLE_LAYER_PREFETCH=1`, Qwen 14B, `hello world`, max_new_tokens=4): generated `Hello! How can`, layers_executed `192/192`, total `306.0006s`, prefetch_wait `281.4568s`.
+- Verdict: duplicate native loads are fixed, but layer prefetch is still too slow and remains opt-in only.
+- Full suite: `python -m pytest tests/ -q` -> `308 passed in 23.50s`.

@@ -310,6 +310,77 @@ def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) ->
         result.native_kv_session.close()
 
 
+def test_native_dense_decode_uses_prefetched_tensor_bundle(monkeypatch) -> None:
+    hidden_size = 8
+    intermediate_size = 16
+    num_heads = 2
+    num_kv_heads = 1
+    head_dim = hidden_size // num_heads
+    kv_width = num_kv_heads * head_dim
+    config = SimpleNamespace(
+        model_id="native-dense-prefetch-test",
+        ready=True,
+        blockers=[],
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        head_dim=head_dim,
+        num_experts=0,
+        num_experts_per_tok=0,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+    )
+    torch.manual_seed(1122)
+    tensors = {
+        f"model.layers.0.input_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        f"model.layers.0.post_attention_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        f"model.layers.0.self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.self_attn.k_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.self_attn.v_proj.weight": (torch.randn((kv_width, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.mlp.gate_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.mlp.up_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.1).to(torch.bfloat16),
+        f"model.layers.0.mlp.down_proj.weight": (torch.randn((hidden_size, intermediate_size)) * 0.1).to(torch.bfloat16),
+    }
+
+    def fake_exists(_model_id, tensor_name):
+        return tensor_name in tensors
+
+    def fail_load_resident_tensors(*_args, **_kwargs):
+        raise AssertionError("native dense decode should consume the prefetched tensor bundle")
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LAYER", raising=False)
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", fake_exists)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fail_load_resident_tensors)
+
+    timings: dict[str, float] = {}
+    result = layer_bridge_module._try_native_dense_decode_bridge(
+        "native-dense-prefetch-test",
+        0,
+        torch.randn((1, 1, hidden_size), dtype=torch.bfloat16),
+        None,
+        None,
+        config,
+        tensor_policy=None,
+        collect_metrics=True,
+        timings=timings,
+        prefetched_tensors=tensors,
+    )
+
+    assert result is not None
+    try:
+        assert result.ready is True
+        assert result.output_tensor is not None
+        assert result.native_kv_session is not None
+        assert result.timings.get("load_tensors", 0.0) == 0.0
+        assert result.timings.get("native_layer", 0.0) > 0.0
+    finally:
+        if result.native_kv_session is not None:
+            result.native_kv_session.close()
+
+
 def test_native_attention_decode_dispatch_runs_one_token_moe_attention(monkeypatch) -> None:
     hidden_size = 8
     num_heads = 2

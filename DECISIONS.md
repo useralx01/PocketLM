@@ -1219,3 +1219,4 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Chose resize-only for buffers that every kernel loop fully overwrites. Kept zero-fill for attention context because heads accumulate into it.
 - Rejected enabling layer prefetch by default: `PCKETLM_ENABLE_LAYER_PREFETCH=1` on the real Qwen 14B 4-token row exited before the diagnostic `after` row, so it is not safe enough for production.
 - Rejected `PCKETLM_NATIVE_THREADS=8` after the scratch change: it regressed Qwen 14B from `63.4436s` to `79.3329s` total.
+- Fixed the native prefetch handoff anyway: prefetched layer bundles now feed the native dense bridge directly. This is architecturally correct for a future packed executor, but it is still not a default because the real Qwen 14B prefetch row completes at `306.0006s` with `281.4568s` spent waiting for prefetch.

@@ -1209,6 +1209,7 @@ def _try_native_dense_decode_bridge(
     collect_metrics: bool,
     timings: dict[str, float],
     native_kv_commit: bool = True,
+    prefetched_tensors: dict[str, torch.Tensor] | None = None,
 ) -> LayerBridgeResult | None:
     if not _native_layer_enabled() or _is_moe_config(config):
         return None
@@ -1246,20 +1247,24 @@ def _try_native_dense_decode_bridge(
         f"model.layers.{layer_index}.self_attn.k_norm.weight",
     ]
     present_optional = [name for name in optional_names if _tensor_entry_exists(model_id, name)]
-    load_started = time.perf_counter()
-    loaded = load_resident_tensors(
-        model_id,
-        required_names + present_optional,
-        dtype=math_dtype,
-        policy=tensor_policy,
-    )
-    timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
     tensors: dict[str, torch.Tensor] = {}
-    for tensor_name in required_names + present_optional:
-        loaded_slice = loaded[tensor_name]
-        if not loaded_slice.ready or loaded_slice.tensor is None:
-            return None
-        tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
+    tensor_names = required_names + present_optional
+    if prefetched_tensors is not None and all(tensor_name in prefetched_tensors for tensor_name in tensor_names):
+        tensors = {tensor_name: prefetched_tensors[tensor_name].to(dtype=math_dtype) for tensor_name in tensor_names}
+    else:
+        load_started = time.perf_counter()
+        loaded = load_resident_tensors(
+            model_id,
+            tensor_names,
+            dtype=math_dtype,
+            policy=tensor_policy,
+        )
+        timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
+        for tensor_name in tensor_names:
+            loaded_slice = loaded[tensor_name]
+            if not loaded_slice.ready or loaded_slice.tensor is None:
+                return None
+            tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
 
     session = None
     try:
@@ -1355,6 +1360,7 @@ def _try_native_dense_prefill_bridge(
     tensor_policy: TensorResidencyPolicy | None,
     collect_metrics: bool,
     timings: dict[str, float],
+    prefetched_tensors: dict[str, torch.Tensor] | None = None,
 ) -> LayerBridgeResult | None:
     if not _native_layer_enabled() or _is_moe_config(config):
         return None
@@ -1394,20 +1400,24 @@ def _try_native_dense_prefill_bridge(
         f"model.layers.{layer_index}.self_attn.k_norm.weight",
     ]
     present_optional = [name for name in optional_names if _tensor_entry_exists(model_id, name)]
-    load_started = time.perf_counter()
-    loaded = load_resident_tensors(
-        model_id,
-        required_names + present_optional,
-        dtype=math_dtype,
-        policy=tensor_policy,
-    )
-    timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
     tensors: dict[str, torch.Tensor] = {}
-    for tensor_name in required_names + present_optional:
-        loaded_slice = loaded[tensor_name]
-        if not loaded_slice.ready or loaded_slice.tensor is None:
-            return None
-        tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
+    tensor_names = required_names + present_optional
+    if prefetched_tensors is not None and all(tensor_name in prefetched_tensors for tensor_name in tensor_names):
+        tensors = {tensor_name: prefetched_tensors[tensor_name].to(dtype=math_dtype) for tensor_name in tensor_names}
+    else:
+        load_started = time.perf_counter()
+        loaded = load_resident_tensors(
+            model_id,
+            tensor_names,
+            dtype=math_dtype,
+            policy=tensor_policy,
+        )
+        timings["load_tensors"] = round(timings.get("load_tensors", 0.0) + (time.perf_counter() - load_started), 4)
+        for tensor_name in tensor_names:
+            loaded_slice = loaded[tensor_name]
+            if not loaded_slice.ready or loaded_slice.tensor is None:
+                return None
+            tensors[tensor_name] = loaded_slice.tensor.to(dtype=math_dtype)
 
     session = None
     try:
@@ -1961,6 +1971,7 @@ def run_minimal_layer_forward_bridge(
         collect_metrics=collect_metrics,
         timings=timings,
         native_kv_commit=native_kv_commit,
+        prefetched_tensors=prefetched_tensors,
     )
     if native_result is not None:
         if not return_kv_cache:
@@ -1977,6 +1988,7 @@ def run_minimal_layer_forward_bridge(
         tensor_policy=tensor_policy,
         collect_metrics=collect_metrics,
         timings=timings,
+        prefetched_tensors=prefetched_tensors,
     )
     if native_prefill_result is not None:
         if not return_kv_cache:
