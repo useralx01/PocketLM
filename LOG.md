@@ -5276,3 +5276,8 @@ Result: 297 passed in 21.83s
 - Decode-only dequantized expert residency probe was rejected: it produced no expert hits and regressed warm decode (`23.47s`/`23.19s`) while increasing RAM pressure.
 - Verdict: Q4 MoE path is correct/coherent and packed-cache hits are real, but the phase speed target is not met. Warm decode remains about `22.6s/token`; the bottleneck is still per-expert `load_tensors` orchestration and many small Q4 expert dequants, not native Q4 math.
 - Full suite: `python -m pytest tests/ -q` -> `332 passed in 21.76s`.
+
+## Phase Q4 MoE Residency / rejected global expert packed cache
+- Probe: `PCKETLM_ENABLE_Q4_PACKED_EXPERT_CACHE=1`, `PCKETLM_Q4_PACKED_CACHE_MB=2048`, Qwen3-30B-A3B Q4 full, max_new_tokens `3`.
+- Result: timed out after `244s` before a diagnostic `after` row. The lingering diagnostic Python process held about `4019.9 MB` working set and was killed; free RAM recovered to `6126067712` bytes.
+- Verdict: globally caching packed expert bytes through prefill is not safe on this machine. The default remains decode-scoped packed expert cache only.
