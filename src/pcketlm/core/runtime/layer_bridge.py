@@ -7,6 +7,7 @@ import math
 import os
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -1120,6 +1121,19 @@ def _native_q4_moe_prefill_enabled() -> bool:
 
 def _q4_decode_dequant_expert_residency_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_Q4_DECODE_DEQUANT_EXPERT_RESIDENCY", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _q4_prefix_scoped_handles_enabled(config: LayerBridgeModelConfig) -> bool:
+    if os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4":
+        return False
+    if not _is_moe_config(config):
+        return False
+    return os.environ.get("PCKETLM_DISABLE_Q4_PREFIX_SCOPED_HANDLES", "0").strip().lower() not in {
         "1",
         "true",
         "yes",
@@ -2432,7 +2446,9 @@ def run_minimal_layer_forward_bridge(
             phase_started = time.perf_counter()
             try:
                 packed_by_name = load_q4_packed_tensors_by_name(model_id, expert_tensor_names)
+                record_phase("mlp_q4_packed_load", phase_started)
                 if all(name in packed_by_name for name in expert_tensor_names):
+                    native_phase_started = time.perf_counter()
                     mlp_output = _run_q4_moe_mlp_token_loop(
                         hidden_states=normed_post_attention,
                         selected_experts=selected_experts,
@@ -2446,6 +2462,7 @@ def run_minimal_layer_forward_bridge(
                     timings["mlp_native_q4_prefill_success_count"] = (
                         timings.get("mlp_native_q4_prefill_success_count", 0.0) + float(sequence_length)
                     )
+                    record_phase("mlp_q4_native_compute", native_phase_started)
                     record_phase("mlp", phase_started)
                 else:
                     record_phase("mlp_native_q4_prefill_fallback", phase_started)
@@ -2842,7 +2859,9 @@ def run_minimal_layer_forward_bridge(
             phase_started = time.perf_counter()
             try:
                 packed_by_name = load_q4_packed_tensors_by_name(model_id, expert_tensor_names)
+                record_phase("mlp_q4_packed_load", phase_started)
                 if all(name in packed_by_name for name in expert_tensor_names):
+                    native_phase_started = time.perf_counter()
                     mlp_output = _run_q4_moe_mlp_token_loop(
                         hidden_states=normed_post_attention,
                         selected_experts=selected_experts,
@@ -2856,6 +2875,7 @@ def run_minimal_layer_forward_bridge(
                     timings["mlp_native_q4_prefill_success_count"] = (
                         timings.get("mlp_native_q4_prefill_success_count", 0.0) + float(sequence_length)
                     )
+                    record_phase("mlp_q4_native_compute", native_phase_started)
                     record_phase("mlp", phase_started)
                 else:
                     record_phase("mlp_native_q4_prefill_fallback", phase_started)
@@ -4516,19 +4536,24 @@ def _run_prompt_decode_loop(
                 cache_sequence_lengths=dict(current_state.cache_sequence_lengths),
             )
         else:
-            stack_result = run_layer_bridge_stack(
-                model_id,
-                start_layer=start_layer,
-                layer_count=effective_layer_count,
-                input_hidden=token_hidden_state,
-                past_key_values=current_state.kv_caches,
-                position_offset=current_state.next_position,
-                return_kv_cache=True,
-                native_kv_sessions=current_state.native_kv_sessions,
-                should_cancel=should_cancel,
-                collect_step_summaries=False,
-                collect_metrics=False,
-            )
+            prefix_scoped_handles_enabled = _q4_prefix_scoped_handles_enabled(config)
+            handle_context = scoped_tensor_handle_cache() if prefix_scoped_handles_enabled else nullcontext()
+            with handle_context:
+                stack_result = run_layer_bridge_stack(
+                    model_id,
+                    start_layer=start_layer,
+                    layer_count=effective_layer_count,
+                    input_hidden=token_hidden_state,
+                    past_key_values=current_state.kv_caches,
+                    position_offset=current_state.next_position,
+                    return_kv_cache=True,
+                    native_kv_sessions=current_state.native_kv_sessions,
+                    should_cancel=should_cancel,
+                    collect_step_summaries=False,
+                    collect_metrics=False,
+                )
+            if prefix_scoped_handles_enabled:
+                prefix_reuse["q4_prefix_scoped_handles"] = True
             add_nested_timings("prefix_append_stack", stack_result.timings)
             if not stack_result.ready or stack_result.output_tensor is None:
                 append_blockers.extend(stack_result.blockers or ["Prefix append stack failed."])

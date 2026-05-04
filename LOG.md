@@ -5464,3 +5464,13 @@ Result: 297 passed in 21.83s
 - Native OpenMP-team probe rejected and reverted: rebuilding `q4_dequant.dll` with one OpenMP team around the selected-expert loop preserved focused correctness tests, but the real row produced second turn `9.018s`, worse than the accepted `8.840s`. The C++/DLL change was restored to the previous committed version.
 - Full suite after final kept changes: `python -m pytest tests/ -q` -> `354 passed in 10.54s`.
 - Verdict: safe cleanup only. The speed blocker is now clearly inside Q4 expert dot/math work and decode-tail/layer-stack compute, not cache, Python payload lookup, or simple thread-count tuning.
+
+## Phase Q4 MoE Expert Kernel / scoped Q4 prefix handles
+- Split timing on the accepted same-session Q4 follow-up showed the second turn at `10.7842s`, with `prefix_append_stack_op_mlp=7.0878s`, `prefix_append_stack_op_mlp_q4_native_compute=4.2624s`, and `prefix_append_stack_op_mlp_q4_packed_load=2.8223s`. This localized more cost inside Q4 expert packed tensor handle/open work during prefix append.
+- Rejected RAM-heavy scoped Q4 expert byte caching. Real row `state/phase-q4-moe-session-prefix-expert-cache-scope.json` started with `5516 MB` free RAM, produced `" the"`, but regressed to `12.091s` second turn and left only `791 MB` free RAM after the second turn.
+- Change kept: Q4 MoE prefix append now opens request-scoped safetensors handles around the prefix append stack and lets `load_q4_packed_tensors_by_name` reuse those handles for grouped packed/scales reads. It does not cache expert bytes in RAM; it only avoids repeated safetensors open/close work while the prefix append stack is running.
+- Focused tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_q4_prefix_scoped_handles_enabled_only_for_q4_moe tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts -q` -> `2 passed in 2.41s`.
+- Runtime-focused tests: `python -m pytest tests/test_runtime_layer_bridge.py tests/test_runtime_tensor_loader.py tests/test_tensor_residency.py -q` -> `114 passed in 4.18s`.
+- Real Qwen3-30B-A3B Q4 same-session row, no explicit cache env except `PCKETLM_TENSOR_SOURCE=q4`: first turn generated `" Paris"` in `19.955s`; second turn generated `" the"` in `7.484s`, prefix reuse matched `5` tokens and appended `6`, `q4_prefix_scoped_handles=true`, tensor load second `0.223s`, stack second `7.132s`, free RAM after second `3874 MB`.
+- Full suite: `python -m pytest tests/ -q` -> `355 passed in 9.94s`.
+- Verdict: accepted as a real follow-up speed win over the locked `8.840s` row. It still does not solve first-token/prompt cost, but it moves same-session Q4 MoE follow-up latency below `8s` without a RAM spike.

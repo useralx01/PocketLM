@@ -584,6 +584,27 @@ def load_q4_packed_tensors_by_name(
     from pcketlm.core.runtime.tensor_residency import q4_packed_cache_get_or_load
 
     for (q4_path, scale_path), entries in groups.items():
+        scoped_q4_handle = open_scoped_tensor_handle(q4_path)
+        scoped_scale_handle = open_scoped_tensor_handle(scale_path)
+        if scoped_q4_handle is not None and scoped_scale_handle is not None:
+            def load_packed(entry: TensorCatalogEntry) -> tuple[torch.Tensor, torch.Tensor]:
+                return (
+                    scoped_q4_handle.get_tensor(entry.tensor_name),
+                    scoped_scale_handle.get_tensor(entry.tensor_name),
+                )
+
+            for entry, payload in entries:
+                packed, scales = q4_packed_cache_get_or_load(
+                    model_id,
+                    entry,
+                    q4_path,
+                    scale_path,
+                    lambda entry=entry: load_packed(entry),
+                )
+                shape = [int(value) for value in payload.get("shape", entry.shape)]
+                results[entry.tensor_name] = (packed, scales, shape)
+            continue
+
         with ExitStack() as stack:
             handles: dict[str, object] = {}
 
