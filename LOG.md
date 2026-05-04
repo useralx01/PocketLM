@@ -5128,3 +5128,22 @@ Result: 297 passed in 21.83s
 - Experimental fused gate/up dense MLP path: focused tests passed, but real Qwen 14B four-token row regressed to total `66.8214s` versus the best committed `63.4436s`. Reverted the source experiment.
 - Rebuilt native DLLs from the reverted source and reran focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py::test_native_dense_decode_uses_prefetched_tensor_bundle -q` -> `12 passed in 4.52s`.
 - Full suite after rejected probes: `python -m pytest tests/ -q` -> `308 passed in 36.26s`.
+
+## Phase Native Packed GEMV / Setup
+- Branch: phase-native-packed-gemv.
+- Goal: prove a packed native GEMV kernel can beat the current row-dot dense path on Qwen 14B-shaped weights before scaling it to full layers/MoE experts.
+
+## Phase Native Packed GEMV / standalone kernel
+- Added `fp16_packed_gemv.dll` with an 8-row interleaved packed weight layout and AVX2 GEMV over fp16/bf16 `uint16` storage.
+- Tests: `python -m pytest tests\test_native_fp16_packed_gemv.py -q` -> `3 passed`.
+- Microbench, single thread, pack time excluded from GEMV timing:
+  - `5120x5120`: pack `0.015928s`, native GEMV `0.003895s`, torch `0.045606s`, speedup `11.71x`, max_abs `0.000671`.
+  - `13824x5120`: pack `0.061900s`, native GEMV `0.014842s`, torch `0.106508s`, speedup `7.18x`, max_abs `0.000992`.
+  - `5120x13824`: pack `0.080446s`, native GEMV `0.014789s`, torch `0.117397s`, speedup `7.94x`, max_abs `0.001862`.
+
+## Phase Native Packed GEMV / production opt-in probe
+- Tried a temporary `PCKETLM_ENABLE_LAYER_PACKED_GEMV=1` hook inside `fp16_kv_cache.dll` that packed each layer weight on demand. Focused tests passed, but real Qwen 14B showed it is not production-safe.
+- One-token opt-in row: generated `Hello`, layers_executed `48/48`, result total `20.0556s`; this was essentially tied/slightly worse than the best default one-token probe.
+- Four-token opt-in row wrote only `start` and `before` events and no `after` row, so the production hook was removed.
+- Rebuilt safe DLLs and reran focused tests: `python -m pytest tests\test_native_fp16_packed_gemv.py tests\test_native_fp16_kv_cache.py -q` -> `14 passed`.
+- Full suite: `python -m pytest tests/ -q` -> `311 passed in 26.13s`.

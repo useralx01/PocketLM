@@ -16,6 +16,7 @@ _FP16_MATMUL_DLL = _NATIVE_DIR / "fp16_matmul.dll"
 _FP16_ATTENTION_DLL = _NATIVE_DIR / "fp16_attention.dll"
 _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
+_FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
@@ -28,6 +29,8 @@ _FP16_MOE_LIB: ctypes.CDLL | None = None
 _FP16_MOE_ERROR: Exception | None = None
 _FP16_KV_LIB: ctypes.CDLL | None = None
 _FP16_KV_ERROR: Exception | None = None
+_FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
+_FP16_PACKED_GEMV_ERROR: Exception | None = None
 
 
 def _native_disabled() -> bool:
@@ -52,6 +55,10 @@ def _native_moe_disabled() -> bool:
 
 def _native_kv_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_KV", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_packed_gemv_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_PACKED_GEMV", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _u16_storage_dtype_code(dtype: torch.dtype) -> int:
@@ -194,6 +201,105 @@ def native_fp16_matmul_available() -> bool:
 def native_fp16_matmul_error() -> Exception | None:
     _load_fp16_matmul_lib()
     return _FP16_MATMUL_ERROR
+
+
+def _load_fp16_packed_gemv_lib() -> ctypes.CDLL | None:
+    global _FP16_PACKED_GEMV_LIB, _FP16_PACKED_GEMV_ERROR
+    if _native_packed_gemv_disabled():
+        return None
+    if _FP16_PACKED_GEMV_LIB is not None:
+        return _FP16_PACKED_GEMV_LIB
+    if not _FP16_PACKED_GEMV_DLL.exists():
+        _FP16_PACKED_GEMV_ERROR = FileNotFoundError(str(_FP16_PACKED_GEMV_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP16_PACKED_GEMV_DLL))
+        lib.native_pack_u16_rows8.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.native_pack_u16_rows8.restype = ctypes.c_int
+        lib.native_packed_gemv_rows8.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_int,
+        ]
+        lib.native_packed_gemv_rows8.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP16_PACKED_GEMV_ERROR = exc
+        return None
+    _FP16_PACKED_GEMV_LIB = lib
+    _FP16_PACKED_GEMV_ERROR = None
+    return lib
+
+
+def native_fp16_packed_gemv_available() -> bool:
+    return _load_fp16_packed_gemv_lib() is not None
+
+
+def native_fp16_packed_gemv_error() -> Exception | None:
+    _load_fp16_packed_gemv_lib()
+    return _FP16_PACKED_GEMV_ERROR
+
+
+def pack_weight_rows8(weight: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp16_packed_gemv_lib()
+    if lib is None:
+        reason = "disabled" if _native_packed_gemv_disabled() else _FP16_PACKED_GEMV_ERROR
+        raise RuntimeError(f"Native packed GEMV is unavailable: {reason}")
+    if weight.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError("pack_weight_rows8 requires torch.float16 or torch.bfloat16 weight")
+    if weight.ndim != 2:
+        raise ValueError("weight must have shape [rows, cols]")
+    weight_cpu = weight.detach().cpu().contiguous()
+    rows = int(weight_cpu.shape[0])
+    cols = int(weight_cpu.shape[1])
+    row_blocks = (rows + 7) // 8
+    packed_u16 = torch.empty((row_blocks * cols * 8,), dtype=torch.uint16)
+    code = lib.native_pack_u16_rows8(
+        ctypes.c_void_p(int(weight_cpu.view(torch.uint16).data_ptr())),
+        ctypes.c_void_p(int(packed_u16.data_ptr())),
+        ctypes.c_longlong(rows),
+        ctypes.c_longlong(cols),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_pack_u16_rows8 failed with code {code}")
+    return packed_u16
+
+
+def packed_gemv_rows8(hidden: torch.Tensor, packed_weight: torch.Tensor, *, rows: int, cols: int) -> torch.Tensor:
+    lib = _load_fp16_packed_gemv_lib()
+    if lib is None:
+        reason = "disabled" if _native_packed_gemv_disabled() else _FP16_PACKED_GEMV_ERROR
+        raise RuntimeError(f"Native packed GEMV is unavailable: {reason}")
+    if hidden.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError("packed_gemv_rows8 requires torch.float16 or torch.bfloat16 hidden")
+    if packed_weight.dtype != torch.uint16:
+        raise TypeError("packed_weight must be a torch.uint16 tensor from pack_weight_rows8")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
+    if hidden_cpu.numel() != int(cols):
+        raise ValueError("hidden length does not match packed weight column count")
+    packed_cpu = packed_weight.detach().cpu().contiguous()
+    expected_count = ((int(rows) + 7) // 8) * int(cols) * 8
+    if packed_cpu.numel() != expected_count:
+        raise ValueError("packed weight length does not match rows/cols")
+    out = torch.empty((int(rows),), dtype=torch.float32)
+    code = lib.native_packed_gemv_rows8(
+        ctypes.c_void_p(int(hidden_cpu.view(torch.uint16).data_ptr())),
+        ctypes.c_void_p(int(packed_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(rows)),
+        ctypes.c_longlong(int(cols)),
+        ctypes.c_int(_u16_storage_dtype_code(hidden_cpu.dtype)),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_packed_gemv_rows8 failed with code {code}")
+    return out
 
 
 def fp16_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

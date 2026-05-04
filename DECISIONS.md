@@ -1223,3 +1223,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Rejected linking OpenBLAS directly into the production KV/layer DLL after a guarded probe. The focused tests passed, but real Qwen 14B one-token timing regressed because the layer path would have to convert each large fp16 weight matrix to fp32 before every `sgemv`. The next real speed path is persistent packed weight layout, not per-call BLAS conversion.
 - Rejected a fused gate/up dot-product loop after real Qwen 14B regressed from `63.4436s` to `66.8214s`. The fused loop likely increases register pressure enough to erase the hidden-vector load savings.
 - Thread-count decision: `PCKETLM_NATIVE_THREADS=1` is fastest among the one-token sweep (`21.536s` vs `22.566s`/`22.744s`), but not enough to justify changing production defaults. Keep thread env as a profiling knob.
+
+## Phase Native Packed GEMV / row8 layout
+- Chose an 8-row interleaved packed layout for the first native packed GEMV kernel. For each output-row block, weights are stored as `[col0 row0..7, col1 row0..7, ...]`, letting one hidden scalar multiply eight output rows in one AVX2 vector.
+- The standalone kernel proves the layout is viable: it is 7x-12x faster than single-thread torch GEMV on Qwen-shaped dimensions when pack time is amortized.
+- Do not pack weights on every production layer call. The real Qwen 14B opt-in probe did not improve one-token latency and failed to complete the four-token diagnostic row. Persistent packed weights, keyed by tensor identity and reused across tokens, are required before production dispatch.

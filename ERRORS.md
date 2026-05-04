@@ -262,3 +262,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: `PCKETLM_ENABLE_LAYER_PREFETCH=1` with Qwen 14B `--slice=full`, `max_new_tokens=4` wrote only `start` and `before` diagnostic rows, then exited before `after`.
 - Root cause: unresolved instability in concurrent layer prefetch plus the native decode path on the real model.
 - Fix: did not promote prefetch to default. The safe change in this phase is C-owned scratch reuse only.
+
+## Phase Native Packed GEMV / per-call production packing
+- Symptom: temporary `PCKETLM_ENABLE_LAYER_PACKED_GEMV=1` hook inside `fp16_kv_cache.dll` completed a one-token Qwen 14B row but failed to produce an `after` row on the four-token diagnostic.
+- Root cause: per-call packing inside the production layer path is unsafe/too expensive for the current loaded tensor lifecycle. The standalone packed GEMV kernel itself passed correctness tests.
+- Fix: removed the production hook and kept only the standalone packed GEMV module. Next implementation must use persistent packed weights instead of packing inside each layer invocation.
