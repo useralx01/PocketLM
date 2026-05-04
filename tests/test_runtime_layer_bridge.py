@@ -16,6 +16,8 @@ from pcketlm.core.runtime.layer_bridge import (
     _recommended_prompt_layer_count,
     _moe_expert_tensor_name_map,
     _moe_router_tensor_name,
+    _native_q4_moe_prefill_enabled,
+    _run_q4_moe_mlp_token_loop,
     _run_moe_mlp,
     _trim_generated_text_at_stop_string,
     _auto_torch_thread_count,
@@ -1138,6 +1140,87 @@ def test_q4_tensor_source_can_opt_into_native_moe(monkeypatch) -> None:
 
     assert calls["count"] == 1
     assert torch.equal(output, torch.zeros_like(hidden))
+
+
+def test_native_q4_moe_prefill_defaults_on_with_kill_switch(monkeypatch) -> None:
+    monkeypatch.delenv("PCKETLM_ENABLE_NATIVE_Q4_MOE_PREFILL", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_Q4_MOE_PREFILL", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_Q4_MOE", raising=False)
+
+    assert _native_q4_moe_prefill_enabled() is True
+
+    monkeypatch.setenv("PCKETLM_DISABLE_NATIVE_Q4_MOE_PREFILL", "1")
+    assert _native_q4_moe_prefill_enabled() is False
+
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_Q4_MOE_PREFILL", raising=False)
+    monkeypatch.setenv("PCKETLM_DISABLE_NATIVE_Q4_MOE", "1")
+    assert _native_q4_moe_prefill_enabled() is False
+
+
+def test_q4_moe_token_loop_matches_dequantized_selected_experts() -> None:
+    from tools.quantize_to_q4 import dequantize_q4_tensor, quantize_tensor_to_q4
+
+    torch.manual_seed(777)
+    hidden_size = 8
+    intermediate_size = 6
+    hidden = torch.randn((1, 2, hidden_size), dtype=torch.float16)
+    selected = torch.tensor([[[0, 1], [1, 0]]], dtype=torch.long)
+    routing = torch.tensor([[[0.75, 0.25], [0.6, 0.4]]], dtype=torch.float32)
+    expert_name_maps = {
+        0: {
+            "gate_proj": "expert.0.gate",
+            "up_proj": "expert.0.up",
+            "down_proj": "expert.0.down",
+        },
+        1: {
+            "gate_proj": "expert.1.gate",
+            "up_proj": "expert.1.up",
+            "down_proj": "expert.1.down",
+        },
+    }
+    packed_by_name = {}
+    dequantized = {}
+    for expert_index in (0, 1):
+        dequantized[expert_index] = {}
+        for role, shape in {
+            "gate_proj": (intermediate_size, hidden_size),
+            "up_proj": (intermediate_size, hidden_size),
+            "down_proj": (hidden_size, intermediate_size),
+        }.items():
+            weight = torch.randn(shape, dtype=torch.float16)
+            packed, scales, metadata = quantize_tensor_to_q4(weight)
+            name = expert_name_maps[expert_index][role]
+            packed_by_name[name] = (packed, scales, metadata["shape"])
+            dequantized[expert_index][role] = dequantize_q4_tensor(
+                packed,
+                scales,
+                metadata["shape"],
+                dtype=torch.float16,
+            )
+
+    expected = torch.zeros_like(hidden.float())
+    for token_index in range(hidden.shape[1]):
+        token_hidden = hidden[:, token_index : token_index + 1, :].float()
+        for slot_index, expert_id in enumerate(selected[0, token_index].tolist()):
+            tensors = dequantized[int(expert_id)]
+            expert_hidden = F.silu(F.linear(token_hidden, tensors["gate_proj"].float())) * F.linear(
+                token_hidden, tensors["up_proj"].float()
+            )
+            expected[:, token_index : token_index + 1, :] += (
+                F.linear(expert_hidden, tensors["down_proj"].float()) * routing[0, token_index, slot_index]
+            )
+
+    actual = _run_q4_moe_mlp_token_loop(
+        hidden_states=hidden,
+        selected_experts=selected,
+        routing_weights=routing,
+        expert_name_maps=expert_name_maps,
+        packed_by_name=packed_by_name,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+
+    assert torch.allclose(actual.float(), expected.to(torch.float16).float(), atol=1e-2, rtol=1e-2)
 
 
 def test_run_layer_bridge_stack_executes_two_real_layers_in_sequence(tmp_path: Path, monkeypatch) -> None:
