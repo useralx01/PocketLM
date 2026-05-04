@@ -5380,3 +5380,4 @@ Result: 297 passed in 21.83s
 - Real Qwen3-30B-A3B Q4 check from `3728 MB` free: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `57.8344s`, token rows `49.223s`, `8.5922s`, continuation_stack `8.1484s`, continuation_stack_op_load_tensors `4.9775s`, continuation_stack_op_mlp `2.528s`, peak working set `3017 MB`, free RAM after `1870 MB`.
 - Full suite: `python -m pytest tests/ -q` -> `345 passed in 22.06s`.
 - Verdict: keep. This is a small but real repeatable-direction improvement over the prior clean `8.9583s` row, while preserving coherent output and anti-cheat `96/96`.
+- Rejected follow-up batched Q4 packed-cache lookup: focused tests passed, but real Qwen3-30B-A3B Q4 row regressed to `8.838s` second token and `5.1809s` continuation load_tensors from `4022 MB` free. The uncommitted change was reverted; one-at-a-time cache lookup with path identity caching remains faster on this hardware.
