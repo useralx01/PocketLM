@@ -4529,6 +4529,7 @@ def _run_prompt_decode_loop(
             if not stack_result.ready or stack_result.output_tensor is None:
                 append_blockers.extend(stack_result.blockers or ["Prefix append stack failed."])
             else:
+                layers_executed_total += len(stack_result.executed_layers)
                 current_token_ids.extend(suffix_token_ids)
                 current_state = KVDecodeState(
                     model_id=model_id,
@@ -4578,6 +4579,7 @@ def _run_prompt_decode_loop(
             output_tensor=stack_result.output_tensor,
             cache_sequence_lengths=dict(current_state.cache_sequence_lengths),
             next_kv_caches=dict(current_state.kv_caches),
+            next_native_kv_sessions=dict(current_state.native_kv_sessions),
             blockers=[],
             timings={"prefix_reuse": round(time.perf_counter() - phase_started, 4)},
         )

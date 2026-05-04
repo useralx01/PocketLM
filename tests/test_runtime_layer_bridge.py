@@ -1581,6 +1581,49 @@ def test_run_prompt_decode_loop_uses_real_prompt_tokenization(tmp_path: Path, mo
     assert result.anti_cheat_passed is True
 
 
+def test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    first = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+    assert first.ready is True
+    assert first.final_decode_state is not None
+    assert first.reusable_token_ids == [1, 2]
+
+    second = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world again",
+        steps=1,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+        initial_decode_state=first.final_decode_state,
+        initial_token_ids=first.reusable_token_ids,
+    )
+
+    assert second.ready is True
+    assert second.prefix_reuse["used"] is True
+    assert second.prefix_reuse["matched_token_count"] == 2
+    assert second.prefix_reuse["appended_token_count"] == 1
+    assert second.layers_executed == 2
+    assert second.expected_layers_executed == 2
+    assert second.anti_cheat_passed is True
+    assert second.final_decode_state is not None
+    assert isinstance(second.final_decode_state.native_kv_sessions, dict)
+
+
 def test_run_prompt_decode_loop_reports_per_token_expert_telemetry(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
 

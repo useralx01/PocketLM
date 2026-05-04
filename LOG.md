@@ -5415,3 +5415,10 @@ Result: 297 passed in 21.83s
 - Verdict: rejected and reverted. The accepted committed baseline remains better overall: `50.3831s` total for four tokens with token rows `28.2801s`, `6.4765s`, `6.829s`, `8.7578s`, and the eight-token row remains the best product evidence with warm rows mostly `5.8s-6.5s/token`.
 - Post-revert focused guard tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts tests/test_runtime_layer_bridge.py::test_native_q4_moe_prefill_defaults_on_with_kill_switch tests/test_q4_quantizer.py::test_native_q4_selected_moe_matches_dequantized_path -q` -> `3 passed in 2.44s`.
 - Post-revert full suite: `python -m pytest tests/ -q` -> `347 passed in 9.83s`.
+
+## Phase Q4 MoE Fused Expert Load / prefix reuse guard fix
+- Finding: the existing prompt-prefix reuse path could crash on the next request after a reusable KV prefix was supplied. The prefix append result was missing `next_native_kv_sessions`, and the anti-cheat layer counter did not include the prefix append stack.
+- Fix: prefix append now carries `next_native_kv_sessions` into the local prefill result and adds the prefix append executed-layer count to `layers_executed_total`.
+- Test added: `test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers`.
+- Focused tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_uses_real_prompt_tokenization tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers tests/test_warm_runner.py -q` -> `5 passed in 1.52s`.
+- Full suite: `python -m pytest tests/ -q` -> `348 passed in 7.93s`.
