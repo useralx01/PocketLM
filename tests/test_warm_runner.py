@@ -25,6 +25,7 @@ def test_warm_runner_start_status_stop(tmp_path, monkeypatch) -> None:
     stopped = stop_warm_runner("qwen-test")
 
     assert started["state"] == "ready"
+    assert started["session_id"] == "default"
     assert status["memory"]["free_ram_mb"] == 8192
     assert status["memory"]["process_working_set_mb"] == 512
     assert stopped["state"] == "stopped"
@@ -81,21 +82,86 @@ def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatc
     assert second.performance_summary["bottleneck"] == "tensor loading"
 
 
+def test_warm_runner_keeps_decode_state_scoped_to_session(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+
+    calls = []
+    states = {
+        "a": SimpleNamespace(ready=True, label="state-a"),
+        "b": SimpleNamespace(ready=True, label="state-b"),
+    }
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(kwargs)
+        session_state = states["a"] if len(calls) in {1, 3} else states["b"]
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text=f"{kwargs['prompt']} OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"used": bool(kwargs.get("initial_decode_state"))},
+            reusable_token_ids=[1, len(calls)],
+            final_decode_state=session_state,
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+
+    first_a = run_warm_agent_prompt(
+        "qwen-test-session",
+        "hello",
+        session_id="chat-a",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+    first_b = run_warm_agent_prompt(
+        "qwen-test-session",
+        "hello",
+        session_id="chat-b",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+    second_a = run_warm_agent_prompt(
+        "qwen-test-session",
+        "hello again",
+        session_id="chat-a",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert first_a.runner_status["session_id"] == "chat-a"
+    assert first_b.runner_status["session_id"] == "chat-b"
+    assert second_a.ready is True
+    assert calls[0]["initial_decode_state"] is None
+    assert calls[1]["initial_decode_state"] is None
+    assert calls[2]["initial_decode_state"] is states["a"]
+    assert calls[2]["initial_decode_state"] is not states["b"]
+    assert warm_runner_status("qwen-test-session", session_id="chat-a")["reusable_token_count"] == 2
+    assert warm_runner_status("qwen-test-session", session_id="chat-b")["reusable_token_count"] == 2
+
+
 def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> None:
     from pcketlm.app.chat_shell import warm_runner_cli
 
     calls = []
 
-    def fake_start(model_id: str):
-        return {"model_id": model_id, "state": "ready"}
+    def fake_start(model_id: str, session_id: str = "default"):
+        return {"model_id": model_id, "session_id": session_id, "state": "ready"}
 
-    def fake_status(model_id: str):
-        return {"model_id": model_id, "state": "ready", "request_count": 2}
+    def fake_status(model_id: str, session_id: str = "default"):
+        return {"model_id": model_id, "session_id": session_id, "state": "ready", "request_count": 2}
 
     def fake_run(
         model_id: str,
         prompt: str,
         *,
+        session_id: str,
         max_new_tokens: int,
         min_free_memory_mb: int,
         apply_chat_format: bool,
@@ -103,6 +169,7 @@ def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> N
         calls.append(
             {
                 "model_id": model_id,
+                "session_id": session_id,
                 "prompt": prompt,
                 "max_new_tokens": max_new_tokens,
                 "min_free_memory_mb": min_free_memory_mb,
@@ -124,6 +191,8 @@ def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> N
             "sequence",
             "--model",
             "qwen-test",
+            "--session-id",
+            "probe",
             "--prompt",
             "hello",
             "--second-prompt",
@@ -137,6 +206,8 @@ def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> N
     )
 
     assert exit_code == 0
+    assert calls[0]["model_id"] == "qwen-test"
+    assert calls[0]["session_id"] == "probe"
     assert calls[0]["prompt"] == "hello"
     assert calls[0]["max_new_tokens"] == 2
     assert calls[0]["min_free_memory_mb"] == 1024

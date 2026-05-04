@@ -15,7 +15,7 @@ def _print(payload: dict) -> None:
 def _usage() -> str:
     return (
         "Usage: py -m pcketlm.app.chat_shell.warm_runner_cli "
-        "<start|run|status|stop|sequence> --model <id> [--prompt <text>] [--second-prompt <text>] "
+        "<start|run|status|stop|sequence> --model <id> [--session-id <id>] [--prompt <text>] [--second-prompt <text>] "
         "[--max-new-tokens <n>] [--min-free-memory-mb <n>] [--raw] [--independent-second]"
     )
 
@@ -28,6 +28,7 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
         "model": "qwen2.5-14b-instruct",
         "prompt": "hello world",
         "second_prompt": "reply ok only",
+        "session_id": "default",
         "max_new_tokens": 2,
         "min_free_memory_mb": 4096,
         "apply_chat_format": True,
@@ -46,6 +47,10 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
             continue
         if flag == "--second-prompt" and index + 1 < len(args):
             options["second_prompt"] = args[index + 1]
+            index += 2
+            continue
+        if flag == "--session-id" and index + 1 < len(args):
+            options["session_id"] = args[index + 1]
             index += 2
             continue
         if flag == "--max-new-tokens" and index + 1 < len(args):
@@ -79,19 +84,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     model_id = str(options["model"])
+    session_id = str(options["session_id"])
     if command == "start":
-        _print(start_warm_runner(model_id))
+        _print(start_warm_runner(model_id, session_id=session_id))
         return 0
     if command == "status":
-        _print(warm_runner_status(model_id))
+        _print(warm_runner_status(model_id, session_id=session_id))
         return 0
     if command == "stop":
-        _print(stop_warm_runner(model_id))
+        _print(stop_warm_runner(model_id, session_id=session_id))
         return 0
     if command == "run":
         result = run_warm_agent_prompt(
             model_id,
             str(options["prompt"]),
+            session_id=session_id,
             max_new_tokens=int(options["max_new_tokens"]),
             min_free_memory_mb=int(options["min_free_memory_mb"]),
             apply_chat_format=bool(options["apply_chat_format"]),
@@ -99,10 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         _print(result.to_dict())
         return 0 if result.ready else 2
     if command == "sequence":
-        start = start_warm_runner(model_id)
+        start = start_warm_runner(model_id, session_id=session_id)
         first = run_warm_agent_prompt(
             model_id,
             str(options["prompt"]),
+            session_id=session_id,
             max_new_tokens=int(options["max_new_tokens"]),
             min_free_memory_mb=int(options["min_free_memory_mb"]),
             apply_chat_format=bool(options["apply_chat_format"]),
@@ -115,11 +123,12 @@ def main(argv: list[str] | None = None) -> int:
         second = run_warm_agent_prompt(
             model_id,
             second_prompt,
+            session_id=session_id,
             max_new_tokens=int(options["max_new_tokens"]),
             min_free_memory_mb=int(options["min_free_memory_mb"]),
             apply_chat_format=bool(options["apply_chat_format"]),
         )
-        status = warm_runner_status(model_id)
+        status = warm_runner_status(model_id, session_id=session_id)
         _print(
             {
                 "start": start,

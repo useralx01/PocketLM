@@ -5430,3 +5430,14 @@ Result: 297 passed in 21.83s
 - Cleaner probe timing: first turn stack `20.157s`, tensor load `12.092s`; second turn stack `13.401s`, tensor load `3.957s`. Memory after first turn `3583 MB` free, after second `3502 MB` free.
 - Verdict: prefix/KV reuse now works on a real Qwen3-30B-A3B Q4 two-turn run and cuts repeated tensor loading significantly. It is not a universal first-token fix; it helps follow-up chat/agent turns when the new prompt begins with the previous reusable token prefix.
 - Full suite after CLI and warm-runner changes: `python -m pytest tests/ -q` -> `349 passed in 11.18s`.
+
+## Phase Q4 MoE Fused Expert Load / session-scoped warm runner reuse
+- Change: warm runner state is now keyed by `(model_id, session_id)` instead of by model only. Status payloads and persisted status files include `session_id`. `warm_runner_cli` accepts `--session-id` and passes it through start/run/status/stop/sequence.
+- Safety: different chat sessions no longer inherit each other's reusable token ids or KV decode state. Stopping one session clears tensor residency only when no other runner for the same model remains.
+- Tests added: `test_warm_runner_keeps_decode_state_scoped_to_session`; CLI sequence test now verifies `--session-id`.
+- Real Qwen3-30B-A3B Q4 session probe: `--session-id q4-session-probe`, prompt `"The capital of France is"`, second prompt `"It is known for"`, max_new_tokens `1`, raw mode, `PCKETLM_Q4_PACKED_CACHE_MB=2048`.
+- First turn generated `" Paris"` in `20.400s`; stack `19.102s`, tensor load `11.588s`, memory after `2688 MB` free.
+- Second same-session turn generated `" the"` in `12.414s`; prefix reuse `used=true`, matched `5` tokens, appended `6`; stack `11.839s`, tensor load `3.520s`, memory after `2859 MB` free.
+- Verdict: same-session KV/prefix reuse is now product-safe and measurably reduces repeated prompt tensor loading on real Qwen3 Q4. It does not make unrelated prompts faster, by design.
+- Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_web_main.py::test_agent_mode_can_use_opt_in_warm_runner tests/test_web_main.py::test_warm_runner_control_start_and_stop tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers -q` -> `8 passed in 2.40s`.
+- Full suite: `python -m pytest tests/ -q` -> `350 passed in 9.28s`.

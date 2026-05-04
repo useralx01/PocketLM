@@ -27,6 +27,7 @@ class WarmRunnerRequestResult:
     """One warm runner prompt response plus runner telemetry."""
 
     model_id: str
+    session_id: str
     mode: str
     prompt: str
     ready: bool
@@ -46,6 +47,7 @@ class WarmRunnerRequestResult:
     def to_dict(self) -> dict:
         return {
             "model_id": self.model_id,
+            "session_id": self.session_id,
             "mode": self.mode,
             "prompt": self.prompt,
             "ready": self.ready,
@@ -66,9 +68,10 @@ class WarmRunnerRequestResult:
 
 @dataclass(slots=True)
 class WarmRunner:
-    """In-process warm state for one model/mode pair."""
+    """In-process warm state for one model/session/mode tuple."""
 
     model_id: str
+    session_id: str = "default"
     mode: str = "Agent"
     state: str = "idle"
     started_at: float = field(default_factory=time.time)
@@ -92,6 +95,7 @@ class WarmRunner:
     def to_dict(self) -> dict:
         return {
             "model_id": self.model_id,
+            "session_id": self.session_id,
             "mode": self.mode,
             "state": self.state,
             "started_at": self.started_at,
@@ -118,9 +122,14 @@ def _status_dir() -> Path:
     return path
 
 
-def _status_path(model_id: str) -> Path:
-    safe_id = model_id.replace("/", "_").replace("\\", "_")
-    return _status_dir() / f"{safe_id}.json"
+def _safe_status_id(value: str) -> str:
+    return value.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+def _status_path(model_id: str, session_id: str = "default") -> Path:
+    safe_id = _safe_status_id(model_id)
+    safe_session = _safe_status_id(session_id or "default")
+    return _status_dir() / f"{safe_id}__{safe_session}.json"
 
 
 def _bytes_to_mb(value: int | None) -> int | None:
@@ -209,20 +218,22 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
 
 
 def _write_runner_status(runner: WarmRunner) -> None:
-    _status_path(runner.model_id).write_text(json.dumps(runner.to_dict(), indent=2), encoding="utf-8")
+    _status_path(runner.model_id, runner.session_id).write_text(
+        json.dumps(runner.to_dict(), indent=2), encoding="utf-8"
+    )
 
 
-def _runner_key(model_id: str) -> str:
-    return model_id.strip().lower()
+def _runner_key(model_id: str, session_id: str = "default") -> str:
+    return f"{model_id.strip().lower()}::{(session_id or 'default').strip().lower()}"
 
 
-def start_warm_runner(model_id: str, mode: str = "Agent") -> dict:
+def start_warm_runner(model_id: str, mode: str = "Agent", session_id: str = "default") -> dict:
     """Start or return the in-process warm runner for a model."""
     with _RUNNERS_LOCK:
-        key = _runner_key(model_id)
+        key = _runner_key(model_id, session_id)
         runner = _RUNNERS.get(key)
         if runner is None:
-            runner = WarmRunner(model_id=model_id, mode=mode, state="ready")
+            runner = WarmRunner(model_id=model_id, session_id=session_id or "default", mode=mode, state="ready")
             _RUNNERS[key] = runner
         else:
             runner.mode = mode
@@ -234,19 +245,20 @@ def start_warm_runner(model_id: str, mode: str = "Agent") -> dict:
         return runner.to_dict()
 
 
-def warm_runner_status(model_id: str) -> dict:
+def warm_runner_status(model_id: str, session_id: str = "default") -> dict:
     """Return live in-process status, or the last persisted status."""
     with _RUNNERS_LOCK:
-        runner = _RUNNERS.get(_runner_key(model_id))
+        runner = _RUNNERS.get(_runner_key(model_id, session_id))
         if runner is not None:
             runner.memory = warm_runner_memory_snapshot()
             _write_runner_status(runner)
             return runner.to_dict()
     try:
-        return json.loads(_status_path(model_id).read_text(encoding="utf-8"))
+        return json.loads(_status_path(model_id, session_id).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {
             "model_id": model_id,
+            "session_id": session_id or "default",
             "mode": "Agent",
             "state": "stopped",
             "request_count": 0,
@@ -257,19 +269,20 @@ def warm_runner_status(model_id: str) -> dict:
         }
 
 
-def stop_warm_runner(model_id: str) -> dict:
+def stop_warm_runner(model_id: str, session_id: str = "default") -> dict:
     """Stop the warm runner and clear warm tensor/session state."""
     with _RUNNERS_LOCK:
-        runner = _RUNNERS.pop(_runner_key(model_id), None)
+        runner = _RUNNERS.pop(_runner_key(model_id, session_id), None)
         if runner is None:
-            runner = WarmRunner(model_id=model_id, state="stopped")
+            runner = WarmRunner(model_id=model_id, session_id=session_id or "default", state="stopped")
         runner.state = "stopped"
         runner.decode_state = None
         runner.reusable_token_ids = []
         runner.prefix_reuse_available = False
         runner.tensor_residency_warm = False
         runner.memory = warm_runner_memory_snapshot()
-        clear_tensor_residency_cache()
+        if not any(value.model_id == model_id for value in _RUNNERS.values()):
+            clear_tensor_residency_cache()
         _write_runner_status(runner)
         return runner.to_dict()
 
@@ -282,6 +295,7 @@ def _blocked_result(runner: WarmRunner, prompt: str, max_new_tokens: int, blocke
     _write_runner_status(runner)
     return WarmRunnerRequestResult(
         model_id=runner.model_id,
+        session_id=runner.session_id,
         mode=runner.mode,
         prompt=prompt,
         ready=False,
@@ -309,12 +323,12 @@ def run_warm_agent_prompt(
     run_prompt_decode_loop_fn=None,
 ) -> WarmRunnerRequestResult:
     """Run one short Agent prompt through the conservative in-process warm runner."""
-    del session_id  # Reserved for the future service form; one runner currently owns one warm state.
     with _RUNNERS_LOCK:
-        runner = _RUNNERS.get(_runner_key(model_id))
+        runner_key = _runner_key(model_id, session_id)
+        runner = _RUNNERS.get(runner_key)
         if runner is None:
-            start_warm_runner(model_id, mode=mode)
-            runner = _RUNNERS[_runner_key(model_id)]
+            start_warm_runner(model_id, mode=mode, session_id=session_id)
+            runner = _RUNNERS[runner_key]
 
         memory_before = warm_runner_memory_snapshot()
         free_ram_mb = memory_before.get("free_ram_mb")
@@ -357,6 +371,7 @@ def run_warm_agent_prompt(
             _write_runner_status(runner)
             return WarmRunnerRequestResult(
                 model_id=model_id,
+                session_id=runner.session_id,
                 mode=mode,
                 prompt=prompt,
                 ready=False,
@@ -395,6 +410,7 @@ def run_warm_agent_prompt(
         timings = dict(getattr(result, "timings", {}) or {})
         return WarmRunnerRequestResult(
             model_id=model_id,
+            session_id=runner.session_id,
             mode=mode,
             prompt=prompt,
             ready=bool(getattr(result, "ready", False)),
