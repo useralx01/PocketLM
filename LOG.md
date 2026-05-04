@@ -5221,3 +5221,9 @@ Result: 297 passed in 21.83s
 - Native row8 handle Qwen 14B two-token row using layer-0 artifact: generated `Hello!`, layers_executed `96/96`, result total `38.3431s`, continuation `17.7185s`, `load_packed_artifact_native=1.4518s`.
 - Full suite: `python -m pytest tests/ -q` -> `323 passed in 26.18s`.
 - Verdict: C-owned row8 handles fix the Python clone/lifetime issue, but a layer-0-only artifact is not a speed win. The next meaningful test needs a multi-layer or whole-model row8 artifact so the native handle path replaces enough projection loads to matter.
+
+## Phase Native Row8 Artifact Handles / four-layer artifact probe
+- Built Qwen 14B artifact `row8_layers0_3`: tensor_count `28`, total_packed_bytes `2202009600`, size_ratio `1.0`.
+- First run started with only `5131 MB` free RAM and exited before `after`; after closing `msedge`, free RAM rose to `8.76 GB`.
+- Qwen 14B two-token row with `row8_layers0_3`, native handles, cache budget `0 MB`: generated `Hello!`, layers_executed `96/96`, result total `37.4794s`, continuation `17.2998s`, `load_packed_artifact_native=2.5323s`.
+- Comparison: same-session baseline after RAM cleanup was `35.0999s` total and `14.7824s` continuation. Four-layer row8 handles are correct but still slower because artifact bytes are reloaded for each covered layer/token instead of mmap-reused.
