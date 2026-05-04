@@ -5350,3 +5350,10 @@ Result: 297 passed in 21.83s
 - Clean default rerun: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `60.8984s`, token rows `51.8412s`, `9.0416s`, continuation_stack_op_load_tensors `4.4952s`, continuation_stack_op_mlp `3.5510s`, peak working set `3307 MB`, free RAM after `2191 MB`.
 - Verdict: keep as a guarded default because it slightly improves the committed direct-Q4 baseline (`9.1017s` -> `9.0416s` second token) and can reach `7.9918s` under better RAM conditions, but do not claim stable under-8 yet. Remaining wall is still selected-expert Q4 load/dequant orchestration plus MLP math.
 - Full suite: `python -m pytest tests/ -q` -> `342 passed in 22.07s`.
+
+## Phase Q4 MoE Fused Expert Load / post-cache probes
+- Freed editor toolchain RAM by stopping `pyrefly` (`~1.6 GB`) before another real measurement.
+- Restored committed Q4 kernel after the rejected scratch/fusion probes and reran default Qwen3-30B-A3B Q4 full, max_new_tokens `2`.
+- Result: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `64.7181s`, token rows `55.7437s`, `8.9583s`, continuation_stack_op_load_tensors `3.9855s`, continuation_stack_op_mlp `3.8483s`, peak working set `3441 MB`, free RAM after `2380 MB`.
+- Probe with `PCKETLM_NATIVE_THREADS=4`: coherent generated text `"<think>\n"`, layers_executed `96/96`, total `66.3818s`, token rows `56.8366s`, `9.5273s`, continuation_stack_op_load_tensors `4.9265s`, continuation_stack_op_mlp `3.5636s`.
+- Verdict: keep native thread count unchanged. Four native threads helps MLP a little but worsens tensor loading and total decode. Current best repeatable default row is `8.9583s` second token; the phase is closer but still not a stable under-8 unlock.

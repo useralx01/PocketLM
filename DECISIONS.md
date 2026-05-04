@@ -1292,3 +1292,5 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Reason: all-layer dequantized Q4 attention residency was too memory-heavy and slower, but the small front-layer window reduces repeated non-expert Q4 loads without trying to retain the full attention set.
 - The measured result is a modest/default-safe win, not a solved speed phase. A clean default row improved second-token time slightly (`9.1017s` to `9.0416s`) while a better-RAM explicit probe reached `7.9918s`. Because that under-8 row was not stable across reruns, the status remains partial.
 - Rejected thread-local scratch buffers in the native selected-expert kernel after a real row regressed. The allocation savings did not overcome the actual bottleneck.
+- Rejected fused gate/up Q4 row-dot dispatch after it passed correctness but regressed the real row to `11.0063s` second token. The hidden-vector reuse idea is sound, but this AVX2 shape increases enough work/register pressure that it loses on the real model.
+- Rejected `PCKETLM_NATIVE_THREADS=4` as a default after it regressed the real row to `9.5273s` second token. Keep thread count as a manual profiling knob.
