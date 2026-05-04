@@ -1212,3 +1212,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase Native fp16 BLAS / Layer GEMV rollback
 - OpenBLAS stays in `fp16_matmul.dll` only. Linking the production C-owned KV/layer DLL to OpenBLAS was unstable on the real 14B continuation path even when the BLAS branch was disabled. The layer DLL therefore remains on the prior handwritten GEMV loops for this phase.
 - This means the BLAS deliverable is correct and benchmarked in isolation, but it does not yet unlock the end-to-end fp16 speed targets. The next viable speed path is a purpose-built native GEMV/weight-packing layer kernel rather than per-call fp16->fp32 conversion into OpenBLAS.
+
+## Phase Native Packed Layer Executor / first cut
+- Started with the smallest safe packed-executor move: make `KvSession` own reusable scratch buffers for dense decode and attention decode.
+- Reasoning: a full packed weight executor is the right product direction, but it is risky to jump straight to persistent model-scale weight packing. Reusing C-owned scratch state is low risk, preserves the current ABI, and makes allocation churn visible in the real Qwen 14B row.
+- Chose resize-only for buffers that every kernel loop fully overwrites. Kept zero-fill for attention context because heads accumulate into it.
+- Rejected enabling layer prefetch by default: `PCKETLM_ENABLE_LAYER_PREFETCH=1` on the real Qwen 14B 4-token row exited before the diagnostic `after` row, so it is not safe enough for production.
+- Rejected `PCKETLM_NATIVE_THREADS=8` after the scratch change: it regressed Qwen 14B from `63.4436s` to `79.3329s` total.

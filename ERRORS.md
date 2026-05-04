@@ -257,3 +257,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: real Qwen 14B continuation exited before diagnostic completion when `fp16_kv_cache.dll` was linked against OpenBLAS.
 - Root cause: OpenBLAS dependency in the C-owned KV/layer DLL was not stable at real model dimensions on this Windows runtime; small tests were insufficient to catch it.
 - Fix: removed OpenBLAS from the KV/layer DLL and kept BLAS isolated to `fp16_matmul.dll`.
+
+## Phase Native Packed Layer Executor / unsafe prefetch probe
+- Symptom: `PCKETLM_ENABLE_LAYER_PREFETCH=1` with Qwen 14B `--slice=full`, `max_new_tokens=4` wrote only `start` and `before` diagnostic rows, then exited before `after`.
+- Root cause: unresolved instability in concurrent layer prefetch plus the native decode path on the real model.
+- Fix: did not promote prefetch to default. The safe change in this phase is C-owned scratch reuse only.

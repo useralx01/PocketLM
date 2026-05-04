@@ -5099,3 +5099,17 @@ Result: 297 passed in 21.83s
 
 ## Phase Native fp16 BLAS / Tests
 - Full suite: `python -m pytest tests/ -q` -> `307 passed in 11.38s`.
+
+## Phase Native Packed Layer Executor / Setup
+- Branch: `phase-native-packed-layer-executor`.
+- Goal: make Qwen 14B dense faster by reducing repeated Python/load/native handoff around the native dense layer path, then expand only after correctness holds.
+
+## Phase Native Packed Layer Executor / C-owned scratch buffers
+- Change: moved native dense/KV decode temporary buffers into the C-owned `KvSession` so repeated decode calls reuse capacity instead of allocating vectors for every layer call. Buffers that are fully overwritten now use resize-only; only attention context remains zero-filled because it is an accumulator.
+- Safety gate: initial rebuild hit Windows Application Control `[WinError 4551]`; fixed by deleting `fp16_kv_cache.dll`, rebuilding, and running `Unblock-File`.
+- Focused tests: `python -m pytest tests\test_native_fp16_kv_cache.py tests\test_runtime_layer_bridge.py -q` -> `52 passed`.
+- Qwen 14B default row (`hello world`, max_new_tokens=4): generated `Hello! How can`, token ids `[9707, 0, 2585, 646]`, layers_executed `192/192`, total `63.4436s`; continuation_stack_op_native_layer `36.9096s`, prefill_stack `17.6028s`.
+- Comparison rows: prior BLAS-phase 14B row was `73.5275s` total; first scratch version was `66.9853s`; resize-only scratch row was `63.4436s`.
+- Thread probe: `PCKETLM_NATIVE_THREADS=8` regressed to `79.3329s` total, so default threading remains selected.
+- Full suite: `python -m pytest tests/ -q` -> `307 passed in 30.17s`.
+- Verdict: correctness intact and Qwen 14B improves by about `13.7%` versus the prior BLAS row, but the phase is not at chat speed. The remaining hot path is the memory-bandwidth-scale GEMV math inside the native dense layer.

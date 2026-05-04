@@ -24,6 +24,25 @@ struct KvSession {
     int64_t kv_width = 0;
     int dtype_code = 0; // 0 = fp16, 1 = bf16
     std::vector<LayerKvState> layers;
+    std::vector<float> scratch_input_norm;
+    std::vector<float> scratch_residual;
+    std::vector<float> scratch_post_norm;
+    std::vector<float> scratch_gate;
+    std::vector<float> scratch_up;
+    std::vector<float> scratch_activated;
+    std::vector<float> scratch_mlp_out;
+    std::vector<uint16_t> scratch_input_norm_u16;
+    std::vector<uint16_t> scratch_attention_out_u16;
+    std::vector<uint16_t> scratch_residual_u16;
+    std::vector<uint16_t> scratch_post_norm_u16;
+    std::vector<float> scratch_q;
+    std::vector<float> scratch_k;
+    std::vector<float> scratch_v;
+    std::vector<float> scratch_context;
+    std::vector<float> scratch_scores;
+    std::vector<float> scratch_projected;
+    std::vector<uint16_t> scratch_k_u16;
+    std::vector<uint16_t> scratch_v_u16;
 };
 
 static inline float fp16_to_fp32(uint16_t value) {
@@ -582,9 +601,12 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
         return 5;
     }
     const int64_t kv_repeat = num_attention_heads / num_key_value_heads;
-    std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
-    std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
-    std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
+    std::vector<float>& q = session->scratch_q;
+    std::vector<float>& k = session->scratch_k;
+    std::vector<float>& v = session->scratch_v;
+    q.resize(static_cast<size_t>(hidden_size));
+    k.resize(static_cast<size_t>(kv_width));
+    v.resize(static_cast<size_t>(kv_width));
     linear_three_same_input(
         hidden,
         q_weight,
@@ -604,8 +626,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
-    std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
-    std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
+    std::vector<uint16_t>& k_half = session->scratch_k_u16;
+    std::vector<uint16_t>& v_half = session->scratch_v_u16;
+    k_half.resize(static_cast<size_t>(kv_width));
+    v_half.resize(static_cast<size_t>(kv_width));
     for (int64_t index = 0; index < kv_width; ++index) {
         k_half[static_cast<size_t>(index)] = write_u16(k[static_cast<size_t>(index)], session->dtype_code);
         v_half[static_cast<size_t>(index)] = write_u16(v[static_cast<size_t>(index)], session->dtype_code);
@@ -616,8 +640,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
     }
 
     const int64_t total_len = state.committed_len + state.tentative_len;
-    std::vector<float> context(static_cast<size_t>(hidden_size), 0.0f);
-    std::vector<float> scores(static_cast<size_t>(total_len), 0.0f);
+    std::vector<float>& context = session->scratch_context;
+    std::vector<float>& scores = session->scratch_scores;
+    context.assign(static_cast<size_t>(hidden_size), 0.0f);
+    scores.resize(static_cast<size_t>(total_len));
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     for (int64_t head = 0; head < num_attention_heads; ++head) {
         const int64_t kv_head = head / kv_repeat;
@@ -657,7 +683,8 @@ extern "C" __declspec(dllexport) int kv_attention_decode_fp16(
         }
     }
 
-    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& projected = session->scratch_projected;
+    projected.resize(static_cast<size_t>(hidden_size));
     if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), hidden_size, hidden_size, session->dtype_code)) {
         #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < hidden_size; ++row) {
@@ -720,9 +747,12 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
         return 5;
     }
     const int64_t kv_repeat = num_attention_heads / num_key_value_heads;
-    std::vector<float> q(static_cast<size_t>(hidden_size), 0.0f);
-    std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
-    std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
+    std::vector<float>& q = session->scratch_q;
+    std::vector<float>& k = session->scratch_k;
+    std::vector<float>& v = session->scratch_v;
+    q.resize(static_cast<size_t>(hidden_size));
+    k.resize(static_cast<size_t>(kv_width));
+    v.resize(static_cast<size_t>(kv_width));
     linear_three_same_input(
         hidden,
         q_weight,
@@ -744,8 +774,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
-    std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
-    std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
+    std::vector<uint16_t>& k_half = session->scratch_k_u16;
+    std::vector<uint16_t>& v_half = session->scratch_v_u16;
+    k_half.resize(static_cast<size_t>(kv_width));
+    v_half.resize(static_cast<size_t>(kv_width));
     for (int64_t index = 0; index < kv_width; ++index) {
         k_half[static_cast<size_t>(index)] = write_u16(k[static_cast<size_t>(index)], session->dtype_code);
         v_half[static_cast<size_t>(index)] = write_u16(v[static_cast<size_t>(index)], session->dtype_code);
@@ -756,8 +788,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
     }
 
     const int64_t total_len = state.committed_len + state.tentative_len;
-    std::vector<float> context(static_cast<size_t>(hidden_size), 0.0f);
-    std::vector<float> scores(static_cast<size_t>(total_len), 0.0f);
+    std::vector<float>& context = session->scratch_context;
+    std::vector<float>& scores = session->scratch_scores;
+    context.assign(static_cast<size_t>(hidden_size), 0.0f);
+    scores.resize(static_cast<size_t>(total_len));
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     for (int64_t head = 0; head < num_attention_heads; ++head) {
         const int64_t kv_head = head / kv_repeat;
@@ -791,7 +825,8 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext(
         }
     }
 
-    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& projected = session->scratch_projected;
+    projected.resize(static_cast<size_t>(hidden_size));
     if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), hidden_size, hidden_size, session->dtype_code)) {
         #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < hidden_size; ++row) {
@@ -855,9 +890,12 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
         return 5;
     }
     const int64_t kv_repeat = num_attention_heads / num_key_value_heads;
-    std::vector<float> q(static_cast<size_t>(attention_width), 0.0f);
-    std::vector<float> k(static_cast<size_t>(kv_width), 0.0f);
-    std::vector<float> v(static_cast<size_t>(kv_width), 0.0f);
+    std::vector<float>& q = session->scratch_q;
+    std::vector<float>& k = session->scratch_k;
+    std::vector<float>& v = session->scratch_v;
+    q.resize(static_cast<size_t>(attention_width));
+    k.resize(static_cast<size_t>(kv_width));
+    v.resize(static_cast<size_t>(kv_width));
     linear_three_same_input(
         hidden,
         q_weight,
@@ -879,8 +917,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
     apply_rope_one(q.data(), num_attention_heads, head_dim, position, rope_theta);
     apply_rope_one(k.data(), num_key_value_heads, head_dim, position, rope_theta);
 
-    std::vector<uint16_t> k_half(static_cast<size_t>(kv_width), 0);
-    std::vector<uint16_t> v_half(static_cast<size_t>(kv_width), 0);
+    std::vector<uint16_t>& k_half = session->scratch_k_u16;
+    std::vector<uint16_t>& v_half = session->scratch_v_u16;
+    k_half.resize(static_cast<size_t>(kv_width));
+    v_half.resize(static_cast<size_t>(kv_width));
     for (int64_t index = 0; index < kv_width; ++index) {
         k_half[static_cast<size_t>(index)] = write_u16(k[static_cast<size_t>(index)], session->dtype_code);
         v_half[static_cast<size_t>(index)] = write_u16(v[static_cast<size_t>(index)], session->dtype_code);
@@ -891,8 +931,10 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
     }
 
     const int64_t total_len = state.committed_len + state.tentative_len;
-    std::vector<float> context(static_cast<size_t>(attention_width), 0.0f);
-    std::vector<float> scores(static_cast<size_t>(total_len), 0.0f);
+    std::vector<float>& context = session->scratch_context;
+    std::vector<float>& scores = session->scratch_scores;
+    context.assign(static_cast<size_t>(attention_width), 0.0f);
+    scores.resize(static_cast<size_t>(total_len));
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     for (int64_t head = 0; head < num_attention_heads; ++head) {
         const int64_t kv_head = head / kv_repeat;
@@ -926,7 +968,8 @@ extern "C" __declspec(dllexport) int kv_attention_decode_u16_ext_hd(
         }
     }
 
-    std::vector<float> projected(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& projected = session->scratch_projected;
+    projected.resize(static_cast<size_t>(hidden_size));
     if (!linear_float_u16_blas(context.data(), o_weight, projected.data(), attention_width, hidden_size, session->dtype_code)) {
         #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < hidden_size; ++row) {
@@ -977,15 +1020,17 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
         return 2;
     }
 
-    std::vector<float> input_norm(static_cast<size_t>(hidden_size), 0.0f);
     KvSession* session = reinterpret_cast<KvSession*>(handle);
     if (session == nullptr) {
         return 3;
     }
     const int dtype_code = session->dtype_code;
+    std::vector<float>& input_norm = session->scratch_input_norm;
+    input_norm.resize(static_cast<size_t>(hidden_size));
     rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps, dtype_code);
-    std::vector<uint16_t> input_norm_half;
-    std::vector<uint16_t> attention_out(static_cast<size_t>(hidden_size), 0);
+    std::vector<uint16_t>& input_norm_half = session->scratch_input_norm_u16;
+    std::vector<uint16_t>& attention_out = session->scratch_attention_out_u16;
+    attention_out.resize(static_cast<size_t>(hidden_size));
     const int attention_code = kv_attention_decode_fp16(
         handle,
         layer,
@@ -1004,21 +1049,24 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
         return 100 + attention_code;
     }
 
-    std::vector<float> residual_after_attention(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& residual_after_attention = session->scratch_residual;
+    residual_after_attention.resize(static_cast<size_t>(hidden_size));
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
         residual_after_attention[static_cast<size_t>(dim)] =
             read_u16(hidden[dim], dtype_code) + read_u16(attention_out[static_cast<size_t>(dim)], dtype_code);
     }
 
-    std::vector<uint16_t> residual_half;
-    std::vector<float> post_norm(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<uint16_t>& residual_half = session->scratch_residual_u16;
+    std::vector<float>& post_norm = session->scratch_post_norm;
+    post_norm.resize(static_cast<size_t>(hidden_size));
     rms_norm_one(floats_to_u16_buffer(residual_after_attention, residual_half, dtype_code), post_norm_weight, post_norm.data(), hidden_size, rms_eps, dtype_code);
 
-    std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
-    std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
-    std::vector<float> hidden_half_source = post_norm;
-    std::vector<uint16_t> post_norm_half;
-    uint16_t* post_norm_half_ptr = floats_to_u16_buffer(hidden_half_source, post_norm_half, dtype_code);
+    std::vector<float>& gate = session->scratch_gate;
+    std::vector<float>& up = session->scratch_up;
+    gate.resize(static_cast<size_t>(intermediate_size));
+    up.resize(static_cast<size_t>(intermediate_size));
+    std::vector<uint16_t>& post_norm_half = session->scratch_post_norm_u16;
+    uint16_t* post_norm_half_ptr = floats_to_u16_buffer(post_norm, post_norm_half, dtype_code);
     linear_two_same_input(
         post_norm_half_ptr,
         gate_weight,
@@ -1029,13 +1077,15 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_fp16(
         intermediate_size,
         dtype_code
     );
-    std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float>& activated = session->scratch_activated;
+    activated.resize(static_cast<size_t>(intermediate_size));
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
         const float g = gate[static_cast<size_t>(dim)];
         activated[static_cast<size_t>(dim)] = (g / (1.0f + std::exp(-g))) * up[static_cast<size_t>(dim)];
     }
 
-    std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& mlp_out = session->scratch_mlp_out;
+    mlp_out.resize(static_cast<size_t>(hidden_size));
     if (!linear_float_u16_blas(activated.data(), down_weight, mlp_out.data(), intermediate_size, hidden_size, dtype_code)) {
         #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < hidden_size; ++row) {
@@ -1172,10 +1222,12 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
     }
     const int dtype_code = session->dtype_code;
 
-    std::vector<float> input_norm(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& input_norm = session->scratch_input_norm;
+    input_norm.resize(static_cast<size_t>(hidden_size));
     rms_norm_one(hidden, input_norm_weight, input_norm.data(), hidden_size, rms_eps, dtype_code);
-    std::vector<uint16_t> input_norm_storage;
-    std::vector<uint16_t> attention_out(static_cast<size_t>(hidden_size), 0);
+    std::vector<uint16_t>& input_norm_storage = session->scratch_input_norm_u16;
+    std::vector<uint16_t>& attention_out = session->scratch_attention_out_u16;
+    attention_out.resize(static_cast<size_t>(hidden_size));
     const int attention_code = kv_attention_decode_u16_ext(
         handle,
         layer,
@@ -1200,14 +1252,16 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
         return 100 + attention_code;
     }
 
-    std::vector<float> residual_after_attention(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& residual_after_attention = session->scratch_residual;
+    residual_after_attention.resize(static_cast<size_t>(hidden_size));
     for (int64_t dim = 0; dim < hidden_size; ++dim) {
         residual_after_attention[static_cast<size_t>(dim)] =
             read_u16(hidden[dim], dtype_code) + read_u16(attention_out[static_cast<size_t>(dim)], dtype_code);
     }
 
-    std::vector<uint16_t> residual_storage;
-    std::vector<float> post_norm(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<uint16_t>& residual_storage = session->scratch_residual_u16;
+    std::vector<float>& post_norm = session->scratch_post_norm;
+    post_norm.resize(static_cast<size_t>(hidden_size));
     rms_norm_one(
         floats_to_u16_buffer(residual_after_attention, residual_storage, dtype_code),
         post_norm_weight,
@@ -1217,10 +1271,12 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
         dtype_code
     );
 
-    std::vector<uint16_t> post_norm_storage;
+    std::vector<uint16_t>& post_norm_storage = session->scratch_post_norm_u16;
     uint16_t* post_norm_ptr = floats_to_u16_buffer(post_norm, post_norm_storage, dtype_code);
-    std::vector<float> gate(static_cast<size_t>(intermediate_size), 0.0f);
-    std::vector<float> up(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float>& gate = session->scratch_gate;
+    std::vector<float>& up = session->scratch_up;
+    gate.resize(static_cast<size_t>(intermediate_size));
+    up.resize(static_cast<size_t>(intermediate_size));
     linear_two_same_input(
         post_norm_ptr,
         gate_weight,
@@ -1232,13 +1288,15 @@ extern "C" __declspec(dllexport) int kv_dense_layer_decode_u16_ext(
         dtype_code
     );
 
-    std::vector<float> activated(static_cast<size_t>(intermediate_size), 0.0f);
+    std::vector<float>& activated = session->scratch_activated;
+    activated.resize(static_cast<size_t>(intermediate_size));
     for (int64_t dim = 0; dim < intermediate_size; ++dim) {
         const float g = gate[static_cast<size_t>(dim)];
         activated[static_cast<size_t>(dim)] = (g / (1.0f + std::exp(-g))) * up[static_cast<size_t>(dim)];
     }
 
-    std::vector<float> mlp_out(static_cast<size_t>(hidden_size), 0.0f);
+    std::vector<float>& mlp_out = session->scratch_mlp_out;
+    mlp_out.resize(static_cast<size_t>(hidden_size));
     if (!linear_float_u16_blas(activated.data(), down_weight, mlp_out.data(), intermediate_size, hidden_size, dtype_code)) {
         #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < hidden_size; ++row) {
