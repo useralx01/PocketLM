@@ -5405,3 +5405,13 @@ Result: 297 passed in 21.83s
 - Focused guard tests after defaulting the path on: `python -m pytest tests/test_runtime_layer_bridge.py::test_native_q4_moe_prefill_defaults_on_with_kill_switch tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts tests/test_q4_quantizer.py::test_native_q4_selected_moe_matches_dequantized_path -q` -> `3 passed in 1.83s`.
 - Full suite: `python -m pytest tests/ -q` -> `347 passed in 10.22s`.
 - Verdict: accepted for Q4 MoE as the default fast path. It keeps full-layer anti-cheat, produces coherent English, and moves warm decode into roughly `5.8s` to `6.5s/token` after the first token. The exact wording differs from the slower Q4/fp16 path, so this is documented as Q4 approximate execution rather than token-identical fp16.
+
+## Phase Q4 MoE Fused Expert Load / rejected prefill batch kernel
+- Trial: replaced the accepted token-by-token native packed-Q4 MoE prefill loop with a single ctypes batch call over all prompt tokens, then tried buffer reuse, `PCKETLM_NATIVE_THREADS=1`, and one outer OpenMP region.
+- Batch-call row: Qwen3-30B-A3B Q4 full, max_new_tokens `4`, generated `"- The capital of"`, layers `192/192`, total `52.5617s`, token rows `29.5981s`, `8.5582s`, `7.1957s`, `7.1783s`, prefill stack `28.5089s`, prefill load `10.2896s`, prefill MLP `12.4357s`.
+- Buffer-reuse row: generated `"- The capital of"`, layers `192/192`, total `53.1544s`, token rows `30.1612s`, `7.8463s`, `6.5503s`, `8.5598s`, prefill MLP `12.5775s`.
+- Single-thread row: `PCKETLM_NATIVE_THREADS=1`, generated `"- The capital of"`, layers `192/192`, total `87.6647s`, first token `61.2135s`, prefill MLP `42.2423s`.
+- Outer-OpenMP row: generated `"- The capital of"`, layers `192/192`, total `57.6431s`, token rows `32.3989s`, `8.728s`, `7.2754s`, `9.1991s`, prefill load `13.0379s`, prefill MLP `10.5087s`.
+- Verdict: rejected and reverted. The accepted committed baseline remains better overall: `50.3831s` total for four tokens with token rows `28.2801s`, `6.4765s`, `6.829s`, `8.7578s`, and the eight-token row remains the best product evidence with warm rows mostly `5.8s-6.5s/token`.
+- Post-revert focused guard tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_q4_moe_token_loop_matches_dequantized_selected_experts tests/test_runtime_layer_bridge.py::test_native_q4_moe_prefill_defaults_on_with_kill_switch tests/test_q4_quantizer.py::test_native_q4_selected_moe_matches_dequantized_path -q` -> `3 passed in 2.44s`.
+- Post-revert full suite: `python -m pytest tests/ -q` -> `347 passed in 9.83s`.
