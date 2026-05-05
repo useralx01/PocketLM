@@ -13,7 +13,7 @@ from pathlib import Path
 from ctypes import wintypes
 from typing import Any
 
-from pcketlm.core.runtime.layer_bridge import KVDecodeState, run_prompt_decode_loop
+from pcketlm.core.runtime.layer_bridge import KVDecodeState, run_prompt_decode_loop, run_prompt_prefill_session
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
 from pcketlm.core.runtime.tensor_residency import (
     clear_dequantized_tensor_residency_cache,
@@ -29,6 +29,7 @@ Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
 Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
 Q4_MOE_LOW_FREE_RAM_TRIM_MB = 800
 Q4_MOE_PRIME_PROMPT = "The capital of France is"
+Q4_MOE_PRIME_MODE = "prefill"
 
 
 @dataclass(slots=True)
@@ -336,6 +337,11 @@ def _q4_moe_prime_prompt() -> str:
     return os.environ.get("PCKETLM_Q4_MOE_PRIME_PROMPT", Q4_MOE_PRIME_PROMPT)
 
 
+def _q4_moe_prime_mode() -> str:
+    requested = os.environ.get("PCKETLM_Q4_MOE_PRIME_MODE", Q4_MOE_PRIME_MODE).strip().lower()
+    return requested if requested in {"prefill", "generate"} else Q4_MOE_PRIME_MODE
+
+
 @contextmanager
 def _scoped_environment(updates: dict[str, str]):
     previous = {key: os.environ.get(key) for key in updates}
@@ -355,9 +361,10 @@ def _prime_q4_moe_warm_runner(
     runner: WarmRunner,
     *,
     run_prompt_decode_loop_fn=None,
+    run_prompt_prefill_session_fn=None,
     prompt: str | None = None,
 ) -> None:
-    """Warm Q4 MoE packed/tensor caches without making dummy KV reusable."""
+    """Warm Q4 MoE packed/tensor caches and optionally prepare reusable prefix KV."""
     if runner.primed:
         return
     scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
@@ -365,18 +372,30 @@ def _prime_q4_moe_warm_runner(
     started = time.perf_counter()
     try:
         with _scoped_environment(scoped_env):
-            runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
-            result = runner_fn(
-                runner.model_id,
-                prompt=prompt or _q4_moe_prime_prompt(),
-                max_new_tokens=1,
-                min_new_tokens=1,
-                selection_policy="greedy",
-                apply_chat_format=False,
-                initial_decode_state=None,
-                initial_token_ids=None,
-                commit_generated_prefix=False,
-            )
+            if _q4_moe_prime_mode() == "prefill":
+                prefill_fn = (
+                    run_prompt_prefill_session
+                    if run_prompt_prefill_session_fn is None
+                    else run_prompt_prefill_session_fn
+                )
+                result = prefill_fn(
+                    runner.model_id,
+                    prompt=prompt or _q4_moe_prime_prompt(),
+                    apply_chat_format=False,
+                )
+            else:
+                runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
+                result = runner_fn(
+                    runner.model_id,
+                    prompt=prompt or _q4_moe_prime_prompt(),
+                    max_new_tokens=1,
+                    min_new_tokens=1,
+                    selection_policy="greedy",
+                    apply_chat_format=False,
+                    initial_decode_state=None,
+                    initial_token_ids=None,
+                    commit_generated_prefix=False,
+                )
     except Exception as exc:
         runner.blockers = [f"Q4 MoE cache prime failed: {exc}"]
         runner.last_error = runner.blockers[0]
@@ -411,6 +430,7 @@ def start_warm_runner(
     prime: bool | None = None,
     prime_prompt: str | None = None,
     run_prompt_decode_loop_fn=None,
+    run_prompt_prefill_session_fn=None,
 ) -> dict:
     """Start or return the in-process warm runner for a model."""
     with _RUNNERS_LOCK:
@@ -430,6 +450,7 @@ def start_warm_runner(
             _prime_q4_moe_warm_runner(
                 runner,
                 run_prompt_decode_loop_fn=run_prompt_decode_loop_fn,
+                run_prompt_prefill_session_fn=run_prompt_prefill_session_fn,
                 prompt=prime_prompt,
             )
         _write_runner_status(runner)

@@ -73,6 +73,7 @@ def test_warm_runner_explicit_q4_moe_start_primes_cache(tmp_path, monkeypatch) -
         ),
     )
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_MOE_PRIME_MODE", "generate")
 
     status = start_warm_runner(
         "qwen3-q4-moe-prime-test",
@@ -97,6 +98,71 @@ def test_warm_runner_explicit_q4_moe_start_primes_cache(tmp_path, monkeypatch) -
                 "initial_decode_state": None,
                 "initial_token_ids": None,
                 "commit_generated_prefix": False,
+            },
+        )
+    ]
+
+
+def test_warm_runner_default_q4_moe_start_prefills_reusable_prefix(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    calls = []
+    state = SimpleNamespace(ready=True)
+
+    def fake_run_prompt_prefill_session(model_id: str, **kwargs):
+        calls.append((model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text="",
+            full_text="The capital of France is",
+            generated_token_ids=[],
+            steps_completed=0,
+            max_new_tokens=0,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"prefill_session": True},
+            reusable_token_ids=[1, 2, 3, 4, 5],
+            final_decode_state=state,
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(runtime.warm_runner, "tensor_residency_stats", lambda: SimpleNamespace(resident_count=3))
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.delenv("PCKETLM_Q4_MOE_PRIME_MODE", raising=False)
+
+    status = start_warm_runner(
+        "qwen3-q4-moe-prefill-prime-test",
+        run_prompt_prefill_session_fn=fake_run_prompt_prefill_session,
+    )
+
+    assert status["primed"] is True
+    assert status["prime_generated_text"] == ""
+    assert status["request_count"] == 0
+    assert status["reusable_token_count"] == 5
+    assert status["prefix_reuse_available"] is True
+    assert calls == [
+        (
+            "qwen3-q4-moe-prefill-prime-test",
+            {
+                "prompt": "The capital of France is",
+                "apply_chat_format": False,
             },
         )
     ]

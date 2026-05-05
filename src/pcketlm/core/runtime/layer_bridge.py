@@ -663,6 +663,7 @@ class KVDecodeState:
     cache_sequence_lengths: dict[str, int] = field(default_factory=dict)
     kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     native_kv_sessions: dict[int, Any] = field(default_factory=dict)
+    last_hidden_state: torch.Tensor | None = None
     finished: bool = False
     stop_reason: str | None = None
     ready: bool = False
@@ -3924,6 +3925,7 @@ def run_kv_decode_step(
         cache_sequence_lengths=dict(stack_result.cache_sequence_lengths),
         kv_caches=dict(stack_result.next_kv_caches),
         native_kv_sessions=dict(stack_result.next_native_kv_sessions),
+        last_hidden_state=stack_result.output_tensor[:, -1:, :].contiguous(),
         finished=reached_eos,
         stop_reason=stop_reason,
         ready=decode_result.ready and selection_result.ready,
@@ -4277,6 +4279,196 @@ def run_prompt_decode_loop(
     return _run_prompt_decode_loop(model_id, prompt, **kwargs)
 
 
+def run_prompt_prefill_session(
+    model_id: str,
+    prompt: str,
+    start_layer: int = 0,
+    layer_count: int | None = None,
+    system_prompt: str | None = None,
+    apply_chat_format: bool = True,
+    should_cancel: Callable[[], bool] | None = None,
+) -> PromptDecodeLoopResult:
+    """Prefill a prompt and return reusable KV state without selecting a token."""
+    use_scoped_handles = _use_scoped_safetensor_handles(model_id, 1)
+    if use_scoped_handles:
+        with scoped_tensor_handle_cache():
+            return _run_prompt_prefill_session(
+                model_id,
+                prompt,
+                start_layer=start_layer,
+                layer_count=layer_count,
+                system_prompt=system_prompt,
+                apply_chat_format=apply_chat_format,
+                should_cancel=should_cancel,
+            )
+    return _run_prompt_prefill_session(
+        model_id,
+        prompt,
+        start_layer=start_layer,
+        layer_count=layer_count,
+        system_prompt=system_prompt,
+        apply_chat_format=apply_chat_format,
+        should_cancel=should_cancel,
+    )
+
+
+@torch.inference_mode()
+def _run_prompt_prefill_session(
+    model_id: str,
+    prompt: str,
+    start_layer: int = 0,
+    layer_count: int | None = None,
+    system_prompt: str | None = None,
+    apply_chat_format: bool = True,
+    should_cancel: Callable[[], bool] | None = None,
+) -> PromptDecodeLoopResult:
+    total_started = time.perf_counter()
+    timings: dict[str, float] = {}
+
+    def finish_timings() -> dict[str, float]:
+        payload = dict(timings)
+        payload["total"] = round(time.perf_counter() - total_started, 4)
+        return payload
+
+    def record_phase(name: str, started: float) -> None:
+        timings[name] = round(timings.get(name, 0.0) + (time.perf_counter() - started), 4)
+
+    configure_runtime_threads()
+    phase_started = time.perf_counter()
+    prepared_prompt_result = prepare_prompt_text(
+        model_id,
+        prompt,
+        system_prompt=system_prompt,
+        apply_chat_format=apply_chat_format,
+    )
+    record_phase("prepare_prompt", phase_started)
+    prompt_token_ids = list(prepared_prompt_result.token_ids)
+    blockers = list(prepared_prompt_result.blockers)
+    config = load_layer_bridge_config(model_id)
+    effective_layer_count = layer_count
+    if effective_layer_count is None:
+        effective_layer_count = int(config.num_hidden_layers if config.ready else 0)
+    configured_layer_count = int(config.num_hidden_layers if config.ready else effective_layer_count)
+    is_default_full_stack_run = layer_count is None and start_layer == 0 and configured_layer_count > 0
+    if is_default_full_stack_run and effective_layer_count < configured_layer_count:
+        raise RuntimeError(
+            f"Anti-cheat guard refused a default prefill run with {effective_layer_count} "
+            f"layers for a {configured_layer_count}-layer model."
+        )
+    if _cancel_requested(should_cancel):
+        blockers.append(CANCEL_BLOCKER)
+    if blockers or not prompt_token_ids:
+        return PromptDecodeLoopResult(
+            model_id=model_id,
+            prompt=prepared_prompt_result.prepared_prompt,
+            prompt_token_ids=prompt_token_ids,
+            generated_token_ids=[],
+            generated_text="",
+            full_text=prompt,
+            steps_requested=0,
+            max_new_tokens=0,
+            min_new_tokens=0,
+            steps_completed=0,
+            strategy="prompt-prefill-kv-cache-rope",
+            blockers=blockers,
+            ready=False,
+            timings=finish_timings(),
+            configured_layer_count=configured_layer_count,
+            prompt_layer_count=effective_layer_count,
+            layers_executed=0,
+            expected_layers_executed=effective_layer_count if is_default_full_stack_run else 0,
+            anti_cheat_passed=not is_default_full_stack_run,
+        )
+
+    phase_started = time.perf_counter()
+    prompt_hidden_state, prompt_hidden_blockers = load_token_entry_hidden_state(model_id, prompt_token_ids)
+    record_phase("token_entry", phase_started)
+    if prompt_hidden_blockers or prompt_hidden_state is None:
+        blockers.extend(prompt_hidden_blockers or ["Token entry failed before prefill."])
+        return PromptDecodeLoopResult(
+            model_id=model_id,
+            prompt=prepared_prompt_result.prepared_prompt,
+            prompt_token_ids=prompt_token_ids,
+            generated_token_ids=[],
+            generated_text="",
+            full_text=prompt,
+            steps_requested=0,
+            max_new_tokens=0,
+            min_new_tokens=0,
+            steps_completed=0,
+            strategy="prompt-prefill-kv-cache-rope",
+            blockers=blockers,
+            ready=False,
+            timings=finish_timings(),
+            configured_layer_count=configured_layer_count,
+            prompt_layer_count=effective_layer_count,
+            layers_executed=0,
+            expected_layers_executed=effective_layer_count,
+            anti_cheat_passed=False,
+        )
+
+    phase_started = time.perf_counter()
+    prefill_stack = run_layer_bridge_stack(
+        model_id,
+        start_layer=start_layer,
+        layer_count=effective_layer_count,
+        input_hidden=prompt_hidden_state,
+        return_kv_cache=True,
+        should_cancel=should_cancel,
+        collect_step_summaries=False,
+        collect_metrics=False,
+    )
+    record_phase("prefill_stack", phase_started)
+    for key, value in prefill_stack.timings.items():
+        timings[f"prefill_stack_{key}"] = round(float(value), 4)
+    layers_executed = len(prefill_stack.executed_layers)
+    anti_cheat_blockers: list[str] = []
+    if is_default_full_stack_run and layers_executed < effective_layer_count:
+        anti_cheat_blockers.append(
+            f"Anti-cheat guard: executed {layers_executed} layer forwards, expected {effective_layer_count}."
+        )
+    ready = prefill_stack.ready and prefill_stack.output_tensor is not None and not anti_cheat_blockers
+    full_text, full_blockers = decode_token_ids_to_text(model_id, prompt_token_ids)
+    final_decode_state = None
+    if ready:
+        final_decode_state = KVDecodeState(
+            model_id=model_id,
+            next_token_id=-1,
+            next_position=len(prompt_token_ids),
+            generated_token_ids=list(prompt_token_ids),
+            cache_sequence_lengths=dict(prefill_stack.cache_sequence_lengths),
+            kv_caches=dict(prefill_stack.next_kv_caches),
+            native_kv_sessions=dict(prefill_stack.next_native_kv_sessions),
+            last_hidden_state=prefill_stack.output_tensor[:, -1:, :].contiguous(),
+            ready=True,
+        )
+    return PromptDecodeLoopResult(
+        model_id=model_id,
+        prompt=prepared_prompt_result.prepared_prompt,
+        prompt_token_ids=prompt_token_ids,
+        generated_token_ids=[],
+        generated_text="",
+        full_text=full_text,
+        steps_requested=0,
+        max_new_tokens=0,
+        min_new_tokens=0,
+        steps_completed=0,
+        strategy="prompt-prefill-kv-cache-rope",
+        cache_sequence_lengths=dict(prefill_stack.cache_sequence_lengths),
+        blockers=list(prefill_stack.blockers) + list(full_blockers) + anti_cheat_blockers,
+        ready=ready,
+        timings=finish_timings(),
+        prefix_reuse={"prefill_session": ready},
+        reusable_token_ids=list(prompt_token_ids) if ready else [],
+        configured_layer_count=configured_layer_count,
+        prompt_layer_count=effective_layer_count,
+        layers_executed=layers_executed,
+        expected_layers_executed=effective_layer_count,
+        anti_cheat_passed=not anti_cheat_blockers,
+        final_decode_state=final_decode_state,
+    )
+
+
 def _use_scoped_safetensor_handles(model_id: str, effective_steps: int) -> bool:
     """Return whether one prompt call should reuse safetensors handles."""
     scoped_setting = os.environ.get("PCKETLM_SCOPED_SAFETENSOR_HANDLE_CACHE", "auto").strip().lower()
@@ -4519,6 +4711,18 @@ def _run_prompt_decode_loop(
         and int(initial_decode_state.next_token_id) >= 0
         and not initial_decode_state.finished
     )
+    can_use_cached_prefill_tail = (
+        initial_decode_state is not None
+        and initial_decode_state.ready
+        and initial_decode_state.model_id == model_id
+        and prefix_matches_prompt
+        and state_matches_supplied_prefix
+        and prefix_append_start == len(prompt_token_ids)
+        and int(initial_decode_state.next_token_id) < 0
+        and initial_decode_state.last_hidden_state is not None
+        and not initial_decode_state.finished
+    )
+    first_token_from_cached_prefill = False
     if initial_decode_state is not None or supplied_prefix_ids:
         if can_use_pending_prefix_token:
             prefix_reuse.update(
@@ -4528,6 +4732,16 @@ def _run_prompt_decode_loop(
                     "appended_token_count": 0,
                     "pending_token_reused": True,
                     "summary": "Exact reusable prompt prefix matched; returned the already-selected pending token.",
+                }
+            )
+        elif can_use_cached_prefill_tail:
+            prefix_reuse.update(
+                {
+                    "used": True,
+                    "matched_token_count": len(supplied_prefix_ids),
+                    "appended_token_count": 0,
+                    "cached_prefill_tail_used": True,
+                    "summary": "Exact reusable prompt prefix matched; reused cached prefill hidden state for token selection.",
                 }
             )
         elif can_try_prefix:
@@ -4603,7 +4817,20 @@ def _run_prompt_decode_loop(
             final_decode_state=initial_decode_state,
         )
 
-    if can_try_prefix:
+    if can_use_cached_prefill_tail:
+        phase_started = time.perf_counter()
+        first_token_from_cached_prefill = True
+        prefill_stack = SimpleNamespace(
+            ready=True,
+            output_tensor=initial_decode_state.last_hidden_state,
+            cache_sequence_lengths=dict(initial_decode_state.cache_sequence_lengths),
+            next_kv_caches=dict(initial_decode_state.kv_caches),
+            next_native_kv_sessions=dict(initial_decode_state.native_kv_sessions),
+            blockers=[],
+            timings={"cached_prefill_tail": 0.0},
+        )
+        record_phase("cached_prefill_tail", phase_started)
+    elif can_try_prefix:
         phase_started = time.perf_counter()
         suffix_token_ids = prompt_token_ids[prefix_append_start:]
         token_hidden_state, token_hidden_blockers = load_token_entry_hidden_state(model_id, suffix_token_ids)
@@ -4855,6 +5082,7 @@ def _run_prompt_decode_loop(
         cache_sequence_lengths=dict(prefill_stack.cache_sequence_lengths),
         kv_caches=dict(prefill_stack.next_kv_caches),
         native_kv_sessions=dict(prefill_stack.next_native_kv_sessions),
+        last_hidden_state=prefill_stack.output_tensor[:, -1:, :].contiguous(),
         finished=reached_stop,
         stop_reason=first_stop_reason,
         ready=True,
@@ -4902,8 +5130,8 @@ def _run_prompt_decode_loop(
             configured_layer_count=configured_layer_count,
             prompt_layer_count=effective_layer_count,
             layers_executed=layers_executed_total,
-            expected_layers_executed=effective_layer_count,
-            anti_cheat_passed=layers_executed_total >= effective_layer_count,
+            expected_layers_executed=0 if first_token_from_cached_prefill else effective_layer_count,
+            anti_cheat_passed=True if first_token_from_cached_prefill else layers_executed_total >= effective_layer_count,
             final_decode_state=decode_state,
         )
     generated_token_ids = [first_generated_token_id]
@@ -4986,7 +5214,10 @@ def _run_prompt_decode_loop(
     generated_text, _triggered_stop_string = _trim_generated_text_at_stop_string(generated_text, effective_stop_strings)
     if stop_reason is None:
         stop_reason = decode_state.stop_reason if decode_state.finished else ("step-limit" if steps_completed >= effective_max_new_tokens else None)
-    expected_layers_executed = effective_layer_count * max(1, steps_completed)
+    expected_layers_executed = effective_layer_count * max(
+        0 if first_token_from_cached_prefill else 1,
+        steps_completed - (1 if first_token_from_cached_prefill else 0),
+    )
     anti_cheat_blockers: list[str] = []
     if is_default_full_stack_run and layers_executed_total < expected_layers_executed:
         anti_cheat_blockers.append(

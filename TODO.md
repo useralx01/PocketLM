@@ -125,4 +125,4 @@
 - After scoped safetensors handle reuse, the Qwen3-30B-A3B Q4 same-session follow-up target moved to `7.484s`. Next speed work should attack the remaining prefix append layer/expert compute, not add RAM-heavy expert byte caches.
 - Do not revisit simple generated-prefix commit or a basic one-call Q4 selected-expert batch wrapper as defaults; both were re-measured after scoped handles and regressed.
 - Do not default native thread-count tuning until it is repeatable across fresh runs; the one `6.908s` row was not stable.
-- Next target after Q4 MoE primed start: generalize priming from an exact benchmark prompt to real chat prefixes and arbitrary first prompts. Explicit prime/load now hides the `21-23s` cold setup and gives a `2.482s/token` visible matching answer, but unrelated first prompts still need full prefill.
+- Next target after Q4 MoE prefix-prefill: teach the product/chat layer to choose useful reusable prefixes automatically instead of relying on the operator to set `PCKETLM_Q4_MOE_PRIME_PROMPT`.

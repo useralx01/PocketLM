@@ -35,6 +35,7 @@ from pcketlm.core.runtime.layer_bridge import (
     run_layer_bridge_stack,
     run_minimal_layer_forward_bridge,
     run_prompt_decode_loop,
+    run_prompt_prefill_session,
     run_repeated_decode_loop,
     runtime_torch_thread_count,
     runtime_math_dtype_name,
@@ -1793,6 +1794,84 @@ def test_run_prompt_decode_loop_reuses_exact_pending_prefix_token(
     assert second.layers_executed == 0
     assert second.expected_layers_executed == 0
     assert second.anti_cheat_passed is True
+
+
+def test_run_prompt_prefill_session_returns_reusable_cached_tail_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    result = run_prompt_prefill_session(
+        model_id,
+        prompt="hello world",
+        start_layer=0,
+        layer_count=2,
+        apply_chat_format=False,
+    )
+
+    assert result.ready is True
+    assert result.generated_token_ids == []
+    assert result.steps_completed == 0
+    assert result.reusable_token_ids == [1, 2]
+    assert result.layers_executed == 2
+    assert result.expected_layers_executed == 2
+    assert result.anti_cheat_passed is True
+    assert result.final_decode_state is not None
+    assert result.final_decode_state.next_token_id == -1
+    assert result.final_decode_state.next_position == 2
+    assert result.final_decode_state.generated_token_ids == [1, 2]
+    assert result.final_decode_state.last_hidden_state is not None
+
+
+def test_run_prompt_decode_loop_reuses_cached_prefill_tail_for_first_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    prefill = run_prompt_prefill_session(
+        model_id,
+        prompt="hello world",
+        start_layer=0,
+        layer_count=2,
+        apply_chat_format=False,
+    )
+    assert prefill.ready is True
+    direct = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+    assert direct.ready is True
+
+    reused = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        layer_count=2,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+        initial_decode_state=prefill.final_decode_state,
+        initial_token_ids=prefill.reusable_token_ids,
+    )
+
+    assert reused.ready is True
+    assert reused.generated_token_ids == direct.generated_token_ids
+    assert reused.prefix_reuse["used"] is True
+    assert reused.prefix_reuse["cached_prefill_tail_used"] is True
+    assert "prefill_stack" not in reused.timings
+    assert "cached_prefill_tail" in reused.timings
+    assert reused.layers_executed == 0
+    assert reused.expected_layers_executed == 0
+    assert reused.anti_cheat_passed is True
 
 
 def test_run_prompt_decode_loop_reports_per_token_expert_telemetry(tmp_path: Path, monkeypatch) -> None:
