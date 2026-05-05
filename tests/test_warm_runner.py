@@ -327,6 +327,101 @@ def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, m
     assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS") is None
 
 
+def test_warm_runner_allows_longer_q4_moe_visible_chunks(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    calls = []
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1, 2, 3, 4, 5],
+            steps_completed=5,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-chunk-test",
+        "hello",
+        max_new_tokens=10,
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert calls[0]["max_new_tokens"] == 10
+    assert result.max_new_tokens == 10
+
+
+def test_warm_runner_keeps_legacy_two_token_cap_for_non_q4_moe(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+
+    calls = []
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            generated_text="OK",
+            full_text="hello OK",
+            generated_token_ids=[1, 2],
+            steps_completed=2,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.delenv("PCKETLM_TENSOR_SOURCE", raising=False)
+
+    result = run_warm_agent_prompt(
+        "qwen-test-cap",
+        "hello",
+        max_new_tokens=10,
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert result.ready is True
+    assert calls[0]["max_new_tokens"] == 2
+    assert result.max_new_tokens == 2
+
+
 def test_warm_runner_trims_dequantized_q4_moe_cache_under_low_ram(tmp_path, monkeypatch) -> None:
     from pcketlm.core import runtime, storage
     from pcketlm.core.runtime import layer_bridge

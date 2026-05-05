@@ -24,6 +24,7 @@ from pcketlm.core.storage.paths import state_root
 
 WARM_RUNNER_MIN_FREE_MEMORY_MB = 4 * 1024
 WARM_RUNNER_AGENT_MAX_NEW_TOKENS = 2
+Q4_MOE_WARM_AGENT_MAX_NEW_TOKENS = 16
 WARM_RUNNER_STATUS_DIR_NAME = "warm-runner"
 Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
 Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
@@ -203,11 +204,19 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
     prefill_load = float(timings.get("prefill_stack_op_load_tensors", 0.0) or 0.0)
     continuation_load = float(timings.get("continuation_stack_op_load_tensors", 0.0) or 0.0)
     prefix_load = float(timings.get("prefix_append_stack_op_load_tensors", 0.0) or 0.0)
-    tensor_load_seconds = round(prefill_load + continuation_load + prefix_load, 3)
+    pending_prefix_load = float(
+        timings.get("pending_prefix_continuation_prefix_append_stack_op_load_tensors", 0.0) or 0.0
+    ) + float(timings.get("pending_prefix_continuation_continuation_stack_op_load_tensors", 0.0) or 0.0)
+    tensor_load_seconds = round(prefill_load + continuation_load + prefix_load + pending_prefix_load, 3)
     total = float(timings.get("total", 0.0) or 0.0)
     decode_tail_seconds = round(
         float(timings.get("prefill_decode_tail", 0.0) or 0.0)
         + float(timings.get("continuation_decode_tail", 0.0) or 0.0),
+        3,
+    )
+    pending_decode_tail_seconds = round(
+        float(timings.get("pending_prefix_continuation_prefill_decode_tail", 0.0) or 0.0)
+        + float(timings.get("pending_prefix_continuation_continuation_decode_tail", 0.0) or 0.0),
         3,
     )
     stack_seconds = round(
@@ -216,17 +225,22 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
         + float(timings.get("continuation_steps", 0.0) or 0.0),
         3,
     )
+    pending_stack_seconds = round(
+        float(timings.get("pending_prefix_continuation_prefix_append", 0.0) or 0.0)
+        + float(timings.get("pending_prefix_continuation_continuation_steps", 0.0) or 0.0),
+        3,
+    )
     components = {
         "tensor loading": tensor_load_seconds,
-        "layer stack": stack_seconds,
-        "decode tail": decode_tail_seconds,
+        "layer stack": round(stack_seconds + pending_stack_seconds, 3),
+        "decode tail": round(decode_tail_seconds + pending_decode_tail_seconds, 3),
     }
     bottleneck, seconds = max(components.items(), key=lambda item: item[1])
     return {
         "total_seconds": round(total, 3) if total else None,
-        "stack_seconds": stack_seconds,
+        "stack_seconds": components["layer stack"],
         "tensor_load_seconds": tensor_load_seconds,
-        "decode_tail_seconds": decode_tail_seconds,
+        "decode_tail_seconds": components["decode tail"],
         "tensor_load_share": round(tensor_load_seconds / total, 2) if total else None,
         "bottleneck": bottleneck if seconds > 0 else None,
         "bottleneck_seconds": seconds if seconds > 0 else None,
@@ -340,6 +354,26 @@ def _q4_moe_prime_prompt() -> str:
 def _q4_moe_prime_mode() -> str:
     requested = os.environ.get("PCKETLM_Q4_MOE_PRIME_MODE", Q4_MOE_PRIME_MODE).strip().lower()
     return requested if requested in {"prefill", "generate"} else Q4_MOE_PRIME_MODE
+
+
+def _warm_runner_agent_max_new_tokens(model_id: str) -> int:
+    if _q4_moe_low_ram_trim_enabled(model_id):
+        try:
+            return max(
+                1,
+                int(
+                    os.environ.get(
+                        "PCKETLM_Q4_MOE_AGENT_MAX_NEW_TOKENS",
+                        str(Q4_MOE_WARM_AGENT_MAX_NEW_TOKENS),
+                    )
+                ),
+            )
+        except ValueError:
+            return Q4_MOE_WARM_AGENT_MAX_NEW_TOKENS
+    try:
+        return max(1, int(os.environ.get("PCKETLM_WARM_RUNNER_AGENT_MAX_NEW_TOKENS", str(WARM_RUNNER_AGENT_MAX_NEW_TOKENS))))
+    except ValueError:
+        return WARM_RUNNER_AGENT_MAX_NEW_TOKENS
 
 
 @contextmanager
@@ -581,7 +615,7 @@ def run_warm_agent_prompt(
                 result = runner_fn(
                     model_id,
                     prompt=prompt,
-                    max_new_tokens=max(1, min(int(max_new_tokens), WARM_RUNNER_AGENT_MAX_NEW_TOKENS)),
+                    max_new_tokens=max(1, min(int(max_new_tokens), _warm_runner_agent_max_new_tokens(model_id))),
                     min_new_tokens=1,
                     selection_policy="greedy",
                     apply_chat_format=apply_chat_format,

@@ -5524,3 +5524,14 @@ Result: 297 passed in 21.83s
 - Focused tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_prefill_session_returns_reusable_cached_tail_state tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_cached_prefill_tail_for_first_token tests/test_warm_runner.py::test_warm_runner_default_q4_moe_start_prefills_reusable_prefix tests/test_warm_runner.py::test_warm_runner_explicit_q4_moe_start_primes_cache -q` -> `4 passed in 2.34s`.
 - Runtime/warm tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py -q` -> `68 passed in 4.30s`.
 - Full suite: `python -m pytest tests/ -q` -> `363 passed in 22.88s`.
+
+## Phase Q4 MoE Prefill / visible chunk and pending continuation
+- Change: Q4 MoE warm-runner sessions can now honor longer visible chunks, default cap `16` via `PCKETLM_Q4_MOE_AGENT_MAX_NEW_TOKENS`, while non-Q4 MoE warm Agent keeps the legacy `2` token cap.
+- Change: exact pending-token reuse now supports `max_new_tokens > 1` for raw prompts. The runtime reuses the preselected pending first token, then recursively continues from the same KV state instead of falling back to a full prompt prefill.
+- Control row before the pending-continuation fix: `state/phase-q4-moe-generateprime-multitoken10.json` used generated-token priming but fell back to full prefill for the visible 10-token request; elapsed `31.726s`, average `3.173s/token`, prefix reuse `used=false`.
+- Fixed generated-prime row: `state/phase-q4-moe-generateprime-multitoken10-fixed.json` reused the pending token and generated the same coherent `" Paris. The capital of Germany is Berlin. The"` in `26.373s`, average `2.637s/token`.
+- Rerun with corrected telemetry: `state/phase-q4-moe-generateprime-multitoken10-fixed2.json` generated the same text in `28.857s`, average `2.886s/token`. Verdict: correctness fix kept, but generated-token prime is not promoted over prefix-prefill default because the speed row is noisy.
+- Longer prefix-prefill chunk row: `state/phase-q4-moe-prefill-multitoken10.json` generated the same coherent 10-token text in `28.036s`, average `2.804s/token`. This is useful product behavior for one visible request, but it does not beat the accepted separate-turn prefix-prefill row.
+- Tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_pending_prefix_then_continues tests/test_warm_runner.py::test_warm_runner_allows_longer_q4_moe_visible_chunks tests/test_warm_runner.py::test_warm_runner_keeps_legacy_two_token_cap_for_non_q4_moe -q` -> `3 passed in 2.79s`.
+- Runtime/warm tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py -q` -> `71 passed in 4.99s`.
+- Full suite: `python -m pytest tests/ -q` -> `366 passed in 30.22s`; compile check `python -m compileall -q src tests` passed.

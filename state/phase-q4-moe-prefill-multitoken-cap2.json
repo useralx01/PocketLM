@@ -1,0 +1,95 @@
+{
+  "start_status": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "phase-q4-moe-prefill-multitoken-cap2",
+    "mode": "Agent",
+    "state": "ready",
+    "started_at": 1778016677.474178,
+    "last_request_at": null,
+    "request_count": 0,
+    "last_latency_seconds": null,
+    "average_latency_seconds": null,
+    "last_error": null,
+    "blockers": [],
+    "prefix_reuse_available": true,
+    "reusable_token_count": 5,
+    "tensor_residency_warm": true,
+    "memory": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 4313,
+      "process_working_set_mb": 2527
+    },
+    "primed": true,
+    "prime_seconds": 21.245,
+    "prime_generated_text": ""
+  },
+  "row": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "phase-q4-moe-prefill-multitoken-cap2",
+    "mode": "Agent",
+    "prompt": "The capital of France is",
+    "ready": true,
+    "generated_text": " Paris.",
+    "full_text": "The capital of France is Paris.",
+    "elapsed_seconds": 4.118,
+    "max_new_tokens": 2,
+    "steps_completed": 2,
+    "generated_token_ids": [
+      12095,
+      13
+    ],
+    "blockers": [],
+    "prefix_reuse": {
+      "enabled": true,
+      "used": true,
+      "matched_token_count": 5,
+      "appended_token_count": 0,
+      "summary": "Exact reusable prompt prefix matched; reused cached prefill hidden state for token selection.",
+      "cached_prefill_tail_used": true
+    },
+    "performance_summary": {
+      "total_seconds": 4.117,
+      "stack_seconds": 3.688,
+      "tensor_load_seconds": 0.29,
+      "decode_tail_seconds": 0.824,
+      "tensor_load_share": 0.07,
+      "bottleneck": "layer stack",
+      "bottleneck_seconds": 3.688
+    },
+    "memory_before": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 4313,
+      "process_working_set_mb": 2527
+    },
+    "memory_after": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 3369,
+      "process_working_set_mb": 3490
+    },
+    "runner_status": {
+      "model_id": "qwen3-30b-a3b",
+      "session_id": "phase-q4-moe-prefill-multitoken-cap2",
+      "mode": "Agent",
+      "state": "ready",
+      "started_at": 1778016677.474178,
+      "last_request_at": 1778016702.8440049,
+      "request_count": 1,
+      "last_latency_seconds": 4.118,
+      "average_latency_seconds": 4.118,
+      "last_error": null,
+      "blockers": [],
+      "prefix_reuse_available": true,
+      "reusable_token_count": 6,
+      "tensor_residency_warm": true,
+      "memory": {
+        "total_ram_mb": 15677,
+        "free_ram_mb": 3369,
+        "process_working_set_mb": 3490
+      },
+      "primed": true,
+      "prime_seconds": 21.245,
+      "prime_generated_text": ""
+    }
+  },
+  "outer_seconds": 4.1225
+}

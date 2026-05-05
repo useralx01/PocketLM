@@ -1796,6 +1796,58 @@ def test_run_prompt_decode_loop_reuses_exact_pending_prefix_token(
     assert second.anti_cheat_passed is True
 
 
+def test_run_prompt_decode_loop_reuses_pending_prefix_then_continues(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    first = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+    assert first.ready is True
+    assert first.final_decode_state is not None
+    direct = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+    assert direct.ready is True
+
+    reused = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+        initial_decode_state=first.final_decode_state,
+        initial_token_ids=first.reusable_token_ids,
+    )
+
+    assert reused.ready is True
+    assert reused.generated_token_ids == direct.generated_token_ids
+    assert reused.prefix_reuse["pending_token_reused"] is True
+    assert reused.steps_completed == 2
+    assert reused.layers_executed == 2
+    assert reused.expected_layers_executed == 2
+    assert reused.anti_cheat_passed is True
+    assert "pending_prefix_continuation_total" in reused.timings
+
+
 def test_run_prompt_prefill_session_returns_reusable_cached_tail_state(
     tmp_path: Path, monkeypatch
 ) -> None:

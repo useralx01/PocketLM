@@ -126,3 +126,4 @@
 - Do not revisit simple generated-prefix commit or a basic one-call Q4 selected-expert batch wrapper as defaults; both were re-measured after scoped handles and regressed.
 - Do not default native thread-count tuning until it is repeatable across fresh runs; the one `6.908s` row was not stable.
 - Next target after Q4 MoE prefix-prefill: teach the product/chat layer to choose useful reusable prefixes automatically instead of relying on the operator to set `PCKETLM_Q4_MOE_PRIME_PROMPT`.
+- Next speed target after visible chunk support: reduce the remaining Q4 MoE layer-stack time itself. Longer chunks and pending-token continuation improve behavior/correctness but do not reliably beat the accepted `2.743s/token` prefix-prefill row.
