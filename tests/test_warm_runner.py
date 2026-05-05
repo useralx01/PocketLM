@@ -32,6 +32,76 @@ def test_warm_runner_start_status_stop(tmp_path, monkeypatch) -> None:
     assert stopped["prefix_reuse_available"] is False
 
 
+def test_warm_runner_explicit_q4_moe_start_primes_cache(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    calls = []
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append((model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text=" Paris",
+            full_text="The capital of France is Paris",
+            generated_token_ids=[12095],
+            steps_completed=1,
+            max_new_tokens=1,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={},
+            reusable_token_ids=[1, 2, 3],
+            final_decode_state=SimpleNamespace(ready=True),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(runtime.warm_runner, "tensor_residency_stats", lambda: SimpleNamespace(resident_count=3))
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+
+    status = start_warm_runner(
+        "qwen3-q4-moe-prime-test",
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+
+    assert status["primed"] is True
+    assert status["prime_generated_text"] == " Paris"
+    assert status["request_count"] == 0
+    assert status["reusable_token_count"] == 3
+    assert status["prefix_reuse_available"] is True
+    assert status["tensor_residency_warm"] is True
+    assert calls == [
+        (
+            "qwen3-q4-moe-prime-test",
+            {
+                "prompt": "The capital of France is",
+                "max_new_tokens": 1,
+                "min_new_tokens": 1,
+                "selection_policy": "greedy",
+                "apply_chat_format": False,
+                "initial_decode_state": None,
+                "initial_token_ids": None,
+                "commit_generated_prefix": False,
+            },
+        )
+    ]
+
+
 def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatch) -> None:
     from pcketlm.core import runtime, storage
 

@@ -4508,8 +4508,29 @@ def _run_prompt_decode_loop(
         and 0 <= prefix_append_start < len(prompt_token_ids)
         and suffix_token_count <= max_prefix_append_tokens
     )
+    can_use_pending_prefix_token = (
+        initial_decode_state is not None
+        and initial_decode_state.ready
+        and initial_decode_state.model_id == model_id
+        and effective_max_new_tokens == 1
+        and prefix_matches_prompt
+        and state_matches_supplied_prefix
+        and prefix_append_start == len(prompt_token_ids)
+        and int(initial_decode_state.next_token_id) >= 0
+        and not initial_decode_state.finished
+    )
     if initial_decode_state is not None or supplied_prefix_ids:
-        if can_try_prefix:
+        if can_use_pending_prefix_token:
+            prefix_reuse.update(
+                {
+                    "used": True,
+                    "matched_token_count": len(supplied_prefix_ids),
+                    "appended_token_count": 0,
+                    "pending_token_reused": True,
+                    "summary": "Exact reusable prompt prefix matched; returned the already-selected pending token.",
+                }
+            )
+        elif can_try_prefix:
             prefix_reuse.update(
                 {
                     "matched_token_count": len(supplied_prefix_ids),
@@ -4538,6 +4559,49 @@ def _run_prompt_decode_loop(
                     "summary": summary,
                 }
             )
+
+    if can_use_pending_prefix_token:
+        phase_started = time.perf_counter()
+        first_generated_token_id = int(initial_decode_state.next_token_id)
+        generated_token_ids = [first_generated_token_id]
+        first_generated_chain = list(prompt_token_ids) + generated_token_ids
+        generated_text, decode_generated_blockers = decode_token_ids_to_text(model_id, generated_token_ids)
+        full_text, decode_full_blockers = decode_token_ids_to_text(model_id, first_generated_chain)
+        generated_text, triggered_stop_string = _trim_generated_text_at_stop_string(generated_text, effective_stop_strings)
+        stop_reason = "step-limit"
+        if triggered_stop_string is not None:
+            stop_reason = "stop-string"
+        record_phase("pending_prefix_token", phase_started)
+        record_token_summary(1, first_generated_token_id, time.perf_counter() - total_started)
+        return PromptDecodeLoopResult(
+            model_id=model_id,
+            prompt=prepared_prompt_result.prepared_prompt,
+            prompt_token_ids=prompt_token_ids,
+            generated_token_ids=generated_token_ids,
+            generated_text=generated_text,
+            full_text=full_text,
+            steps_requested=effective_max_new_tokens,
+            max_new_tokens=effective_max_new_tokens,
+            min_new_tokens=effective_min_new_tokens,
+            steps_completed=1,
+            strategy=f"{effective_policy}-prompt-kv-cache-rope",
+            stop_reason=stop_reason,
+            stop_token_ids=[] if stop_token_ids is None else [int(value) for value in stop_token_ids],
+            stop_strings=list(effective_stop_strings),
+            cache_sequence_lengths=dict(initial_decode_state.cache_sequence_lengths),
+            blockers=list(decode_generated_blockers) + list(decode_full_blockers),
+            ready=True,
+            timings=finish_timings(),
+            token_summaries=token_summaries,
+            prefix_reuse=prefix_reuse,
+            reusable_token_ids=list(prompt_token_ids),
+            configured_layer_count=configured_layer_count,
+            prompt_layer_count=effective_layer_count,
+            layers_executed=0,
+            expected_layers_executed=0,
+            anti_cheat_passed=True,
+            final_decode_state=initial_decode_state,
+        )
 
     if can_try_prefix:
         phase_started = time.perf_counter()

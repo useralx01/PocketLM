@@ -28,6 +28,7 @@ WARM_RUNNER_STATUS_DIR_NAME = "warm-runner"
 Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
 Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
 Q4_MOE_LOW_FREE_RAM_TRIM_MB = 800
+Q4_MOE_PRIME_PROMPT = "The capital of France is"
 
 
 @dataclass(slots=True)
@@ -94,6 +95,9 @@ class WarmRunner:
     prefix_reuse_available: bool = False
     tensor_residency_warm: bool = False
     memory: dict = field(default_factory=dict)
+    primed: bool = False
+    prime_seconds: float | None = None
+    prime_generated_text: str = ""
 
     def average_latency_seconds(self) -> float | None:
         if self.request_count <= 0:
@@ -117,6 +121,9 @@ class WarmRunner:
             "reusable_token_count": len(self.reusable_token_ids),
             "tensor_residency_warm": self.tensor_residency_warm,
             "memory": dict(self.memory),
+            "primed": self.primed,
+            "prime_seconds": self.prime_seconds,
+            "prime_generated_text": self.prime_generated_text,
         }
 
 
@@ -300,6 +307,17 @@ def _q4_moe_low_ram_trim_enabled(model_id: str) -> bool:
     )
 
 
+def _q4_moe_prime_enabled(model_id: str) -> bool:
+    if os.environ.get("PCKETLM_DISABLE_Q4_MOE_PRIME", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return _q4_moe_low_ram_trim_enabled(model_id)
+
+
 def _q4_moe_trim_threshold_mb() -> int:
     try:
         return max(0, int(os.environ.get("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", str(Q4_MOE_LOW_FREE_RAM_TRIM_MB))))
@@ -312,6 +330,10 @@ def _q4_moe_min_free_memory_mb() -> int:
         return max(0, int(os.environ.get("PCKETLM_Q4_MOE_MIN_FREE_RAM_MB", "512")))
     except ValueError:
         return 512
+
+
+def _q4_moe_prime_prompt() -> str:
+    return os.environ.get("PCKETLM_Q4_MOE_PRIME_PROMPT", Q4_MOE_PRIME_PROMPT)
 
 
 @contextmanager
@@ -329,7 +351,67 @@ def _scoped_environment(updates: dict[str, str]):
                 os.environ[key] = value
 
 
-def start_warm_runner(model_id: str, mode: str = "Agent", session_id: str = "default") -> dict:
+def _prime_q4_moe_warm_runner(
+    runner: WarmRunner,
+    *,
+    run_prompt_decode_loop_fn=None,
+    prompt: str | None = None,
+) -> None:
+    """Warm Q4 MoE packed/tensor caches without making dummy KV reusable."""
+    if runner.primed:
+        return
+    scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
+    scoped_env.update(_q4_moe_warm_cache_defaults(runner.model_id))
+    started = time.perf_counter()
+    try:
+        with _scoped_environment(scoped_env):
+            runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
+            result = runner_fn(
+                runner.model_id,
+                prompt=prompt or _q4_moe_prime_prompt(),
+                max_new_tokens=1,
+                min_new_tokens=1,
+                selection_policy="greedy",
+                apply_chat_format=False,
+                initial_decode_state=None,
+                initial_token_ids=None,
+                commit_generated_prefix=False,
+            )
+    except Exception as exc:
+        runner.blockers = [f"Q4 MoE cache prime failed: {exc}"]
+        runner.last_error = runner.blockers[0]
+        runner.prime_seconds = round(time.perf_counter() - started, 3)
+        return
+    runner.prime_seconds = round(time.perf_counter() - started, 3)
+    runner.primed = bool(getattr(result, "ready", False))
+    runner.prime_generated_text = str(getattr(result, "generated_text", "") or "")
+    if not runner.primed:
+        runner.blockers = [f"Q4 MoE cache prime did not complete: {'; '.join(getattr(result, 'blockers', []) or [])}"]
+        runner.last_error = runner.blockers[0]
+    else:
+        runner.blockers = []
+        runner.last_error = None
+        runner.decode_state = getattr(result, "final_decode_state", None)
+        runner.reusable_token_ids = list(getattr(result, "reusable_token_ids", []) or [])
+        runner.prefix_reuse_available = bool(runner.decode_state is not None and runner.reusable_token_ids)
+        runner.tensor_residency_warm = tensor_residency_stats().resident_count > 0
+    memory_after = warm_runner_memory_snapshot()
+    free_after = memory_after.get("free_ram_mb")
+    if free_after is not None and int(free_after) < _q4_moe_trim_threshold_mb():
+        clear_dequantized_tensor_residency_cache()
+        memory_after = warm_runner_memory_snapshot()
+    runner.memory = memory_after
+
+
+def start_warm_runner(
+    model_id: str,
+    mode: str = "Agent",
+    session_id: str = "default",
+    *,
+    prime: bool | None = None,
+    prime_prompt: str | None = None,
+    run_prompt_decode_loop_fn=None,
+) -> dict:
     """Start or return the in-process warm runner for a model."""
     with _RUNNERS_LOCK:
         key = _runner_key(model_id, session_id)
@@ -343,6 +425,13 @@ def start_warm_runner(model_id: str, mode: str = "Agent", session_id: str = "def
                 runner.state = "ready"
         runner.memory = warm_runner_memory_snapshot()
         runner.blockers = []
+        should_prime = _q4_moe_prime_enabled(model_id) if prime is None else bool(prime)
+        if should_prime:
+            _prime_q4_moe_warm_runner(
+                runner,
+                run_prompt_decode_loop_fn=run_prompt_decode_loop_fn,
+                prompt=prime_prompt,
+            )
         _write_runner_status(runner)
         return runner.to_dict()
 
@@ -429,7 +518,7 @@ def run_warm_agent_prompt(
         runner_key = _runner_key(model_id, session_id)
         runner = _RUNNERS.get(runner_key)
         if runner is None:
-            start_warm_runner(model_id, mode=mode, session_id=session_id)
+            start_warm_runner(model_id, mode=mode, session_id=session_id, prime=False)
             runner = _RUNNERS[runner_key]
 
         memory_before = warm_runner_memory_snapshot()

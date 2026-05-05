@@ -5504,3 +5504,12 @@ Result: 297 passed in 21.83s
 - Rejected reducing packed Q4 cache to `3072 MB` while keeping the fp16 tensor cache at `2048 MB`. The 20-token probe thrashed badly, with warm average `34.990s/token`. The accepted packed-cache budget remains `4096 MB`.
 - Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_tensor_residency.py -q` -> `61 passed in 2.41s`.
 - Full suite: `python -m pytest tests/ -q` -> `358 passed in 10.95s`.
+
+## Phase Q4 MoE Prefill / explicit warm-start priming
+- Change: explicit `start_warm_runner()` for Q4 MoE now primes the packed/tensor caches with one real greedy Qwen3 prompt. Lazy start from `run_warm_agent_prompt()` does not prime, so an accidental first request does not hide the warmup cost inside a normal generation call.
+- Change: the warm runner keeps the primed prompt KV and pending next token as a reusable prefix. If the next real prompt exactly matches the primed prefix, the runtime returns the already-selected pending token. If it does not match, the existing safe prefix-matching logic falls back to full prefill.
+- Real proof without exact pending reuse, cache-only: `state/phase-q4-moe-prime-first-real.json` primed in `21.127s`, then the first real matching prompt generated `" Paris"` in `8.588s`.
+- Real proof with exact pending-token reuse: `state/phase-q4-moe-prime-exact-first.json` primed in `23.586s`, then the first real matching prompt generated `" Paris"` in `0.006s`, with `pending_token_reused=true`.
+- Real 10-token proof: `state/phase-q4-moe-prime-exact-ten.json` primed in `22.219s`, then generated `" Paris"`, `"."`, `" The"`, `" capital"`, `" of"`, `" Germany"`, `" is"`, `" Berlin"`, `"."`, `" The"`. Visible answer rows were `0.005s`, `3.080s`, `3.375s`, `3.060s`, `2.664s`, `2.542s`, `2.496s`, `2.628s`, `2.510s`, `2.464s`; visible answer average `2.482s/token`.
+- Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_exact_pending_prefix_token tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_pending_generated_token_without_full_prefill tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_prefix_reuse_returns_native_session_and_counts_layers -q` -> `14 passed in 2.38s`.
+- Full suite: `python -m pytest tests/ -q` -> `360 passed in 22.67s`.

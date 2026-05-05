@@ -1752,6 +1752,49 @@ def test_run_prompt_decode_loop_reuses_pending_generated_token_without_full_pref
     assert second.generated_token_ids == direct.generated_token_ids[1:2]
 
 
+def test_run_prompt_decode_loop_reuses_exact_pending_prefix_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    first = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+    assert first.ready is True
+    assert first.final_decode_state is not None
+
+    second = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=1,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+        initial_decode_state=first.final_decode_state,
+        initial_token_ids=first.reusable_token_ids,
+    )
+
+    assert second.ready is True
+    assert second.generated_token_ids == first.generated_token_ids
+    assert second.prefix_reuse["used"] is True
+    assert second.prefix_reuse["pending_token_reused"] is True
+    assert second.prefix_reuse["appended_token_count"] == 0
+    assert "prefill_stack" not in second.timings
+    assert "pending_prefix_token" in second.timings
+    assert second.layers_executed == 0
+    assert second.expected_layers_executed == 0
+    assert second.anti_cheat_passed is True
+
+
 def test_run_prompt_decode_loop_reports_per_token_expert_telemetry(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
 
