@@ -5601,7 +5601,7 @@ Result: 297 passed in 21.83s
 
 ## Phase Monolithic Forward / Scaffold Evidence
 - Built new native module `src/pcketlm/native/pcketlm_forward.dll` from `src/pcketlm/native/pcketlm_forward.cpp` with `python tools/build_native.py --force`.
-- Added ctypes wrapper `MonolithicForwardSession` exposing session create/destroy, prefill, decode, verify, commit, rollback, layer-count telemetry, and the `PCKETLM_DISABLE_MONOLITHIC` kill switch.
-- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `3 passed in 1.85s`.
-- Full regression validation: `python -m pytest tests/ -q` -> `377 passed in 28.49s`.
-- Integration finding: this pass creates and validates the native monolithic session boundary and C-owned token/KV state, but does not yet route real Qwen/Qwen3/Mixtral weights through it. Real production routing still needs a C-side weight/session ABI that can own loaded tensor pointers across all layers without per-layer Python callbacks.
+- Added ctypes wrapper `MonolithicForwardSession` exposing session create/destroy, prefill, decode, verify, commit, rollback, layer-count telemetry, C-owned registered u16 tensor storage, and the `PCKETLM_DISABLE_MONOLITHIC` kill switch.
+- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `4 passed in 2.51s`.
+- Full regression validation: `python -m pytest tests/ -q` -> `378 passed in 22.49s`.
+- Integration finding: this pass creates and validates the native monolithic session boundary, C-owned token/KV state, and first C-owned weight-copy ABI, but does not yet route real Qwen/Qwen3/Mixtral weights through it. Real production routing still needs per-model tensor registration and layer dispatch against those owned weights.

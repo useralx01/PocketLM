@@ -372,6 +372,17 @@ def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
         lib.pcketlm_session_tentative_length.restype = ctypes.c_longlong
         lib.pcketlm_layers_executed.argtypes = [ctypes.c_void_p]
         lib.pcketlm_layers_executed.restype = ctypes.c_longlong
+        lib.pcketlm_session_register_u16_tensor.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+        ]
+        lib.pcketlm_session_register_u16_tensor.restype = ctypes.c_int
+        lib.pcketlm_session_tensor_count.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_tensor_count.restype = ctypes.c_longlong
+        lib.pcketlm_session_tensor_nitems.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        lib.pcketlm_session_tensor_nitems.restype = ctypes.c_longlong
         lib.pcketlm_forward_prefill.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -465,6 +476,30 @@ class MonolithicForwardSession:
 
     def layers_executed(self) -> int:
         return int(self._lib.pcketlm_layers_executed(self._handle))
+
+    def register_u16_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        if tensor.dtype not in {torch.float16, torch.bfloat16, torch.uint16}:
+            raise TypeError("register_u16_tensor requires float16, bfloat16, or uint16 storage")
+        cpu = tensor.detach().cpu().contiguous().view(torch.uint16).reshape(-1)
+        code = self._lib.pcketlm_session_register_u16_tensor(
+            self._handle,
+            ctypes.c_char_p(str(name).encode("utf-8")),
+            ctypes.c_void_p(int(cpu.data_ptr())),
+            ctypes.c_longlong(int(cpu.numel())),
+        )
+        if code != 0:
+            raise RuntimeError(f"pcketlm_session_register_u16_tensor failed with code {code}")
+
+    def tensor_count(self) -> int:
+        return int(self._lib.pcketlm_session_tensor_count(self._handle))
+
+    def tensor_nitems(self, name: str) -> int:
+        return int(
+            self._lib.pcketlm_session_tensor_nitems(
+                self._handle,
+                ctypes.c_char_p(str(name).encode("utf-8")),
+            )
+        )
 
     def prefill(self, token_ids: torch.Tensor | list[int]) -> torch.Tensor:
         tokens = torch.as_tensor(token_ids, dtype=torch.int64).detach().cpu().contiguous().reshape(-1)

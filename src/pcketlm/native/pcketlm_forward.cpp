@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <immintrin.h>
 #include <intrin.h>
@@ -14,6 +15,7 @@ struct ForwardSession {
     int64_t layers_executed = 0;
     std::vector<int64_t> committed_tokens;
     std::vector<int64_t> tentative_tokens;
+    std::unordered_map<std::string, std::vector<uint16_t>> u16_weights;
 };
 
 static int64_t parse_json_int(const char* json, const char* key, int64_t fallback) {
@@ -134,6 +136,47 @@ extern "C" __declspec(dllexport) int64_t pcketlm_layers_executed(void* handle) {
         return -1;
     }
     return session->layers_executed;
+}
+
+extern "C" __declspec(dllexport) int pcketlm_session_register_u16_tensor(
+    void* handle,
+    const char* tensor_name,
+    const uint16_t* tensor_data,
+    int64_t value_count
+) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr || tensor_name == nullptr || tensor_data == nullptr || value_count < 0) {
+        return 1;
+    }
+    std::vector<uint16_t> copied(static_cast<size_t>(value_count));
+    if (value_count > 0) {
+        std::memcpy(copied.data(), tensor_data, static_cast<size_t>(value_count) * sizeof(uint16_t));
+    }
+    session->u16_weights[std::string(tensor_name)] = std::move(copied);
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int64_t pcketlm_session_tensor_count(void* handle) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    return static_cast<int64_t>(session->u16_weights.size());
+}
+
+extern "C" __declspec(dllexport) int64_t pcketlm_session_tensor_nitems(
+    void* handle,
+    const char* tensor_name
+) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr || tensor_name == nullptr) {
+        return -1;
+    }
+    const auto found = session->u16_weights.find(std::string(tensor_name));
+    if (found == session->u16_weights.end()) {
+        return -1;
+    }
+    return static_cast<int64_t>(found->second.size());
 }
 
 extern "C" __declspec(dllexport) int pcketlm_forward_prefill(

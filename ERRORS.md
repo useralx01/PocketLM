@@ -306,5 +306,5 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 ## Phase Monolithic Forward / production routing block
 - Symptom: a native monolithic session boundary can be built and tested, but routing real Qwen/Qwen3/Mixtral through it safely is not complete in this pass.
 - Root cause: the existing production runtime still resolves model tensors through Python tensor loader/residency objects. A true monolithic layer stack needs C-owned stable pointers for all required weights after first load. Re-entering Python for each layer/tensor would preserve the exact Python/C crossing overhead the phase is supposed to remove.
-- Current fix: added `pcketlm_forward.dll` plus ctypes wrappers and deterministic commit/rollback tests as the ABI foundation. Real-model routing remains blocked on a C-side weight/session ABI rather than on KV semantics.
+- Current fix: added `pcketlm_forward.dll` plus ctypes wrappers and deterministic commit/rollback tests as the ABI foundation. Added the first copied u16 tensor-registration ABI so C can own weight bytes after first import. Real-model routing remains blocked on per-model registration and native layer dispatch against those registered weights rather than on KV semantics.
 

@@ -53,6 +53,19 @@ def test_monolithic_verify_commit_and_rollback_are_stateful() -> None:
         assert session.tentative_length() == 1
 
 
+def test_monolithic_session_owns_registered_weight_storage() -> None:
+    from pcketlm.native import MonolithicForwardSession
+
+    with MonolithicForwardSession(_config(), "synthetic") as session:
+        weight = torch.arange(12, dtype=torch.float16).reshape(3, 4)
+        session.register_u16_tensor("model.layers.0.self_attn.q_proj.weight", weight)
+        weight.zero_()
+
+        assert session.tensor_count() == 1
+        assert session.tensor_nitems("model.layers.0.self_attn.q_proj.weight") == 12
+        assert session.tensor_nitems("missing") == -1
+
+
 def test_monolithic_kill_switch(monkeypatch) -> None:
     monkeypatch.setenv("PCKETLM_DISABLE_MONOLITHIC", "1")
     from pcketlm.native import MonolithicForwardSession
