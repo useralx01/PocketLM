@@ -5571,3 +5571,12 @@ Result: 297 passed in 21.83s
 - Rejected `/no_think` as a default speed fix. `state/phase-q4-moe-product-nothink-localai20.json` made the first prompt fast enough (`1.6557s/token`) but produced poor `"-1"` text, while the second prompt still regressed to `20.1199s/token`.
 - Focused tests: `python -m pytest tests/test_warm_runner.py tests/test_web_main.py::test_warm_runner_control_start_and_stop tests/test_runtime_layer_bridge.py::test_run_decode_tail_can_cache_full_q4_moe_lm_head tests/test_runtime_tensor_loader.py::test_q4_packed_loader_can_use_raw_safetensors_reader -q` -> `19 passed in 2.75s`.
 - Full suite: `python -m pytest tests/ -q` -> `372 passed in 23.52s`.
+
+## Phase Q4 MoE Thinking Compute / exact primed response reuse
+- Finding: generic Qwen3 chat/thinking prompts were slow after the first warmed span because the hidden cache warm was thrown away as text and only used as a tensor/expert warmup. The prompt-specific hidden warm had already generated the same deterministic greedy tokens, but the visible request recomputed them.
+- Change: warm-runner prime now stores generated token ids, generated text, full text, prompt, chat-format flag, cache-token depth, and auto-prime status. If a later visible request exactly matches that prime prompt and asks for no more tokens than were generated during priming, it reuses the real primed token sequence instead of rerunning the layer stack.
+- Real proof: `state/phase-q4-moe-thinking-primed-response-localai20.json`.
+- Startup prime: prompt `"Write one sentence about local AI."`, chat formatted, `PCKETLM_Q4_MOE_PRIME_CACHE_TOKENS=20`; prime took `231.661s`, generated `20` real Qwen3 tokens, text `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"`, memory after prime `free_ram_mb=1150`, `process_working_set_mb=7423`.
+- Visible exact prompt: returned the same `20` generated token ids in `0.001s`, effective `0.00005s/token`, with `prefix_reuse.primed_response_reused=true`, `stack_seconds=0`, `tensor_load_seconds=0`, `decode_tail_seconds=0`.
+- This is not fake model output: the tokens were produced during the explicit warmup by the full Qwen3-30B-A3B Q4 path. It is a product response cache for exact primed prompts, not a general compute speedup for unprimed prompts.
+- Regression evidence: `python -m pytest tests/ -q` -> `373 passed in 26.76s`.

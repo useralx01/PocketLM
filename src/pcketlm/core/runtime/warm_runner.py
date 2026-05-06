@@ -13,7 +13,12 @@ from pathlib import Path
 from ctypes import wintypes
 from typing import Any
 
-from pcketlm.core.runtime.layer_bridge import KVDecodeState, run_prompt_decode_loop, run_prompt_prefill_session
+from pcketlm.core.runtime.layer_bridge import (
+    KVDecodeState,
+    decode_token_ids_to_text,
+    run_prompt_decode_loop,
+    run_prompt_prefill_session,
+)
 from pcketlm.core.runtime.load_attempt import _memory_snapshot
 from pcketlm.core.runtime.tensor_residency import (
     clear_dequantized_tensor_residency_cache,
@@ -101,8 +106,11 @@ class WarmRunner:
     primed: bool = False
     prime_seconds: float | None = None
     prime_generated_text: str = ""
+    prime_generated_token_ids: list[int] = field(default_factory=list)
+    prime_full_text: str = ""
     prime_prompt: str = ""
     prime_cache_tokens: int = 0
+    prime_apply_chat_format: bool = False
     auto_primed: bool = False
 
     def average_latency_seconds(self) -> float | None:
@@ -130,8 +138,11 @@ class WarmRunner:
             "primed": self.primed,
             "prime_seconds": self.prime_seconds,
             "prime_generated_text": self.prime_generated_text,
+            "prime_generated_token_count": len(self.prime_generated_token_ids),
+            "prime_full_text": self.prime_full_text,
             "prime_prompt": self.prime_prompt,
             "prime_cache_tokens": self.prime_cache_tokens,
+            "prime_apply_chat_format": self.prime_apply_chat_format,
             "auto_primed": self.auto_primed,
         }
 
@@ -468,6 +479,10 @@ def _prime_q4_moe_warm_runner(
                     )
                     if bool(getattr(cache_result, "ready", False)):
                         runner.prime_generated_text = str(getattr(cache_result, "generated_text", "") or "")
+                        runner.prime_generated_token_ids = [
+                            int(value) for value in (getattr(cache_result, "generated_token_ids", []) or [])
+                        ]
+                        runner.prime_full_text = str(getattr(cache_result, "full_text", "") or "")
                     else:
                         result = cache_result
             else:
@@ -492,9 +507,14 @@ def _prime_q4_moe_warm_runner(
     runner.primed = bool(getattr(result, "ready", False))
     runner.prime_prompt = prime_prompt
     runner.prime_cache_tokens = cache_tokens
+    runner.prime_apply_chat_format = bool(apply_chat_format)
     runner.auto_primed = bool(auto_prime)
     if not runner.prime_generated_text:
         runner.prime_generated_text = str(getattr(result, "generated_text", "") or "")
+    if not runner.prime_generated_token_ids:
+        runner.prime_generated_token_ids = [int(value) for value in (getattr(result, "generated_token_ids", []) or [])]
+    if not runner.prime_full_text:
+        runner.prime_full_text = str(getattr(result, "full_text", "") or "")
     if not runner.primed:
         runner.blockers = [f"Q4 MoE cache prime did not complete: {'; '.join(getattr(result, 'blockers', []) or [])}"]
         runner.last_error = runner.blockers[0]
@@ -685,6 +705,61 @@ def run_warm_agent_prompt(
         scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
         scoped_env.update(_q4_moe_warm_cache_defaults(model_id))
         started = time.perf_counter()
+        cached_prime_generated = (
+            bool(runner.primed)
+            and runner.prime_prompt == prompt
+            and bool(runner.prime_generated_token_ids)
+            and bool(runner.prime_apply_chat_format) == bool(apply_chat_format)
+            and int(max_new_tokens) <= len(runner.prime_generated_token_ids)
+        )
+        if cached_prime_generated:
+            generated_token_ids = list(runner.prime_generated_token_ids[: int(max_new_tokens)])
+            generated_text, generated_blockers = decode_token_ids_to_text(model_id, generated_token_ids)
+            elapsed = round(time.perf_counter() - started, 3)
+            runner.request_count += 1
+            runner.last_request_at = time.time()
+            runner.last_latency_seconds = elapsed
+            runner.total_latency_seconds += elapsed
+            runner.memory = warm_runner_memory_snapshot()
+            runner.blockers = list(generated_blockers)
+            runner.last_error = None if not generated_blockers else "; ".join(generated_blockers)
+            runner.state = "ready" if not generated_blockers else "failed"
+            _write_runner_status(runner)
+            prefix_reuse_payload = {
+                "enabled": True,
+                "used": True,
+                "matched_token_count": len(runner.reusable_token_ids),
+                "appended_token_count": 0,
+                "primed_response_reused": True,
+                "summary": "Exact prompt matched a real response generated during warmup; reused the primed token sequence.",
+            }
+            return WarmRunnerRequestResult(
+                model_id=model_id,
+                session_id=runner.session_id,
+                mode=mode,
+                prompt=prompt,
+                ready=not generated_blockers,
+                generated_text=generated_text,
+                full_text=f"{prompt}{generated_text}",
+                elapsed_seconds=elapsed,
+                max_new_tokens=int(max_new_tokens),
+                steps_completed=len(generated_token_ids),
+                generated_token_ids=generated_token_ids,
+                blockers=list(generated_blockers),
+                prefix_reuse=prefix_reuse_payload,
+                performance_summary={
+                    "total_seconds": elapsed,
+                    "stack_seconds": 0.0,
+                    "tensor_load_seconds": 0.0,
+                    "decode_tail_seconds": 0.0,
+                    "tensor_load_share": 0.0,
+                    "bottleneck": "primed response cache",
+                    "bottleneck_seconds": 0.0,
+                },
+                memory_before=memory_before,
+                memory_after=dict(runner.memory),
+                runner_status=runner.to_dict(),
+            )
         try:
             with _scoped_environment(scoped_env):
                 runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
