@@ -1142,6 +1142,23 @@ def _q4_prefix_scoped_handles_enabled(config: LayerBridgeModelConfig) -> bool:
     }
 
 
+def _native_lm_head_topk_enabled(config: LayerBridgeModelConfig) -> bool:
+    del config
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    explicit = os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return False
+
+
 def _is_moe_config(config: LayerBridgeModelConfig) -> bool:
     return config.num_experts > 0 and config.num_experts_per_tok > 0
 
@@ -3356,12 +3373,7 @@ def run_decode_tail(
 
     canceled_during_lm_head = False
     native_lm_head_topk = None
-    native_lm_head_topk_enabled = os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    native_lm_head_topk_enabled = _native_lm_head_topk_enabled(config)
     if native_lm_head_topk_enabled and not return_logits and repetition_penalty == 1.0:
         try:
             from pcketlm.native import lm_head_topk_u16 as native_lm_head_topk
@@ -4788,71 +4800,122 @@ def _run_prompt_decode_loop(
         record_phase("pending_prefix_token", phase_started)
         record_token_summary(1, first_generated_token_id, time.perf_counter() - total_started)
         if effective_max_new_tokens > 1 and stop_reason == "step-limit":
-            continuation = _run_prompt_decode_loop(
-                model_id,
-                full_text,
-                steps=effective_max_new_tokens - 1,
-                max_new_tokens=effective_max_new_tokens - 1,
-                start_layer=start_layer,
-                layer_count=layer_count,
-                lm_head_chunk_rows=lm_head_chunk_rows,
-                top_k=top_k,
-                top_p=top_p,
-                selection_policy=selection_policy,
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
-                min_new_tokens=max(1, effective_min_new_tokens - 1),
-                system_prompt=system_prompt,
-                apply_chat_format=False,
-                stop_token_ids=stop_token_ids,
-                stop_strings=stop_strings,
-                sample_seed=sample_seed,
-                should_cancel=should_cancel,
-                initial_decode_state=initial_decode_state,
-                initial_token_ids=list(prompt_token_ids),
-                commit_generated_prefix=False,
-            )
-            combined_generated = generated_token_ids + list(continuation.generated_token_ids)
+            continuation_state = initial_decode_state
+            continuation_chain = list(first_generated_chain)
+            continuation_generated = list(generated_token_ids)
+            continuation_blockers: list[str] = []
+            continuation_cache_lengths = dict(initial_decode_state.cache_sequence_lengths)
+            continuation_stop_reason: str | None = None
+            continuation_steps = 1
+            continuation_layers_executed = 0
+            continuation_expected_layers = 0
+            for step_index in range(1, effective_max_new_tokens):
+                if _cancel_requested(should_cancel):
+                    continuation_blockers.append(CANCEL_BLOCKER)
+                    continuation_stop_reason = "canceled"
+                    break
+                step_stop_token_ids = (
+                    effective_stop_token_ids
+                    if (continuation_steps + 1) >= effective_min_new_tokens
+                    else None
+                )
+                step_started = time.perf_counter()
+                step_result = run_kv_decode_step(
+                    model_id,
+                    input_token_id=continuation_state.next_token_id,
+                    decode_state=continuation_state,
+                    start_layer=start_layer,
+                    layer_count=effective_layer_count,
+                    lm_head_chunk_rows=lm_head_chunk_rows,
+                    top_k=effective_top_k,
+                    top_p=effective_top_p,
+                    selection_policy=effective_policy,
+                    temperature=effective_temperature,
+                    repetition_penalty=effective_repetition_penalty,
+                    stop_token_ids=step_stop_token_ids,
+                    sample_seed=None if sample_seed is None else sample_seed + step_index,
+                    should_cancel=should_cancel,
+                    collect_layer_details=False,
+                )
+                step_elapsed = time.perf_counter() - step_started
+                record_phase("pending_prefix_continuation_steps", step_started)
+                add_nested_timings("pending_prefix_continuation", step_result.timings)
+                continuation_cache_lengths = dict(step_result.cache_sequence_lengths)
+                if not step_result.ready or step_result.chosen_token_id is None or step_result.next_decode_state is None:
+                    continuation_blockers.extend(step_result.blockers or [f"Pending-prefix continuation step {step_index} failed."])
+                    break
+                continuation_layers_executed += len(step_result.executed_layers)
+                continuation_expected_layers += effective_layer_count
+                continuation_state = step_result.next_decode_state
+                continuation_chain = list(continuation_state.generated_token_ids)
+                continuation_generated = list(continuation_chain[len(prompt_token_ids):])
+                continuation_steps = len(continuation_generated)
+                record_token_summary(continuation_steps, continuation_generated[-1], step_elapsed)
+                if continuation_steps >= effective_min_new_tokens and effective_stop_strings:
+                    visible_text, visible_blockers = decode_token_ids_to_text(model_id, continuation_generated)
+                    if visible_blockers:
+                        continuation_blockers.extend(visible_blockers)
+                        break
+                    triggered = next((value for value in effective_stop_strings if value in visible_text), None)
+                    if triggered is not None:
+                        continuation_stop_reason = "stop-string"
+                        break
+                if continuation_state.finished:
+                    continuation_stop_reason = continuation_state.stop_reason
+                    break
+            combined_generated = list(continuation_generated)
             combined_generated_text, combined_generated_blockers = decode_token_ids_to_text(model_id, combined_generated)
+            combined_full_text, combined_full_blockers = decode_token_ids_to_text(model_id, continuation_chain)
             combined_generated_text, _combined_stop_string = _trim_generated_text_at_stop_string(
                 combined_generated_text,
                 effective_stop_strings,
             )
+            if continuation_stop_reason is None:
+                continuation_stop_reason = (
+                    continuation_state.stop_reason
+                    if continuation_state.finished
+                    else ("step-limit" if continuation_steps >= effective_max_new_tokens else None)
+                )
+            anti_cheat_blockers = []
+            if is_default_full_stack_run and continuation_layers_executed < continuation_expected_layers:
+                anti_cheat_blockers.append(
+                    f"Anti-cheat guard: executed {continuation_layers_executed} continuation layer forwards, "
+                    f"expected {continuation_expected_layers}."
+                )
             combined_timings = finish_timings()
-            for key, value in continuation.timings.items():
-                combined_timings[f"pending_prefix_continuation_{key}"] = float(value)
-            combined_timings["total"] = round(time.perf_counter() - total_started, 4)
             return PromptDecodeLoopResult(
                 model_id=model_id,
                 prompt=prepared_prompt_result.prepared_prompt,
                 prompt_token_ids=prompt_token_ids,
                 generated_token_ids=combined_generated,
                 generated_text=combined_generated_text,
-                full_text=continuation.full_text,
+                full_text=combined_full_text,
                 steps_requested=effective_max_new_tokens,
                 max_new_tokens=effective_max_new_tokens,
                 min_new_tokens=effective_min_new_tokens,
-                steps_completed=1 + int(continuation.steps_completed),
+                steps_completed=continuation_steps,
                 strategy=f"{effective_policy}-prompt-kv-cache-rope",
-                stop_reason=continuation.stop_reason,
+                stop_reason=continuation_stop_reason,
                 stop_token_ids=[] if stop_token_ids is None else [int(value) for value in stop_token_ids],
                 stop_strings=list(effective_stop_strings),
-                cache_sequence_lengths=dict(continuation.cache_sequence_lengths),
+                cache_sequence_lengths=continuation_cache_lengths,
                 blockers=list(decode_generated_blockers)
                 + list(decode_full_blockers)
                 + list(combined_generated_blockers)
-                + list(continuation.blockers),
-                ready=continuation.ready,
+                + list(combined_full_blockers)
+                + continuation_blockers
+                + anti_cheat_blockers,
+                ready=not continuation_blockers and not anti_cheat_blockers,
                 timings=combined_timings,
-                token_summaries=token_summaries + list(continuation.token_summaries),
+                token_summaries=token_summaries,
                 prefix_reuse=prefix_reuse,
-                reusable_token_ids=list(continuation.reusable_token_ids),
+                reusable_token_ids=list(continuation_chain[:-1]) if len(continuation_chain) > len(prompt_token_ids) else list(prompt_token_ids),
                 configured_layer_count=configured_layer_count,
                 prompt_layer_count=effective_layer_count,
-                layers_executed=int(continuation.layers_executed),
-                expected_layers_executed=int(continuation.expected_layers_executed),
-                anti_cheat_passed=bool(continuation.anti_cheat_passed),
-                final_decode_state=continuation.final_decode_state,
+                layers_executed=continuation_layers_executed,
+                expected_layers_executed=continuation_expected_layers,
+                anti_cheat_passed=not anti_cheat_blockers,
+                final_decode_state=continuation_state,
             )
         return PromptDecodeLoopResult(
             model_id=model_id,

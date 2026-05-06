@@ -207,7 +207,8 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
     pending_prefix_load = float(
         timings.get("pending_prefix_continuation_prefix_append_stack_op_load_tensors", 0.0) or 0.0
     ) + float(timings.get("pending_prefix_continuation_continuation_stack_op_load_tensors", 0.0) or 0.0)
-    tensor_load_seconds = round(prefill_load + continuation_load + prefix_load + pending_prefix_load, 3)
+    pending_direct_load = float(timings.get("pending_prefix_continuation_stack_op_load_tensors", 0.0) or 0.0)
+    tensor_load_seconds = round(prefill_load + continuation_load + prefix_load + pending_prefix_load + pending_direct_load, 3)
     total = float(timings.get("total", 0.0) or 0.0)
     decode_tail_seconds = round(
         float(timings.get("prefill_decode_tail", 0.0) or 0.0)
@@ -219,6 +220,7 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
         + float(timings.get("pending_prefix_continuation_continuation_decode_tail", 0.0) or 0.0),
         3,
     )
+    pending_direct_decode_tail_seconds = float(timings.get("pending_prefix_continuation_decode_tail", 0.0) or 0.0)
     stack_seconds = round(
         float(timings.get("prefill_stack", 0.0) or 0.0)
         + float(timings.get("prefix_append", 0.0) or 0.0)
@@ -230,10 +232,11 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
         + float(timings.get("pending_prefix_continuation_continuation_steps", 0.0) or 0.0),
         3,
     )
+    pending_direct_stack_seconds = float(timings.get("pending_prefix_continuation_stack", 0.0) or 0.0)
     components = {
         "tensor loading": tensor_load_seconds,
-        "layer stack": round(stack_seconds + pending_stack_seconds, 3),
-        "decode tail": round(decode_tail_seconds + pending_decode_tail_seconds, 3),
+        "layer stack": round(stack_seconds + pending_stack_seconds + pending_direct_stack_seconds, 3),
+        "decode tail": round(decode_tail_seconds + pending_decode_tail_seconds + pending_direct_decode_tail_seconds, 3),
     }
     bottleneck, seconds = max(components.items(), key=lambda item: item[1])
     return {

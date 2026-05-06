@@ -1,0 +1,103 @@
+{
+  "start_status": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "phase-q4-moe-directkv-generateprime10",
+    "mode": "Agent",
+    "state": "ready",
+    "started_at": 1778054586.0260842,
+    "last_request_at": null,
+    "request_count": 0,
+    "last_latency_seconds": null,
+    "average_latency_seconds": null,
+    "last_error": null,
+    "blockers": [],
+    "prefix_reuse_available": true,
+    "reusable_token_count": 5,
+    "tensor_residency_warm": true,
+    "memory": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 2058,
+      "process_working_set_mb": 2589
+    },
+    "primed": true,
+    "prime_seconds": 22.66,
+    "prime_generated_text": " Paris"
+  },
+  "row": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "phase-q4-moe-directkv-generateprime10",
+    "mode": "Agent",
+    "prompt": "The capital of France is",
+    "ready": true,
+    "generated_text": " Paris. The capital of Germany is Berlin. The",
+    "full_text": "The capital of France is Paris. The capital of Germany is Berlin. The",
+    "elapsed_seconds": 28.38,
+    "max_new_tokens": 10,
+    "steps_completed": 10,
+    "generated_token_ids": [
+      12095,
+      13,
+      576,
+      6722,
+      315,
+      9856,
+      374,
+      19846,
+      13,
+      576
+    ],
+    "blockers": [],
+    "prefix_reuse": {
+      "enabled": true,
+      "used": true,
+      "matched_token_count": 5,
+      "appended_token_count": 0,
+      "summary": "Exact reusable prompt prefix matched; returned the already-selected pending token.",
+      "pending_token_reused": true
+    },
+    "performance_summary": {
+      "total_seconds": 28.379,
+      "stack_seconds": 0.0,
+      "tensor_load_seconds": 0.0,
+      "decode_tail_seconds": 0.0,
+      "tensor_load_share": 0.0,
+      "bottleneck": null,
+      "bottleneck_seconds": null
+    },
+    "memory_before": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 2058,
+      "process_working_set_mb": 2589
+    },
+    "memory_after": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1257,
+      "process_working_set_mb": 4316
+    },
+    "runner_status": {
+      "model_id": "qwen3-30b-a3b",
+      "session_id": "phase-q4-moe-directkv-generateprime10",
+      "mode": "Agent",
+      "state": "ready",
+      "started_at": 1778054586.0260842,
+      "last_request_at": 1778054637.078758,
+      "request_count": 1,
+      "last_latency_seconds": 28.38,
+      "average_latency_seconds": 28.38,
+      "last_error": null,
+      "blockers": [],
+      "prefix_reuse_available": true,
+      "reusable_token_count": 14,
+      "tensor_residency_warm": true,
+      "memory": {
+        "total_ram_mb": 15677,
+        "free_ram_mb": 1257,
+        "process_working_set_mb": 4316
+      },
+      "primed": true,
+      "prime_seconds": 22.66,
+      "prime_generated_text": " Paris"
+    }
+  },
+  "outer_seconds": 28.3921
+}

@@ -5535,3 +5535,14 @@ Result: 297 passed in 21.83s
 - Tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_pending_prefix_then_continues tests/test_warm_runner.py::test_warm_runner_allows_longer_q4_moe_visible_chunks tests/test_warm_runner.py::test_warm_runner_keeps_legacy_two_token_cap_for_non_q4_moe -q` -> `3 passed in 2.79s`.
 - Runtime/warm tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py -q` -> `71 passed in 4.99s`.
 - Full suite: `python -m pytest tests/ -q` -> `366 passed in 30.22s`; compile check `python -m compileall -q src tests` passed.
+
+## Phase Q4 MoE Prefill / direct KV continuation and lm-head probe
+- Change: pending-token continuation no longer re-enters the full prompt decode loop. It now uses direct `run_kv_decode_step()` calls from the existing KV state for remaining tokens. This preserves token output and removes a prefix-rematch/full-prompt plumbing layer.
+- Real generated-prime direct-KV row: `state/phase-q4-moe-directkv-generateprime10.json` generated coherent `" Paris. The capital of Germany is Berlin. The"` in `28.380s`, average `2.838s/token`. Verdict: correctness/cleanup kept, but not a speed unlock.
+- Native lm-head top-k explicit probe: `state/phase-q4-moe-native-lmhead-prefix10.json` reached `23.064s` for 10 tokens, average `2.306s/token`, with the same coherent text.
+- Native lm-head default probe under low RAM regressed: `state/phase-q4-moe-native-lmhead-default-prefix10.json` reached only `3.131s/token` and triggered low-RAM trim, so native lm-head top-k was not promoted to default.
+- Same-condition kill-switch control: `state/phase-q4-moe-native-lmhead-disabled-control-prefix10.json` reached `2.780s/token`.
+- Explicit native lm-head rerun: `state/phase-q4-moe-native-lmhead-explicit-rerun2.json` reached `2.682s/token`. Verdict: keep `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1` as an opt-in profiling/speed lever, but default remains off.
+- Tests: `python -m pytest tests/test_runtime_layer_bridge.py::test_native_lm_head_topk_stays_opt_in_for_q4_moe tests/test_runtime_layer_bridge.py::test_run_prompt_decode_loop_reuses_pending_prefix_then_continues tests/test_warm_runner.py::test_warm_runner_allows_longer_q4_moe_visible_chunks -q` -> `3 passed in 4.24s`.
+- Runtime/warm tests: `python -m pytest tests/test_warm_runner.py tests/test_runtime_layer_bridge.py -q` -> `72 passed in 4.76s`.
+- Full suite: `python -m pytest tests/ -q` -> `367 passed in 22.55s`; compile check `python -m compileall -q src tests` passed.

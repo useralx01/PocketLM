@@ -17,6 +17,7 @@ from pcketlm.core.runtime.layer_bridge import (
     _moe_expert_tensor_name_map,
     _moe_router_tensor_name,
     _native_q4_moe_prefill_enabled,
+    _native_lm_head_topk_enabled,
     _q4_prefix_scoped_handles_enabled,
     _run_q4_moe_mlp_token_loop,
     _run_moe_mlp,
@@ -1174,6 +1175,23 @@ def test_q4_prefix_scoped_handles_enabled_only_for_q4_moe(monkeypatch) -> None:
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
     monkeypatch.setenv("PCKETLM_DISABLE_Q4_PREFIX_SCOPED_HANDLES", "1")
     assert _q4_prefix_scoped_handles_enabled(moe_config) is False
+
+
+def test_native_lm_head_topk_stays_opt_in_for_q4_moe(monkeypatch) -> None:
+    moe_config = SimpleNamespace(num_experts=8, num_experts_per_tok=2)
+    dense_config = SimpleNamespace(num_experts=0, num_experts_per_tok=0)
+
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.delenv("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", raising=False)
+    assert _native_lm_head_topk_enabled(moe_config) is False
+    assert _native_lm_head_topk_enabled(dense_config) is False
+
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "1")
+    assert _native_lm_head_topk_enabled(dense_config) is True
+
+    monkeypatch.setenv("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", "1")
+    assert _native_lm_head_topk_enabled(moe_config) is False
 
 
 def test_q4_moe_token_loop_matches_dequantized_selected_experts() -> None:
