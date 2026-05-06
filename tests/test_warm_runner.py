@@ -73,6 +73,7 @@ def test_warm_runner_explicit_q4_moe_start_primes_cache(tmp_path, monkeypatch) -
         ),
     )
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
     monkeypatch.setenv("PCKETLM_Q4_MOE_PRIME_MODE", "generate")
 
     status = start_warm_runner(
@@ -386,6 +387,7 @@ def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, m
         ),
     )
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
     monkeypatch.delenv("PCKETLM_Q4_PACKED_CACHE_MB", raising=False)
     monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
     monkeypatch.delenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", raising=False)
@@ -407,6 +409,88 @@ def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, m
     assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_MB") is None
     assert __import__("os").environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS") is None
     assert __import__("os").environ.get("PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE") is None
+
+
+def test_warm_runner_auto_primes_first_q4_moe_request_with_prompt(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    state = SimpleNamespace(ready=True, label="prefill")
+    calls = []
+
+    def fake_run_prompt_prefill_session(model_id: str, **kwargs):
+        calls.append(("prefill", model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text="",
+            full_text=kwargs["prompt"],
+            generated_token_ids=[],
+            steps_completed=0,
+            max_new_tokens=0,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"prefill_session": True},
+            reusable_token_ids=[10, 11],
+            final_decode_state=state,
+        )
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(("decode", model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text=" OK",
+            full_text=f"{kwargs['prompt']} OK",
+            generated_token_ids=[1],
+            steps_completed=1,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"used": bool(kwargs.get("initial_decode_state"))},
+            reusable_token_ids=[10, 11, 1],
+            final_decode_state=SimpleNamespace(ready=True, label="visible"),
+        )
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(runtime.warm_runner, "tensor_residency_stats", lambda: SimpleNamespace(resident_count=3))
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_MOE_PRIME_CACHE_TOKENS", "2")
+
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-auto-prime-test",
+        "use this prompt",
+        apply_chat_format=False,
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+        run_prompt_prefill_session_fn=fake_run_prompt_prefill_session,
+    )
+
+    assert result.ready is True
+    assert result.runner_status["primed"] is True
+    assert result.runner_status["auto_primed"] is True
+    assert result.runner_status["prime_prompt"] == "use this prompt"
+    assert result.runner_status["prime_cache_tokens"] == 2
+    assert calls[0][0] == "prefill"
+    assert calls[0][2]["prompt"] == "use this prompt"
+    assert calls[0][2]["apply_chat_format"] is False
+    assert calls[1][0] == "decode"
+    assert calls[1][2]["max_new_tokens"] == 2
+    assert calls[2][0] == "decode"
+    assert calls[2][2]["initial_decode_state"] is state
 
 
 def test_warm_runner_allows_longer_q4_moe_visible_chunks(tmp_path, monkeypatch) -> None:
@@ -449,6 +533,7 @@ def test_warm_runner_allows_longer_q4_moe_visible_chunks(tmp_path, monkeypatch) 
         ),
     )
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
 
     result = run_warm_agent_prompt(
         "qwen3-q4-moe-chunk-test",
@@ -552,6 +637,7 @@ def test_warm_runner_trims_dequantized_q4_moe_cache_under_low_ram(tmp_path, monk
     )
     monkeypatch.setattr(runtime.warm_runner, "clear_dequantized_tensor_residency_cache", lambda: trims.append(True))
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
     monkeypatch.setenv("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", "2500")
 
     result = run_warm_agent_prompt(
@@ -618,6 +704,7 @@ def test_warm_runner_trims_q4_moe_cache_before_memory_guard_blocks(tmp_path, mon
     )
     monkeypatch.setattr(runtime.warm_runner, "clear_dequantized_tensor_residency_cache", lambda: trims.append(True))
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
     monkeypatch.setenv("PCKETLM_Q4_MOE_LOW_RAM_TRIM_MB", "2500")
 
     result = run_warm_agent_prompt(
@@ -679,6 +766,7 @@ def test_warm_runner_preserves_explicit_q4_moe_cache_settings(tmp_path, monkeypa
         ),
     )
     monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "1")
     monkeypatch.setenv("PCKETLM_Q4_PACKED_CACHE_MB", "1024")
     monkeypatch.setenv("PCKETLM_TENSOR_CACHE_MB", "768")
     monkeypatch.setenv("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", "12")
@@ -764,7 +852,13 @@ def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> N
 
     calls = []
 
-    def fake_start(model_id: str, session_id: str = "default"):
+    def fake_start(
+        model_id: str,
+        session_id: str = "default",
+        prime_prompt=None,
+        prime_apply_chat_format: bool = False,
+    ):
+        del prime_prompt, prime_apply_chat_format
         return {"model_id": model_id, "session_id": session_id, "state": "ready"}
 
     def fake_status(model_id: str, session_id: str = "default"):

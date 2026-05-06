@@ -1312,7 +1312,16 @@ def test_warm_runner_control_start_and_stop(monkeypatch) -> None:
     from pcketlm.app import web
 
     calls = {"prefix_cleared": 0, "response_cleared": 0}
-    monkeypatch.setattr(web.main, "start_warm_runner", lambda model_id, mode: {"model_id": model_id, "state": "ready"})
+    monkeypatch.setattr(
+        web.main,
+        "start_warm_runner",
+        lambda model_id, mode, prime_prompt=None, prime_apply_chat_format=False: {
+            "model_id": model_id,
+            "state": "ready",
+            "prime_prompt": prime_prompt,
+            "prime_apply_chat_format": prime_apply_chat_format,
+        },
+    )
     monkeypatch.setattr(web.main, "stop_warm_runner", lambda model_id: {"model_id": model_id, "state": "stopped"})
     monkeypatch.setattr(web.main, "_runtime_settings_payload", lambda: {"agent_warm_runner": "safe"})
     monkeypatch.setattr(

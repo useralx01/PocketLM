@@ -101,6 +101,9 @@ class WarmRunner:
     primed: bool = False
     prime_seconds: float | None = None
     prime_generated_text: str = ""
+    prime_prompt: str = ""
+    prime_cache_tokens: int = 0
+    auto_primed: bool = False
 
     def average_latency_seconds(self) -> float | None:
         if self.request_count <= 0:
@@ -127,6 +130,9 @@ class WarmRunner:
             "primed": self.primed,
             "prime_seconds": self.prime_seconds,
             "prime_generated_text": self.prime_generated_text,
+            "prime_prompt": self.prime_prompt,
+            "prime_cache_tokens": self.prime_cache_tokens,
+            "auto_primed": self.auto_primed,
         }
 
 
@@ -369,6 +375,19 @@ def _q4_moe_prime_cache_tokens() -> int:
         return Q4_MOE_PRIME_CACHE_TOKENS
 
 
+def _q4_moe_auto_prime_request_enabled(model_id: str) -> bool:
+    if not _q4_moe_prime_enabled(model_id):
+        return False
+    if os.environ.get("PCKETLM_DISABLE_Q4_MOE_AUTO_PRIME_REQUEST", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return True
+
+
 def _warm_runner_agent_max_new_tokens(model_id: str) -> int:
     if _q4_moe_low_ram_trim_enabled(model_id):
         try:
@@ -410,10 +429,14 @@ def _prime_q4_moe_warm_runner(
     run_prompt_decode_loop_fn=None,
     run_prompt_prefill_session_fn=None,
     prompt: str | None = None,
+    apply_chat_format: bool = False,
+    auto_prime: bool = False,
 ) -> None:
     """Warm Q4 MoE packed/tensor caches and optionally prepare reusable prefix KV."""
     if runner.primed:
         return
+    prime_prompt = prompt or _q4_moe_prime_prompt()
+    cache_tokens = _q4_moe_prime_cache_tokens()
     scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
     scoped_env.update(_q4_moe_warm_cache_defaults(runner.model_id))
     started = time.perf_counter()
@@ -427,19 +450,18 @@ def _prime_q4_moe_warm_runner(
                 )
                 result = prefill_fn(
                     runner.model_id,
-                    prompt=prompt or _q4_moe_prime_prompt(),
-                    apply_chat_format=False,
+                    prompt=prime_prompt,
+                    apply_chat_format=apply_chat_format,
                 )
-                cache_tokens = _q4_moe_prime_cache_tokens()
                 if cache_tokens > 0 and bool(getattr(result, "ready", False)):
                     runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
                     cache_result = runner_fn(
                         runner.model_id,
-                        prompt=prompt or _q4_moe_prime_prompt(),
+                        prompt=prime_prompt,
                         max_new_tokens=cache_tokens,
                         min_new_tokens=1,
                         selection_policy="greedy",
-                        apply_chat_format=False,
+                        apply_chat_format=apply_chat_format,
                         initial_decode_state=getattr(result, "final_decode_state", None),
                         initial_token_ids=list(getattr(result, "reusable_token_ids", []) or []),
                         commit_generated_prefix=False,
@@ -452,11 +474,11 @@ def _prime_q4_moe_warm_runner(
                 runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
                 result = runner_fn(
                     runner.model_id,
-                    prompt=prompt or _q4_moe_prime_prompt(),
+                    prompt=prime_prompt,
                     max_new_tokens=1,
                     min_new_tokens=1,
                     selection_policy="greedy",
-                    apply_chat_format=False,
+                    apply_chat_format=apply_chat_format,
                     initial_decode_state=None,
                     initial_token_ids=None,
                     commit_generated_prefix=False,
@@ -468,6 +490,9 @@ def _prime_q4_moe_warm_runner(
         return
     runner.prime_seconds = round(time.perf_counter() - started, 3)
     runner.primed = bool(getattr(result, "ready", False))
+    runner.prime_prompt = prime_prompt
+    runner.prime_cache_tokens = cache_tokens
+    runner.auto_primed = bool(auto_prime)
     if not runner.prime_generated_text:
         runner.prime_generated_text = str(getattr(result, "generated_text", "") or "")
     if not runner.primed:
@@ -495,6 +520,7 @@ def start_warm_runner(
     *,
     prime: bool | None = None,
     prime_prompt: str | None = None,
+    prime_apply_chat_format: bool = False,
     run_prompt_decode_loop_fn=None,
     run_prompt_prefill_session_fn=None,
 ) -> dict:
@@ -518,6 +544,8 @@ def start_warm_runner(
                 run_prompt_decode_loop_fn=run_prompt_decode_loop_fn,
                 run_prompt_prefill_session_fn=run_prompt_prefill_session_fn,
                 prompt=prime_prompt,
+                apply_chat_format=prime_apply_chat_format,
+                auto_prime=False,
             )
         _write_runner_status(runner)
         return runner.to_dict()
@@ -599,6 +627,7 @@ def run_warm_agent_prompt(
     min_free_memory_mb: int = WARM_RUNNER_MIN_FREE_MEMORY_MB,
     apply_chat_format: bool = True,
     run_prompt_decode_loop_fn=None,
+    run_prompt_prefill_session_fn=None,
 ) -> WarmRunnerRequestResult:
     """Run one short Agent prompt through the conservative in-process warm runner."""
     with _RUNNERS_LOCK:
@@ -631,6 +660,21 @@ def run_warm_agent_prompt(
                 [f"Free RAM is below the warm-runner guard of {effective_min_free_memory_mb} MB."],
                 memory_before,
             )
+
+        if (
+            _q4_moe_auto_prime_request_enabled(model_id)
+            and not runner.primed
+            and not runner.prefix_reuse_available
+        ):
+            _prime_q4_moe_warm_runner(
+                runner,
+                run_prompt_decode_loop_fn=run_prompt_decode_loop_fn,
+                run_prompt_prefill_session_fn=run_prompt_prefill_session_fn,
+                prompt=prompt,
+                apply_chat_format=apply_chat_format,
+                auto_prime=True,
+            )
+            memory_before = warm_runner_memory_snapshot()
 
         runner.state = "running"
         runner.mode = mode

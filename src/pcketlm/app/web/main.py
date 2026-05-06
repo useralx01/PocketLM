@@ -222,8 +222,17 @@ def _update_runtime_settings(payload: dict) -> dict:
 def _warm_runner_control_payload(payload: dict) -> dict:
     model_id = str(payload.get("model_id") or "qwen2.5-14b-instruct")
     action = str(payload.get("action") or "status").strip().lower()
+    prime_prompt = payload.get("prime_prompt")
+    if prime_prompt is not None:
+        prime_prompt = str(prime_prompt)
+    prime_apply_chat_format = bool(payload.get("prime_apply_chat_format", bool(prime_prompt)))
     if action == "start":
-        status = start_warm_runner(model_id, mode="Agent")
+        status = start_warm_runner(
+            model_id,
+            mode="Agent",
+            prime_prompt=prime_prompt,
+            prime_apply_chat_format=prime_apply_chat_format,
+        )
     elif action in {"stop", "unload"}:
         status = stop_warm_runner(model_id)
         _clear_session_prefix_cache()

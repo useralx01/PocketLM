@@ -16,7 +16,7 @@ def _usage() -> str:
     return (
         "Usage: py -m pcketlm.app.chat_shell.warm_runner_cli "
         "<start|run|status|stop|sequence> --model <id> [--session-id <id>] [--prompt <text>] [--second-prompt <text>] "
-        "[--max-new-tokens <n>] [--min-free-memory-mb <n>] [--raw] [--independent-second]"
+        "[--prime-prompt <text>] [--max-new-tokens <n>] [--min-free-memory-mb <n>] [--raw] [--independent-second]"
     )
 
 
@@ -28,6 +28,7 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
         "model": "qwen2.5-14b-instruct",
         "prompt": "hello world",
         "second_prompt": "reply ok only",
+        "prime_prompt": None,
         "session_id": "default",
         "max_new_tokens": 2,
         "min_free_memory_mb": 4096,
@@ -47,6 +48,10 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
             continue
         if flag == "--second-prompt" and index + 1 < len(args):
             options["second_prompt"] = args[index + 1]
+            index += 2
+            continue
+        if flag == "--prime-prompt" and index + 1 < len(args):
+            options["prime_prompt"] = args[index + 1]
             index += 2
             continue
         if flag == "--session-id" and index + 1 < len(args):
@@ -86,7 +91,14 @@ def main(argv: list[str] | None = None) -> int:
     model_id = str(options["model"])
     session_id = str(options["session_id"])
     if command == "start":
-        _print(start_warm_runner(model_id, session_id=session_id))
+        _print(
+            start_warm_runner(
+                model_id,
+                session_id=session_id,
+                prime_prompt=options.get("prime_prompt"),
+                prime_apply_chat_format=bool(options["apply_chat_format"]),
+            )
+        )
         return 0
     if command == "status":
         _print(warm_runner_status(model_id, session_id=session_id))
@@ -106,7 +118,12 @@ def main(argv: list[str] | None = None) -> int:
         _print(result.to_dict())
         return 0 if result.ready else 2
     if command == "sequence":
-        start = start_warm_runner(model_id, session_id=session_id)
+        start = start_warm_runner(
+            model_id,
+            session_id=session_id,
+            prime_prompt=str(options.get("prime_prompt") or options["prompt"]),
+            prime_apply_chat_format=bool(options["apply_chat_format"]),
+        )
         first = run_warm_agent_prompt(
             model_id,
             str(options["prompt"]),
