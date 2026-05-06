@@ -607,7 +607,7 @@ def test_warm_runner_applies_q4_moe_cache_defaults_during_generation(tmp_path, m
     )
 
     assert result.ready is True
-    assert captured_env["PCKETLM_Q4_PACKED_CACHE_MB"] == "5120"
+    assert captured_env["PCKETLM_Q4_PACKED_CACHE_MB"] == "6144"
     assert captured_env["PCKETLM_TENSOR_CACHE_MB"] == "2048"
     assert captured_env["PCKETLM_TENSOR_CACHE_FRONT_LAYERS"] == "48"
     assert captured_env["PCKETLM_SAFETENSOR_HANDLE_CACHE"] == "0"

@@ -126,5 +126,5 @@
 - Do not revisit simple generated-prefix commit or a basic one-call Q4 selected-expert batch wrapper as defaults; both were re-measured after scoped handles and regressed.
 - Do not default native thread-count tuning until it is repeatable across fresh runs; the one `6.908s` row was not stable.
 - Next target after Q4 MoE prefix-prefill: teach the product/chat layer to choose useful reusable prefixes automatically instead of relying on the operator to set `PCKETLM_Q4_MOE_PRIME_PROMPT`.
-- Next speed target after primed-response reuse: reduce generic Qwen3 chat/thinking layer-stack compute itself. Response reuse and saved decode-state continuation make prepared prompts fast or instant, and 20-token thinking warmup improved to `165.899s`, but unprepared thinking prompts still spend nearly all time in layer-stack compute.
-- Next Q4 MoE target: build a real native selected-expert/layer compute path for the remaining layer-stack cost. Prompt plumbing, tensor loading, and lm-head top-k are not the main bottleneck.
+- Next speed target after the Qwen3 thinking warm lane: reduce the `67s` prompt-specific warmup. Visible thinking output is now in the 1-2s/token band after warmup, but startup preparation is still too long for interactive cold prompts.
+- Next Q4 MoE target: build a fused multi-token selected-expert payload/load path for warmup itself. The visible continuation now has packed-cache evictions at `0`; remaining cold/warmup work is generating the primed tokens, not visible decoding.

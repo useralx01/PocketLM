@@ -1,0 +1,121 @@
+{
+  "start": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "profile-step",
+    "mode": "Agent",
+    "state": "ready",
+    "started_at": 1778094556.7124045,
+    "last_request_at": null,
+    "request_count": 0,
+    "last_latency_seconds": null,
+    "average_latency_seconds": null,
+    "last_error": null,
+    "blockers": [],
+    "prefix_reuse_available": true,
+    "reusable_token_count": 36,
+    "tensor_residency_warm": true,
+    "memory": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1012,
+      "process_working_set_mb": 6936
+    },
+    "primed": true,
+    "prime_seconds": 54.995,
+    "prime_generated_text": "<think>\nOkay, the user wants me to write",
+    "prime_generated_token_count": 10,
+    "prime_full_text": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWrite one sentence about local AI.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, the user wants me to write",
+    "prime_prompt": "Write one sentence about local AI.",
+    "prime_cache_tokens": 10,
+    "prime_apply_chat_format": true,
+    "auto_primed": false
+  },
+  "rows": [
+    {
+      "i": 0,
+      "ready": true,
+      "chosen": 825,
+      "timings": {
+        "token_entry": 0.0774,
+        "stack": 437.1938,
+        "stack_total": 437.1937,
+        "stack_layer_count": 48.0,
+        "stack_op_load_tensors": 0.2339,
+        "stack_op_input_norm": 0.0088,
+        "stack_op_native_attention": 0.1651,
+        "stack_op_post_attention_norm": 0.006,
+        "stack_op_mlp_q4_packed_load": 435.9759,
+        "stack_op_mlp_q4_native_compute": 0.1411,
+        "stack_op_mlp_native_q4_success_count": 48.0,
+        "stack_op_mlp": 436.122,
+        "stack_average_layer": 9.1058,
+        "stack_slowest_layer": 0.0,
+        "stack_slowest_layer_seconds": 307.9463,
+        "decode_tail": 0.5575,
+        "selection": 0.0002,
+        "total": 437.8296
+      },
+      "layers": 48,
+      "blockers": [
+        "This K/V-aware step now applies RoPE to the carried key path, but it is still not yet a full production decode implementation."
+      ]
+    },
+    {
+      "i": 1,
+      "ready": true,
+      "chosen": 11652,
+      "timings": {
+        "token_entry": 0.1381,
+        "stack": 135.7644,
+        "stack_total": 135.7643,
+        "stack_layer_count": 48.0,
+        "stack_op_load_tensors": 0.256,
+        "stack_op_input_norm": 0.0095,
+        "stack_op_native_attention": 0.162,
+        "stack_op_post_attention_norm": 0.0073,
+        "stack_op_mlp_q4_packed_load": 134.5198,
+        "stack_op_mlp_q4_native_compute": 0.1324,
+        "stack_op_mlp_native_q4_success_count": 48.0,
+        "stack_op_mlp": 134.6569,
+        "stack_average_layer": 2.8265,
+        "stack_slowest_layer": 30.0,
+        "stack_slowest_layer_seconds": 3.2196,
+        "decode_tail": 0.4852,
+        "selection": 0.0002,
+        "total": 136.3887
+      },
+      "layers": 48,
+      "blockers": [
+        "This K/V-aware step now applies RoPE to the carried key path, but it is still not yet a full production decode implementation."
+      ]
+    },
+    {
+      "i": 2,
+      "ready": true,
+      "chosen": 911,
+      "timings": {
+        "token_entry": 0.0866,
+        "stack": 144.02,
+        "stack_total": 144.0198,
+        "stack_layer_count": 48.0,
+        "stack_op_load_tensors": 0.2669,
+        "stack_op_input_norm": 0.0108,
+        "stack_op_native_attention": 0.152,
+        "stack_op_post_attention_norm": 0.0075,
+        "stack_op_mlp_q4_packed_load": 142.7164,
+        "stack_op_mlp_q4_native_compute": 0.1364,
+        "stack_op_mlp_native_q4_success_count": 48.0,
+        "stack_op_mlp": 142.8582,
+        "stack_average_layer": 2.9983,
+        "stack_slowest_layer": 9.0,
+        "stack_slowest_layer_seconds": 3.4594,
+        "decode_tail": 0.4755,
+        "selection": 0.0003,
+        "total": 144.5836
+      },
+      "layers": 48,
+      "blockers": [
+        "This K/V-aware step now applies RoPE to the carried key path, but it is still not yet a full production decode implementation."
+      ]
+    }
+  ]
+}
