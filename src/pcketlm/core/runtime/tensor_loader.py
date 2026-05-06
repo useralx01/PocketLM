@@ -427,6 +427,8 @@ def q4_source_status(model_id: str) -> dict:
 
 def _torch_dtype_from_catalog(dtype: str) -> torch.dtype:
     normalized = _normalize_catalog_dtype(dtype)
+    if normalized == "torch.uint8" or dtype.upper() == "U8":
+        return torch.uint8
     if normalized == "torch.bfloat16":
         return torch.bfloat16
     if normalized == "torch.float16":
@@ -438,6 +440,79 @@ def _torch_dtype_from_catalog(dtype: str) -> torch.dtype:
     if normalized == "torch.int32":
         return torch.int32
     return torch.float16
+
+
+def _torch_dtype_from_safetensors(dtype: str) -> torch.dtype:
+    normalized = str(dtype).strip().upper()
+    if normalized == "U8":
+        return torch.uint8
+    if normalized == "F16":
+        return torch.float16
+    if normalized == "BF16":
+        return torch.bfloat16
+    if normalized == "F32":
+        return torch.float32
+    if normalized == "I64":
+        return torch.int64
+    if normalized == "I32":
+        return torch.int32
+    return torch.float16
+
+
+@lru_cache(maxsize=128)
+def _safetensors_tensor_metadata(path: str, mtime_ns: int) -> tuple[int, dict[str, dict]]:
+    del mtime_ns
+    with Path(path).open("rb") as handle:
+        header_length = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(int(header_length)).decode("utf-8"))
+    tensors = {
+        str(name): dict(payload)
+        for name, payload in header.items()
+        if isinstance(payload, dict) and "data_offsets" in payload
+    }
+    return 8 + int(header_length), tensors
+
+
+def _native_q4_packed_load_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_Q4_PACKED_LOAD", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_Q4_PACKED_LOAD", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _load_safetensors_tensor_raw(path: Path, tensor_name: str) -> torch.Tensor | None:
+    if not _native_q4_packed_load_enabled():
+        return None
+    try:
+        base_offset, metadata = _safetensors_tensor_metadata(str(path.resolve()), _path_mtime_ns(path))
+        payload = metadata[tensor_name]
+        shape = [int(value) for value in payload.get("shape", [])]
+        start, end = [int(value) for value in payload["data_offsets"]]
+        tensor = torch.empty(tuple(shape), dtype=_torch_dtype_from_safetensors(str(payload.get("dtype", "F16"))))
+        nbytes = int(end - start)
+        if nbytes != int(tensor.nelement() * tensor.element_size()):
+            return None
+        try:
+            from pcketlm.native import native_read_tensor_bytes
+
+            native_read_tensor_bytes(path, base_offset + start, nbytes, tensor)
+        except Exception:
+            with path.open("rb") as handle:
+                handle.seek(base_offset + start)
+                raw = handle.read(nbytes)
+            tensor.view(torch.uint8).reshape(-1).copy_(torch.frombuffer(bytearray(raw), dtype=torch.uint8))
+        return tensor
+    except Exception:
+        return None
 
 
 def _native_fp16_load_enabled() -> bool:
@@ -588,6 +663,10 @@ def load_q4_packed_tensors_by_name(
         scoped_scale_handle = open_scoped_tensor_handle(scale_path)
         if scoped_q4_handle is not None and scoped_scale_handle is not None:
             def load_packed(entry: TensorCatalogEntry) -> tuple[torch.Tensor, torch.Tensor]:
+                raw_packed = _load_safetensors_tensor_raw(q4_path, entry.tensor_name)
+                raw_scales = _load_safetensors_tensor_raw(scale_path, entry.tensor_name)
+                if raw_packed is not None and raw_scales is not None:
+                    return raw_packed, raw_scales
                 return (
                     scoped_q4_handle.get_tensor(entry.tensor_name),
                     scoped_scale_handle.get_tensor(entry.tensor_name),
@@ -609,6 +688,10 @@ def load_q4_packed_tensors_by_name(
             handles: dict[str, object] = {}
 
             def load_packed(entry: TensorCatalogEntry) -> tuple[torch.Tensor, torch.Tensor]:
+                raw_packed = _load_safetensors_tensor_raw(q4_path, entry.tensor_name)
+                raw_scales = _load_safetensors_tensor_raw(scale_path, entry.tensor_name)
+                if raw_packed is not None and raw_scales is not None:
+                    return raw_packed, raw_scales
                 if "q4" not in handles:
                     handles["q4"] = stack.enter_context(safe_open(q4_path, framework="pt", device="cpu"))
                     handles["scale"] = stack.enter_context(safe_open(scale_path, framework="pt", device="cpu"))

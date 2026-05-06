@@ -1393,6 +1393,86 @@ def test_run_decode_tail_can_stream_topk_without_full_logits(tmp_path: Path, mon
     assert result.logits is None
 
 
+def test_run_decode_tail_can_cache_full_q4_moe_lm_head(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    stack_result = run_layer_bridge_stack(model_id, start_layer=0, layer_count=2)
+    baseline = run_decode_tail(
+        model_id,
+        stack_result.output_tensor,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        return_logits=False,
+    )
+    config = load_layer_bridge_config(model_id)
+    config.num_experts = 2
+    config.num_experts_per_tok = 1
+    original_load_resident_tensor = layer_bridge_module.load_resident_tensor
+    lm_head_loads = 0
+
+    def counting_load_resident_tensor(*args, **kwargs):
+        nonlocal lm_head_loads
+        if len(args) >= 2 and args[1] == "lm_head.weight":
+            lm_head_loads += 1
+        return original_load_resident_tensor(*args, **kwargs)
+
+    monkeypatch.setattr(layer_bridge_module, "load_layer_bridge_config", lambda _model_id: config)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensor", counting_load_resident_tensor)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "1")
+    monkeypatch.delenv("PCKETLM_DISABLE_Q4_MOE_LM_HEAD_FULL_CACHE", raising=False)
+    layer_bridge_module._clear_lm_head_full_cache()
+
+    first = run_decode_tail(
+        model_id,
+        stack_result.output_tensor,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        return_logits=False,
+    )
+    second = run_decode_tail(
+        model_id,
+        stack_result.output_tensor,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        return_logits=False,
+    )
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.chunk_count == 1
+    assert second.chunk_count == 1
+    assert first.top_token_ids == baseline.top_token_ids
+    assert second.top_token_ids == baseline.top_token_ids
+    assert lm_head_loads == 1
+    layer_bridge_module._clear_lm_head_full_cache()
+
+
+def test_run_decode_tail_full_q4_moe_lm_head_cache_kill_switch(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+    stack_result = run_layer_bridge_stack(model_id, start_layer=0, layer_count=2)
+    config = load_layer_bridge_config(model_id)
+    config.num_experts = 2
+    config.num_experts_per_tok = 1
+
+    monkeypatch.setattr(layer_bridge_module, "load_layer_bridge_config", lambda _model_id: config)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "1")
+    monkeypatch.setenv("PCKETLM_DISABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "1")
+    layer_bridge_module._clear_lm_head_full_cache()
+
+    result = run_decode_tail(
+        model_id,
+        stack_result.output_tensor,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        return_logits=False,
+    )
+
+    assert result.ready is True
+    assert result.chunk_count == 3
+    layer_bridge_module._clear_lm_head_full_cache()
+
+
 def test_run_token_decode_step_produces_logits_from_real_token_entry(tmp_path: Path, monkeypatch) -> None:
     model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
 

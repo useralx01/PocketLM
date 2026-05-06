@@ -51,6 +51,8 @@ _ROPE_CACHE_MAX_ENTRIES = 32
 _rope_cache: OrderedDict[tuple[int, float, str, tuple[int, ...]], tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
 _CAUSAL_MASK_CACHE_MAX_ENTRIES = 32
 _causal_mask_cache: OrderedDict[tuple[str, tuple[int, ...], tuple[int, ...]], torch.Tensor] = OrderedDict()
+_LM_HEAD_FULL_CACHE_MAX_ENTRIES = 2
+_lm_head_full_cache: OrderedDict[tuple[str, str, str], torch.Tensor] = OrderedDict()
 
 
 def _cancel_requested(should_cancel: Callable[[], bool] | None) -> bool:
@@ -1120,6 +1122,16 @@ def _native_q4_moe_prefill_enabled() -> bool:
     }
 
 
+def _q4_moe_decode_prefetch_expert_count(config: LayerBridgeModelConfig) -> int:
+    try:
+        requested = int(os.environ.get("PCKETLM_Q4_MOE_DECODE_PREFETCH_EXPERTS", "0"))
+    except ValueError:
+        requested = 0
+    if requested <= 0:
+        return 0
+    return max(config.num_experts_per_tok, min(int(requested), config.num_experts))
+
+
 def _q4_decode_dequant_expert_residency_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_Q4_DECODE_DEQUANT_EXPERT_RESIDENCY", "0").strip().lower() in {
         "1",
@@ -1157,6 +1169,60 @@ def _native_lm_head_topk_enabled(config: LayerBridgeModelConfig) -> bool:
     if explicit in {"0", "false", "no", "off"}:
         return False
     return False
+
+
+def _q4_moe_lm_head_full_cache_enabled(config: LayerBridgeModelConfig) -> bool:
+    if os.environ.get("PCKETLM_DISABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    if os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4":
+        return False
+    if not _is_moe_config(config):
+        return False
+    explicit = os.environ.get("PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return False
+
+
+def _clear_lm_head_full_cache() -> None:
+    _lm_head_full_cache.clear()
+
+
+def _load_lm_head_full_cached(
+    model_id: str,
+    *,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor | None, list[str], bool]:
+    key = (model_id, str(dtype), os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower())
+    cached = _lm_head_full_cache.get(key)
+    if cached is not None:
+        _lm_head_full_cache.move_to_end(key)
+        return cached, [], True
+
+    loaded = load_resident_tensor(
+        model_id,
+        "lm_head.weight",
+        dtype=dtype,
+        policy=TensorResidencyPolicy(enabled=False),
+    )
+    if not loaded.ready or loaded.tensor is None:
+        blockers = list(loaded.blockers)
+        blockers.append("lm_head.weight could not be loaded into the full decode-head cache.")
+        return None, blockers, False
+
+    tensor = loaded.tensor.detach().cpu().to(dtype=dtype).contiguous()
+    _lm_head_full_cache[key] = tensor
+    _lm_head_full_cache.move_to_end(key)
+    while len(_lm_head_full_cache) > _LM_HEAD_FULL_CACHE_MAX_ENTRIES:
+        _lm_head_full_cache.popitem(last=False)
+    return tensor, [], False
 
 
 def _is_moe_config(config: LayerBridgeModelConfig) -> bool:
@@ -2388,13 +2454,24 @@ def run_minimal_layer_forward_bridge(
                 routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
             selected_expert_order = [int(value) for value in selected_experts.detach().cpu().flatten().tolist()]
             selected_expert_ids = sorted({int(value) for value in selected_experts.detach().cpu().flatten().tolist()})
+            prefetch_expert_ids: list[int] = []
+            prefetch_count = _q4_moe_decode_prefetch_expert_count(config)
+            if (
+                prefetch_count > len(selected_expert_ids)
+                and os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() == "q4"
+                and sequence_length == 1
+            ):
+                _prefetch_weights, prefetch_experts = torch.topk(router_probs, prefetch_count, dim=-1)
+                prefetch_expert_ids = sorted({int(value) for value in prefetch_experts.detach().cpu().flatten().tolist()})
         expert_tensor_names: list[str] = []
         expert_name_maps: dict[int, dict[str, str]] = {}
         for expert_index in selected_expert_ids:
             record_expert_activation(layer_index, expert_index)
+        for expert_index in sorted(set(selected_expert_ids) | set(prefetch_expert_ids)):
             expert_name_map = _moe_expert_tensor_name_map(model_id, layer_index, expert_index)
             expert_name_maps[expert_index] = expert_name_map
-            expert_tensor_names.extend(expert_name_map.values())
+            if expert_index in selected_expert_ids:
+                expert_tensor_names.extend(expert_name_map.values())
         decode_expert_cache = bool(
             return_kv_cache
             and sequence_length == 1
@@ -2412,7 +2489,8 @@ def run_minimal_layer_forward_bridge(
                 from pcketlm.native import q4_moe_selected_forward_u16
 
                 ordered_names: list[str] = []
-                for expert_index in selected_expert_order:
+                ordered_expert_ids = list(dict.fromkeys(selected_expert_order + prefetch_expert_ids))
+                for expert_index in ordered_expert_ids:
                     expert_name_map = expert_name_maps[expert_index]
                     ordered_names.extend(
                         [
@@ -2421,8 +2499,10 @@ def run_minimal_layer_forward_bridge(
                             expert_name_map["down_proj"],
                         ]
                     )
+                load_phase_started = time.perf_counter()
                 with q4_packed_expert_cache_scope(enabled=True):
                     packed_by_name = load_q4_packed_tensors_by_name(model_id, ordered_names)
+                record_phase("mlp_q4_packed_load", load_phase_started)
                 native_experts = []
                 for expert_index in selected_expert_order:
                     expert_name_map = expert_name_maps[expert_index]
@@ -2439,6 +2519,7 @@ def run_minimal_layer_forward_bridge(
                             down_payload[1],
                         )
                     )
+                native_phase_started = time.perf_counter()
                 native_out = q4_moe_selected_forward_u16(
                     normed_post_attention.reshape(1, -1).to(dtype=torch.float16),
                     native_experts,
@@ -2446,6 +2527,7 @@ def run_minimal_layer_forward_bridge(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.moe_intermediate_size,
                 )
+                record_phase("mlp_q4_native_compute", native_phase_started)
                 mlp_output = native_out.view_as(normed_post_attention).to(dtype=normed_post_attention.dtype)
                 native_q4_mlp_done = True
                 timings["mlp_native_q4_success_count"] = timings.get("mlp_native_q4_success_count", 0.0) + 1.0
@@ -3379,6 +3461,48 @@ def run_decode_tail(
             from pcketlm.native import lm_head_topk_u16 as native_lm_head_topk
         except Exception:
             native_lm_head_topk = None
+
+    if _q4_moe_lm_head_full_cache_enabled(config) and native_lm_head_topk is None:
+        lm_head_weight, lm_head_cache_blockers, _cache_hit = _load_lm_head_full_cached(model_id, dtype=math_dtype)
+        if lm_head_weight is not None:
+            logits_matrix = F.linear(hidden_vector, lm_head_weight)
+            logits_vector = logits_matrix.view(vocab_size)
+            if not return_logits and repetition_penalty != 1.0 and recent_ids:
+                logits_vector = logits_vector.float().clone()
+                for token_id in recent_ids:
+                    if 0 <= token_id < vocab_size:
+                        value = logits_vector[token_id]
+                        logits_vector[token_id] = value * repetition_penalty if value < 0 else value / repetition_penalty
+            top_logits, top_token_ids = torch.topk(logits_vector.float(), k=k)
+            logits = logits_matrix.view(1, 1, vocab_size) if return_logits else None
+            return DecodeTailResult(
+                model_id=model_id,
+                input_shape=[int(value) for value in hidden_state.shape],
+                normalized_shape=[int(value) for value in normalized.shape],
+                logits_shape=[1, 1, vocab_size],
+                logits_dtype=str(logits_matrix.dtype),
+                vocab_size=vocab_size,
+                chunk_rows=vocab_size,
+                chunk_count=1,
+                top_token_ids=[int(value) for value in top_token_ids.tolist()],
+                top_logits=[float(value) for value in top_logits.tolist()],
+                blockers=[],
+                ready=True,
+                logits=logits,
+            )
+        blockers.extend(lm_head_cache_blockers)
+        return DecodeTailResult(
+            model_id=model_id,
+            input_shape=[int(value) for value in hidden_state.shape],
+            normalized_shape=[int(value) for value in normalized.shape],
+            logits_shape=[],
+            logits_dtype="unknown",
+            vocab_size=vocab_size,
+            chunk_rows=lm_head_chunk_rows,
+            chunk_count=0,
+            blockers=blockers,
+            ready=False,
+        )
 
     def stream_lm_head(handle) -> bool:
         nonlocal streamed_top_logits, streamed_top_token_ids

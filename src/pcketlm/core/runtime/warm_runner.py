@@ -26,11 +26,12 @@ WARM_RUNNER_MIN_FREE_MEMORY_MB = 4 * 1024
 WARM_RUNNER_AGENT_MAX_NEW_TOKENS = 2
 Q4_MOE_WARM_AGENT_MAX_NEW_TOKENS = 16
 WARM_RUNNER_STATUS_DIR_NAME = "warm-runner"
-Q4_MOE_WARM_PACKED_CACHE_MB = 4 * 1024
+Q4_MOE_WARM_PACKED_CACHE_MB = 5 * 1024
 Q4_MOE_WARM_TENSOR_CACHE_MB = 2 * 1024
 Q4_MOE_LOW_FREE_RAM_TRIM_MB = 800
 Q4_MOE_PRIME_PROMPT = "The capital of France is"
 Q4_MOE_PRIME_MODE = "prefill"
+Q4_MOE_PRIME_CACHE_TOKENS = 10
 
 
 @dataclass(slots=True)
@@ -299,6 +300,8 @@ def _q4_moe_warm_cache_defaults(model_id: str) -> dict[str, str]:
         defaults["PCKETLM_TENSOR_CACHE_MB"] = str(Q4_MOE_WARM_TENSOR_CACHE_MB)
     if not os.environ.get("PCKETLM_TENSOR_CACHE_FRONT_LAYERS", "").strip():
         defaults["PCKETLM_TENSOR_CACHE_FRONT_LAYERS"] = str(int(getattr(config, "num_hidden_layers", 0) or 0))
+    if not os.environ.get("PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE", "").strip():
+        defaults["PCKETLM_ENABLE_Q4_MOE_LM_HEAD_FULL_CACHE"] = "1"
     return defaults
 
 
@@ -357,6 +360,13 @@ def _q4_moe_prime_prompt() -> str:
 def _q4_moe_prime_mode() -> str:
     requested = os.environ.get("PCKETLM_Q4_MOE_PRIME_MODE", Q4_MOE_PRIME_MODE).strip().lower()
     return requested if requested in {"prefill", "generate"} else Q4_MOE_PRIME_MODE
+
+
+def _q4_moe_prime_cache_tokens() -> int:
+    try:
+        return max(0, int(os.environ.get("PCKETLM_Q4_MOE_PRIME_CACHE_TOKENS", str(Q4_MOE_PRIME_CACHE_TOKENS))))
+    except ValueError:
+        return Q4_MOE_PRIME_CACHE_TOKENS
 
 
 def _warm_runner_agent_max_new_tokens(model_id: str) -> int:
@@ -420,6 +430,24 @@ def _prime_q4_moe_warm_runner(
                     prompt=prompt or _q4_moe_prime_prompt(),
                     apply_chat_format=False,
                 )
+                cache_tokens = _q4_moe_prime_cache_tokens()
+                if cache_tokens > 0 and bool(getattr(result, "ready", False)):
+                    runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
+                    cache_result = runner_fn(
+                        runner.model_id,
+                        prompt=prompt or _q4_moe_prime_prompt(),
+                        max_new_tokens=cache_tokens,
+                        min_new_tokens=1,
+                        selection_policy="greedy",
+                        apply_chat_format=False,
+                        initial_decode_state=getattr(result, "final_decode_state", None),
+                        initial_token_ids=list(getattr(result, "reusable_token_ids", []) or []),
+                        commit_generated_prefix=False,
+                    )
+                    if bool(getattr(cache_result, "ready", False)):
+                        runner.prime_generated_text = str(getattr(cache_result, "generated_text", "") or "")
+                    else:
+                        result = cache_result
             else:
                 runner_fn = run_prompt_decode_loop if run_prompt_decode_loop_fn is None else run_prompt_decode_loop_fn
                 result = runner_fn(
@@ -440,7 +468,8 @@ def _prime_q4_moe_warm_runner(
         return
     runner.prime_seconds = round(time.perf_counter() - started, 3)
     runner.primed = bool(getattr(result, "ready", False))
-    runner.prime_generated_text = str(getattr(result, "generated_text", "") or "")
+    if not runner.prime_generated_text:
+        runner.prime_generated_text = str(getattr(result, "generated_text", "") or "")
     if not runner.primed:
         runner.blockers = [f"Q4 MoE cache prime did not complete: {'; '.join(getattr(result, 'blockers', []) or [])}"]
         runner.last_error = runner.blockers[0]

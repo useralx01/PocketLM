@@ -255,6 +255,33 @@ def test_q4_packed_loader_reads_manifest_once_per_call(tmp_path: Path, monkeypat
     assert calls["manifest"] == 1
 
 
+def test_q4_packed_loader_can_use_raw_safetensors_reader(tmp_path: Path, monkeypatch) -> None:
+    model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)
+    _write_q4_artifact_for_fixture(tmp_path, model_id)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_Q4_PACKED_LOAD", "1")
+
+    def fail_safe_open(*_args, **_kwargs):
+        raise AssertionError("raw safetensors reader should avoid safe_open")
+
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_loader.safe_open", fail_safe_open)
+
+    loaded = load_q4_packed_tensors_by_name(
+        model_id,
+        [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+        ],
+    )
+
+    packed, scales, shape = loaded["model.layers.0.input_layernorm.weight"]
+    assert shape == [8]
+    assert packed.dtype == torch.uint8
+    assert scales.dtype == torch.float16
+    assert packed.tolist() == [0x11, 0x11, 0x11, 0x11]
+    assert torch.equal(scales, torch.ones((8,), dtype=torch.float16))
+
+
 def test_scoped_tensor_handle_cache_reuses_handle_across_load_calls(tmp_path: Path, monkeypatch) -> None:
     reset_tensor_load_stats()
     model_id, _model_dir = _bootstrap_tensor_fixture(tmp_path, monkeypatch)

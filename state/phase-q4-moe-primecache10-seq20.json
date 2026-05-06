@@ -1,0 +1,225 @@
+﻿{
+  "start": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "q4-moe-primecache10-seq20",
+    "mode": "Agent",
+    "state": "ready",
+    "started_at": 1778059232.912998,
+    "last_request_at": null,
+    "request_count": 0,
+    "last_latency_seconds": null,
+    "average_latency_seconds": null,
+    "last_error": null,
+    "blockers": [],
+    "prefix_reuse_available": true,
+    "reusable_token_count": 5,
+    "tensor_residency_warm": true,
+    "memory": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1574,
+      "process_working_set_mb": 6748
+    },
+    "primed": true,
+    "prime_seconds": 36.092,
+    "prime_generated_text": " Paris. The capital of Germany is Berlin. The"
+  },
+  "first": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "q4-moe-primecache10-seq20",
+    "mode": "Agent",
+    "prompt": "The capital of France is",
+    "ready": true,
+    "generated_text": " Paris. The capital of Germany is Berlin. The capital of Russia is Moscow. The capital of Japan",
+    "full_text": "The capital of France is Paris. The capital of Germany is Berlin. The capital of Russia is Moscow. The capital of Japan",
+    "elapsed_seconds": 22.649,
+    "max_new_tokens": 20,
+    "steps_completed": 20,
+    "generated_token_ids": [
+      12095,
+      13,
+      576,
+      6722,
+      315,
+      9856,
+      374,
+      19846,
+      13,
+      576,
+      6722,
+      315,
+      8359,
+      374,
+      22415,
+      13,
+      576,
+      6722,
+      315,
+      6323
+    ],
+    "blockers": [],
+    "prefix_reuse": {
+      "enabled": true,
+      "used": true,
+      "matched_token_count": 5,
+      "appended_token_count": 0,
+      "summary": "Exact reusable prompt prefix matched; reused cached prefill hidden state for token selection.",
+      "cached_prefill_tail_used": true
+    },
+    "performance_summary": {
+      "total_seconds": 22.648,
+      "stack_seconds": 22.393,
+      "tensor_load_seconds": 3.334,
+      "decode_tail_seconds": 2.113,
+      "tensor_load_share": 0.15,
+      "bottleneck": "layer stack",
+      "bottleneck_seconds": 22.393
+    },
+    "memory_before": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1574,
+      "process_working_set_mb": 6748
+    },
+    "memory_after": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1171,
+      "process_working_set_mb": 7257
+    },
+    "runner_status": {
+      "model_id": "qwen3-30b-a3b",
+      "session_id": "q4-moe-primecache10-seq20",
+      "mode": "Agent",
+      "state": "ready",
+      "started_at": 1778059232.912998,
+      "last_request_at": 1778059291.6620312,
+      "request_count": 1,
+      "last_latency_seconds": 22.649,
+      "average_latency_seconds": 22.649,
+      "last_error": null,
+      "blockers": [],
+      "prefix_reuse_available": true,
+      "reusable_token_count": 24,
+      "tensor_residency_warm": true,
+      "memory": {
+        "total_ram_mb": 15677,
+        "free_ram_mb": 1171,
+        "process_working_set_mb": 7257
+      },
+      "primed": true,
+      "prime_seconds": 36.092,
+      "prime_generated_text": " Paris. The capital of Germany is Berlin. The"
+    }
+  },
+  "second": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "q4-moe-primecache10-seq20",
+    "mode": "Agent",
+    "prompt": "The capital of Germany is",
+    "ready": true,
+    "generated_text": " Berlin. The capital of France is Paris. The capital of England is London. The capital of Russia",
+    "full_text": "The capital of Germany is Berlin. The capital of France is Paris. The capital of England is London. The capital of Russia",
+    "elapsed_seconds": 29.148,
+    "max_new_tokens": 20,
+    "steps_completed": 20,
+    "generated_token_ids": [
+      19846,
+      13,
+      576,
+      6722,
+      315,
+      9625,
+      374,
+      12095,
+      13,
+      576,
+      6722,
+      315,
+      9448,
+      374,
+      7148,
+      13,
+      576,
+      6722,
+      315,
+      8359
+    ],
+    "blockers": [],
+    "prefix_reuse": {
+      "enabled": true,
+      "used": false,
+      "matched_token_count": 0,
+      "appended_token_count": 0,
+      "summary": "Supplied prefix did not safely match this prompt; full prefill was used."
+    },
+    "performance_summary": {
+      "total_seconds": 29.148,
+      "stack_seconds": 28.789,
+      "tensor_load_seconds": 3.52,
+      "decode_tail_seconds": 2.204,
+      "tensor_load_share": 0.12,
+      "bottleneck": "layer stack",
+      "bottleneck_seconds": 28.789
+    },
+    "memory_before": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 1176,
+      "process_working_set_mb": 7257
+    },
+    "memory_after": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 967,
+      "process_working_set_mb": 7576
+    },
+    "runner_status": {
+      "model_id": "qwen3-30b-a3b",
+      "session_id": "q4-moe-primecache10-seq20",
+      "mode": "Agent",
+      "state": "ready",
+      "started_at": 1778059232.912998,
+      "last_request_at": 1778059320.8155408,
+      "request_count": 2,
+      "last_latency_seconds": 29.148,
+      "average_latency_seconds": 25.898,
+      "last_error": null,
+      "blockers": [],
+      "prefix_reuse_available": true,
+      "reusable_token_count": 24,
+      "tensor_residency_warm": true,
+      "memory": {
+        "total_ram_mb": 15677,
+        "free_ram_mb": 967,
+        "process_working_set_mb": 7576
+      },
+      "primed": true,
+      "prime_seconds": 36.092,
+      "prime_generated_text": " Paris. The capital of Germany is Berlin. The"
+    }
+  },
+  "status": {
+    "model_id": "qwen3-30b-a3b",
+    "session_id": "q4-moe-primecache10-seq20",
+    "mode": "Agent",
+    "state": "ready",
+    "started_at": 1778059232.912998,
+    "last_request_at": 1778059320.8155408,
+    "request_count": 2,
+    "last_latency_seconds": 29.148,
+    "average_latency_seconds": 25.898,
+    "last_error": null,
+    "blockers": [],
+    "prefix_reuse_available": true,
+    "reusable_token_count": 24,
+    "tensor_residency_warm": true,
+    "memory": {
+      "total_ram_mb": 15677,
+      "free_ram_mb": 967,
+      "process_working_set_mb": 7576
+    },
+    "primed": true,
+    "prime_seconds": 36.092,
+    "prime_generated_text": " Paris. The capital of Germany is Berlin. The"
+  },
+  "sequence": {
+    "second_prompt_chained": false,
+    "second_prompt_token_prefix_expected": false
+  }
+}

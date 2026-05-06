@@ -404,21 +404,11 @@ extern "C" __declspec(dllexport) int q4_moe_selected_forward_u16(
         return 2;
     }
 
-    for (int64_t i = 0; i < hidden_size; ++i) {
-        hidden_f[i] = fp16_to_float(hidden[i]);
-        combined[i] = 0.0f;
-    }
-
     for (int64_t expert = 0; expert < selected_count; ++expert) {
-        const uint8_t* gate_packed = gate_packed_ptrs[expert];
-        const uint16_t* gate_scales = gate_scale_ptrs[expert];
-        const uint8_t* up_packed = up_packed_ptrs[expert];
-        const uint16_t* up_scales = up_scale_ptrs[expert];
-        const uint8_t* down_packed = down_packed_ptrs[expert];
-        const uint16_t* down_scales = down_scale_ptrs[expert];
         if (
-            gate_packed == nullptr || gate_scales == nullptr || up_packed == nullptr ||
-            up_scales == nullptr || down_packed == nullptr || down_scales == nullptr
+            gate_packed_ptrs[expert] == nullptr || gate_scale_ptrs[expert] == nullptr ||
+            up_packed_ptrs[expert] == nullptr || up_scale_ptrs[expert] == nullptr ||
+            down_packed_ptrs[expert] == nullptr || down_scale_ptrs[expert] == nullptr
         ) {
             delete[] hidden_f;
             delete[] combined;
@@ -427,30 +417,49 @@ extern "C" __declspec(dllexport) int q4_moe_selected_forward_u16(
             delete[] expert_hidden;
             return 3;
         }
+    }
 
-#pragma omp parallel for schedule(static)
-        for (int64_t row = 0; row < intermediate_size; ++row) {
-            gate_values[row] = use_avx2
-                ? q4_dot_row_avx2(gate_packed, gate_scales, row, hidden_size, hidden_f)
-                : q4_dot_row_scalar(gate_packed, gate_scales, row, hidden_size, hidden_f);
-            up_values[row] = use_avx2
-                ? q4_dot_row_avx2(up_packed, up_scales, row, hidden_size, hidden_f)
-                : q4_dot_row_scalar(up_packed, up_scales, row, hidden_size, hidden_f);
+#pragma omp parallel
+    {
+#pragma omp for schedule(static)
+        for (int64_t i = 0; i < hidden_size; ++i) {
+            hidden_f[i] = fp16_to_float(hidden[i]);
+            combined[i] = 0.0f;
         }
 
-        for (int64_t row = 0; row < intermediate_size; ++row) {
-            const float gate = gate_values[row];
-            const float silu = gate / (1.0f + std::exp(-gate));
-            expert_hidden[row] = silu * up_values[row];
-        }
+        for (int64_t expert = 0; expert < selected_count; ++expert) {
+            const uint8_t* gate_packed = gate_packed_ptrs[expert];
+            const uint16_t* gate_scales = gate_scale_ptrs[expert];
+            const uint8_t* up_packed = up_packed_ptrs[expert];
+            const uint16_t* up_scales = up_scale_ptrs[expert];
+            const uint8_t* down_packed = down_packed_ptrs[expert];
+            const uint16_t* down_scales = down_scale_ptrs[expert];
 
-        const float route = route_weights[expert];
-#pragma omp parallel for schedule(static)
-        for (int64_t row = 0; row < hidden_size; ++row) {
-            const float down = use_avx2
-                ? q4_dot_row_avx2(down_packed, down_scales, row, intermediate_size, expert_hidden)
-                : q4_dot_row_scalar(down_packed, down_scales, row, intermediate_size, expert_hidden);
-            combined[row] += route * down;
+#pragma omp for schedule(static)
+            for (int64_t row = 0; row < intermediate_size; ++row) {
+                gate_values[row] = use_avx2
+                    ? q4_dot_row_avx2(gate_packed, gate_scales, row, hidden_size, hidden_f)
+                    : q4_dot_row_scalar(gate_packed, gate_scales, row, hidden_size, hidden_f);
+                up_values[row] = use_avx2
+                    ? q4_dot_row_avx2(up_packed, up_scales, row, hidden_size, hidden_f)
+                    : q4_dot_row_scalar(up_packed, up_scales, row, hidden_size, hidden_f);
+            }
+
+#pragma omp for schedule(static)
+            for (int64_t row = 0; row < intermediate_size; ++row) {
+                const float gate = gate_values[row];
+                const float silu = gate / (1.0f + std::exp(-gate));
+                expert_hidden[row] = silu * up_values[row];
+            }
+
+            const float route = route_weights[expert];
+#pragma omp for schedule(static)
+            for (int64_t row = 0; row < hidden_size; ++row) {
+                const float down = use_avx2
+                    ? q4_dot_row_avx2(down_packed, down_scales, row, intermediate_size, expert_hidden)
+                    : q4_dot_row_scalar(down_packed, down_scales, row, intermediate_size, expert_hidden);
+                combined[row] += route * down;
+            }
         }
     }
 
