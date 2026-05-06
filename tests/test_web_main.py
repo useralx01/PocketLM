@@ -1315,10 +1315,11 @@ def test_warm_runner_control_start_and_stop(monkeypatch) -> None:
     monkeypatch.setattr(
         web.main,
         "start_warm_runner",
-        lambda model_id, mode, prime_prompt=None, prime_apply_chat_format=False: {
+        lambda model_id, mode, prime_prompt=None, prime_cache_tokens=None, prime_apply_chat_format=False: {
             "model_id": model_id,
             "state": "ready",
             "prime_prompt": prime_prompt,
+            "prime_cache_tokens": prime_cache_tokens,
             "prime_apply_chat_format": prime_apply_chat_format,
         },
     )
@@ -1336,9 +1337,21 @@ def test_warm_runner_control_start_and_stop(monkeypatch) -> None:
     )
 
     started = _warm_runner_control_payload({"model_id": "qwen-test", "action": "start"})
+    primed = _warm_runner_control_payload(
+        {
+            "model_id": "qwen-test",
+            "action": "start",
+            "prime_prompt": "hello",
+            "prime_cache_tokens": 20,
+            "prime_apply_chat_format": True,
+        }
+    )
     stopped = _warm_runner_control_payload({"model_id": "qwen-test", "action": "stop"})
 
     assert started["warm_runner"]["state"] == "ready"
+    assert primed["warm_runner"]["prime_prompt"] == "hello"
+    assert primed["warm_runner"]["prime_cache_tokens"] == 20
+    assert primed["warm_runner"]["prime_apply_chat_format"] is True
     assert stopped["warm_runner"]["state"] == "stopped"
     assert calls == {"prefix_cleared": 1, "response_cleared": 1}
 

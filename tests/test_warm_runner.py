@@ -233,6 +233,7 @@ def test_warm_runner_prefill_prime_can_warm_decode_expert_cache(tmp_path, monkey
 
     status = start_warm_runner(
         "qwen3-q4-moe-prefill-cache-prime-test",
+        prime_cache_tokens=4,
         run_prompt_prefill_session_fn=fake_run_prompt_prefill_session,
         run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
     )
@@ -240,7 +241,8 @@ def test_warm_runner_prefill_prime_can_warm_decode_expert_cache(tmp_path, monkey
     assert status["primed"] is True
     assert status["prime_generated_text"] == " Paris"
     assert status["reusable_token_count"] == 5
-    assert calls[1][2]["max_new_tokens"] == 3
+    assert status["prime_cache_tokens"] == 4
+    assert calls[1][2]["max_new_tokens"] == 4
     assert calls[1][2]["initial_decode_state"] is state
     assert calls[1][2]["initial_token_ids"] == [1, 2, 3, 4, 5]
 
@@ -327,6 +329,127 @@ def test_warm_runner_can_reuse_exact_primed_response_tokens(tmp_path, monkeypatc
     assert result.prefix_reuse["primed_response_reused"] is True
     assert result.performance_summary["bottleneck"] == "primed response cache"
     assert [call[0] for call in calls] == ["prefill", "decode"]
+
+
+def test_warm_runner_continues_from_exact_primed_decode_state(tmp_path, monkeypatch) -> None:
+    from pcketlm.core import runtime, storage
+    from pcketlm.core.runtime import layer_bridge
+
+    prompt_state = SimpleNamespace(ready=True, label="prefill")
+    primed_state = SimpleNamespace(
+        ready=True,
+        finished=False,
+        next_token_id=103,
+        generated_token_ids=[10, 11, 101, 102, 103],
+    )
+    calls = []
+
+    def fake_run_prompt_prefill_session(model_id: str, **kwargs):
+        calls.append(("prefill", model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text="",
+            full_text=kwargs["prompt"],
+            generated_token_ids=[],
+            steps_completed=0,
+            max_new_tokens=0,
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"prefill_session": True},
+            reusable_token_ids=[10, 11],
+            final_decode_state=prompt_state,
+        )
+
+    def fake_run_prompt_decode_loop(model_id: str, **kwargs):
+        calls.append(("prime-decode", model_id, kwargs))
+        return SimpleNamespace(
+            ready=True,
+            generated_text=" cached answer",
+            full_text=f"{kwargs['prompt']} cached answer",
+            generated_token_ids=[101, 102, 103],
+            steps_completed=3,
+            max_new_tokens=kwargs["max_new_tokens"],
+            blockers=[],
+            timings={"total": 1.0},
+            prefix_reuse={"used": True},
+            reusable_token_ids=[10, 11, 101, 102, 103],
+            final_decode_state=primed_state,
+        )
+
+    def fake_run_kv_decode_step(model_id: str, **kwargs):
+        calls.append(("continue", model_id, kwargs))
+        previous_state = kwargs["decode_state"]
+        next_id = 104 if len(calls) == 3 else 105
+        chain = list(previous_state.generated_token_ids) + [next_id]
+        return SimpleNamespace(
+            ready=True,
+            chosen_token_id=next_id,
+            next_decode_state=SimpleNamespace(
+                ready=True,
+                finished=False,
+                next_token_id=next_id,
+                generated_token_ids=chain,
+            ),
+            executed_layers=[0, 1],
+            timings={"total": 0.25, "stack": 0.2},
+            blockers=[],
+        )
+
+    def fake_decode_token_ids_to_text(_model_id, ids):
+        return (" ".join(str(value) for value in ids), [])
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "_memory_snapshot",
+        lambda: MemorySnapshot(total_bytes=16 * 1024**3, free_bytes=8 * 1024**3),
+    )
+    monkeypatch.setattr(runtime.warm_runner, "_process_working_set_bytes", lambda: 512 * 1024**2)
+    monkeypatch.setattr(runtime.warm_runner, "tensor_residency_stats", lambda: SimpleNamespace(resident_count=3))
+    monkeypatch.setattr(runtime.warm_runner, "decode_token_ids_to_text", fake_decode_token_ids_to_text)
+    monkeypatch.setattr(
+        runtime.warm_runner,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(ready=True, num_hidden_layers=2),
+    )
+    monkeypatch.setattr(
+        layer_bridge,
+        "load_layer_bridge_config",
+        lambda model_id: SimpleNamespace(
+            ready=True,
+            num_experts=128,
+            num_experts_per_tok=8,
+            num_hidden_layers=48,
+        ),
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    monkeypatch.setenv("PCKETLM_Q4_MOE_PRIME_CACHE_TOKENS", "3")
+
+    start_status = start_warm_runner(
+        "qwen3-q4-moe-primed-continuation-test",
+        prime_prompt="hello",
+        prime_apply_chat_format=False,
+        run_prompt_prefill_session_fn=fake_run_prompt_prefill_session,
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+    )
+    result = run_warm_agent_prompt(
+        "qwen3-q4-moe-primed-continuation-test",
+        "hello",
+        max_new_tokens=5,
+        apply_chat_format=False,
+        run_prompt_decode_loop_fn=fake_run_prompt_decode_loop,
+        run_kv_decode_step_fn=fake_run_kv_decode_step,
+    )
+
+    assert start_status["prime_generated_token_count"] == 3
+    assert result.ready is True
+    assert result.generated_token_ids == [101, 102, 103, 104, 105]
+    assert result.prefix_reuse["primed_response_reused"] is True
+    assert result.prefix_reuse["primed_response_continued"] is True
+    assert [call[0] for call in calls] == ["prefill", "prime-decode", "continue", "continue"]
+    assert calls[2][2]["decode_state"] is primed_state
+    assert calls[2][2]["layer_count"] == 2
+    assert result.performance_summary["tensor_load_seconds"] == 0.0
 
 
 def test_warm_runner_second_request_uses_prior_decode_state(tmp_path, monkeypatch) -> None:
@@ -940,9 +1063,10 @@ def test_warm_runner_cli_sequence_chains_second_prompt(monkeypatch, capsys) -> N
         model_id: str,
         session_id: str = "default",
         prime_prompt=None,
+        prime_cache_tokens=None,
         prime_apply_chat_format: bool = False,
     ):
-        del prime_prompt, prime_apply_chat_format
+        del prime_prompt, prime_cache_tokens, prime_apply_chat_format
         return {"model_id": model_id, "session_id": session_id, "state": "ready"}
 
     def fake_status(model_id: str, session_id: str = "default"):

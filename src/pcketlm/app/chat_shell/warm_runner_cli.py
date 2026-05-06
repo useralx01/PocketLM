@@ -17,6 +17,7 @@ def _usage() -> str:
         "Usage: py -m pcketlm.app.chat_shell.warm_runner_cli "
         "<start|run|status|stop|sequence> --model <id> [--session-id <id>] [--prompt <text>] [--second-prompt <text>] "
         "[--prime-prompt <text>] [--max-new-tokens <n>] [--min-free-memory-mb <n>] [--raw] [--independent-second]"
+        " [--prime-cache-tokens <n>]"
     )
 
 
@@ -29,6 +30,7 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
         "prompt": "hello world",
         "second_prompt": "reply ok only",
         "prime_prompt": None,
+        "prime_cache_tokens": None,
         "session_id": "default",
         "max_new_tokens": 2,
         "min_free_memory_mb": 4096,
@@ -52,6 +54,10 @@ def _parse(args: list[str]) -> tuple[str | None, dict]:
             continue
         if flag == "--prime-prompt" and index + 1 < len(args):
             options["prime_prompt"] = args[index + 1]
+            index += 2
+            continue
+        if flag == "--prime-cache-tokens" and index + 1 < len(args):
+            options["prime_cache_tokens"] = max(0, int(args[index + 1]))
             index += 2
             continue
         if flag == "--session-id" and index + 1 < len(args):
@@ -96,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 model_id,
                 session_id=session_id,
                 prime_prompt=options.get("prime_prompt"),
+                prime_cache_tokens=options.get("prime_cache_tokens"),
                 prime_apply_chat_format=bool(options["apply_chat_format"]),
             )
         )
@@ -122,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             model_id,
             session_id=session_id,
             prime_prompt=str(options.get("prime_prompt") or options["prompt"]),
+            prime_cache_tokens=options.get("prime_cache_tokens"),
             prime_apply_chat_format=bool(options["apply_chat_format"]),
         )
         first = run_warm_agent_prompt(

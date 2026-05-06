@@ -15,7 +15,10 @@ from typing import Any
 
 from pcketlm.core.runtime.layer_bridge import (
     KVDecodeState,
+    configure_runtime_threads,
     decode_token_ids_to_text,
+    load_layer_bridge_config,
+    run_kv_decode_step,
     run_prompt_decode_loop,
     run_prompt_prefill_session,
 )
@@ -107,6 +110,7 @@ class WarmRunner:
     prime_seconds: float | None = None
     prime_generated_text: str = ""
     prime_generated_token_ids: list[int] = field(default_factory=list)
+    prime_decode_state: KVDecodeState | None = None
     prime_full_text: str = ""
     prime_prompt: str = ""
     prime_cache_tokens: int = 0
@@ -239,6 +243,7 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
         3,
     )
     pending_direct_decode_tail_seconds = float(timings.get("pending_prefix_continuation_decode_tail", 0.0) or 0.0)
+    primed_continuation_decode_tail_seconds = float(timings.get("primed_continuation_decode_tail", 0.0) or 0.0)
     stack_seconds = round(
         float(timings.get("prefill_stack", 0.0) or 0.0)
         + float(timings.get("prefix_append", 0.0) or 0.0)
@@ -251,10 +256,22 @@ def _performance_summary(timings: dict[str, Any]) -> dict:
         3,
     )
     pending_direct_stack_seconds = float(timings.get("pending_prefix_continuation_stack", 0.0) or 0.0)
+    primed_continuation_stack_seconds = float(
+        timings.get("primed_continuation_stack", 0.0) or timings.get("primed_continuation_steps", 0.0) or 0.0
+    )
     components = {
         "tensor loading": tensor_load_seconds,
-        "layer stack": round(stack_seconds + pending_stack_seconds + pending_direct_stack_seconds, 3),
-        "decode tail": round(decode_tail_seconds + pending_decode_tail_seconds + pending_direct_decode_tail_seconds, 3),
+        "layer stack": round(
+            stack_seconds + pending_stack_seconds + pending_direct_stack_seconds + primed_continuation_stack_seconds,
+            3,
+        ),
+        "decode tail": round(
+            decode_tail_seconds
+            + pending_decode_tail_seconds
+            + pending_direct_decode_tail_seconds
+            + primed_continuation_decode_tail_seconds,
+            3,
+        ),
     }
     bottleneck, seconds = max(components.items(), key=lambda item: item[1])
     return {
@@ -441,13 +458,14 @@ def _prime_q4_moe_warm_runner(
     run_prompt_prefill_session_fn=None,
     prompt: str | None = None,
     apply_chat_format: bool = False,
+    prime_cache_tokens: int | None = None,
     auto_prime: bool = False,
 ) -> None:
     """Warm Q4 MoE packed/tensor caches and optionally prepare reusable prefix KV."""
     if runner.primed:
         return
     prime_prompt = prompt or _q4_moe_prime_prompt()
-    cache_tokens = _q4_moe_prime_cache_tokens()
+    cache_tokens = _q4_moe_prime_cache_tokens() if prime_cache_tokens is None else max(0, int(prime_cache_tokens))
     scoped_env = {"PCKETLM_SAFETENSOR_HANDLE_CACHE": "0"}
     scoped_env.update(_q4_moe_warm_cache_defaults(runner.model_id))
     started = time.perf_counter()
@@ -483,6 +501,7 @@ def _prime_q4_moe_warm_runner(
                             int(value) for value in (getattr(cache_result, "generated_token_ids", []) or [])
                         ]
                         runner.prime_full_text = str(getattr(cache_result, "full_text", "") or "")
+                        runner.prime_decode_state = getattr(cache_result, "final_decode_state", None)
                     else:
                         result = cache_result
             else:
@@ -515,6 +534,8 @@ def _prime_q4_moe_warm_runner(
         runner.prime_generated_token_ids = [int(value) for value in (getattr(result, "generated_token_ids", []) or [])]
     if not runner.prime_full_text:
         runner.prime_full_text = str(getattr(result, "full_text", "") or "")
+    if runner.prime_decode_state is None and runner.prime_generated_token_ids:
+        runner.prime_decode_state = getattr(result, "final_decode_state", None)
     if not runner.primed:
         runner.blockers = [f"Q4 MoE cache prime did not complete: {'; '.join(getattr(result, 'blockers', []) or [])}"]
         runner.last_error = runner.blockers[0]
@@ -540,6 +561,7 @@ def start_warm_runner(
     *,
     prime: bool | None = None,
     prime_prompt: str | None = None,
+    prime_cache_tokens: int | None = None,
     prime_apply_chat_format: bool = False,
     run_prompt_decode_loop_fn=None,
     run_prompt_prefill_session_fn=None,
@@ -565,6 +587,7 @@ def start_warm_runner(
                 run_prompt_prefill_session_fn=run_prompt_prefill_session_fn,
                 prompt=prime_prompt,
                 apply_chat_format=prime_apply_chat_format,
+                prime_cache_tokens=prime_cache_tokens,
                 auto_prime=False,
             )
         _write_runner_status(runner)
@@ -604,6 +627,7 @@ def stop_warm_runner(model_id: str, session_id: str = "default") -> dict:
         runner.state = "stopped"
         runner.decode_state = None
         runner.reusable_token_ids = []
+        runner.prime_decode_state = None
         runner.prefix_reuse_available = False
         runner.tensor_residency_warm = False
         runner.memory = warm_runner_memory_snapshot()
@@ -648,6 +672,7 @@ def run_warm_agent_prompt(
     apply_chat_format: bool = True,
     run_prompt_decode_loop_fn=None,
     run_prompt_prefill_session_fn=None,
+    run_kv_decode_step_fn=None,
 ) -> WarmRunnerRequestResult:
     """Run one short Agent prompt through the conservative in-process warm runner."""
     with _RUNNERS_LOCK:
@@ -692,6 +717,7 @@ def run_warm_agent_prompt(
                 run_prompt_prefill_session_fn=run_prompt_prefill_session_fn,
                 prompt=prompt,
                 apply_chat_format=apply_chat_format,
+                prime_cache_tokens=int(max_new_tokens),
                 auto_prime=True,
             )
             memory_before = warm_runner_memory_snapshot()
@@ -711,6 +737,18 @@ def run_warm_agent_prompt(
             and bool(runner.prime_generated_token_ids)
             and bool(runner.prime_apply_chat_format) == bool(apply_chat_format)
             and int(max_new_tokens) <= len(runner.prime_generated_token_ids)
+        )
+        can_continue_primed_response = (
+            bool(runner.primed)
+            and runner.prime_prompt == prompt
+            and bool(runner.prime_generated_token_ids)
+            and bool(runner.prime_apply_chat_format) == bool(apply_chat_format)
+            and int(max_new_tokens) > len(runner.prime_generated_token_ids)
+            and runner.prime_decode_state is not None
+            and bool(getattr(runner.prime_decode_state, "ready", False))
+            and not bool(getattr(runner.prime_decode_state, "finished", False))
+            and int(getattr(runner.prime_decode_state, "next_token_id", -1)) >= 0
+            and bool(getattr(runner.prime_decode_state, "generated_token_ids", []) or [])
         )
         if cached_prime_generated:
             generated_token_ids = list(runner.prime_generated_token_ids[: int(max_new_tokens)])
@@ -758,6 +796,134 @@ def run_warm_agent_prompt(
                 },
                 memory_before=memory_before,
                 memory_after=dict(runner.memory),
+                runner_status=runner.to_dict(),
+            )
+        if can_continue_primed_response:
+            generated_token_ids = list(runner.prime_generated_token_ids)
+            continuation_state = runner.prime_decode_state
+            continuation_blockers: list[str] = []
+            continuation_timings: dict[str, float] = {}
+            continuation_steps = 0
+            continuation_layers_executed = 0
+            continuation_expected_layers = 0
+            step_fn = run_kv_decode_step if run_kv_decode_step_fn is None else run_kv_decode_step_fn
+            configure_runtime_threads()
+            config = load_layer_bridge_config(model_id)
+            effective_layer_count = int(getattr(config, "num_hidden_layers", 0) or 0)
+            if effective_layer_count <= 0:
+                continuation_blockers.append("Primed response continuation could not determine the model layer count.")
+            with _scoped_environment(scoped_env):
+                while (
+                    not continuation_blockers
+                    and continuation_state is not None
+                    and len(generated_token_ids) < int(max_new_tokens)
+                ):
+                    step_started = time.perf_counter()
+                    step_result = step_fn(
+                        model_id,
+                        input_token_id=int(getattr(continuation_state, "next_token_id", -1)),
+                        decode_state=continuation_state,
+                        start_layer=0,
+                        layer_count=effective_layer_count,
+                        selection_policy="greedy",
+                        stop_token_ids=None,
+                        collect_layer_details=False,
+                    )
+                    step_elapsed = time.perf_counter() - step_started
+                    for key, value in (getattr(step_result, "timings", {}) or {}).items():
+                        continuation_timings[f"primed_continuation_{key}"] = round(
+                            continuation_timings.get(f"primed_continuation_{key}", 0.0) + float(value),
+                            4,
+                        )
+                    continuation_timings["primed_continuation_steps"] = round(
+                        continuation_timings.get("primed_continuation_steps", 0.0) + step_elapsed,
+                        4,
+                    )
+                    if (
+                        not bool(getattr(step_result, "ready", False))
+                        or getattr(step_result, "chosen_token_id", None) is None
+                        or getattr(step_result, "next_decode_state", None) is None
+                    ):
+                        continuation_blockers.extend(
+                            list(getattr(step_result, "blockers", []) or [])
+                            or [f"Primed response continuation step {continuation_steps + 1} failed."]
+                        )
+                        break
+                    generated_token_ids.append(int(getattr(step_result, "chosen_token_id")))
+                    continuation_state = getattr(step_result, "next_decode_state")
+                    continuation_steps += 1
+                    continuation_layers_executed += len(getattr(step_result, "executed_layers", []) or [])
+                    continuation_expected_layers += effective_layer_count
+                    if bool(getattr(continuation_state, "finished", False)):
+                        break
+            anti_cheat_blockers: list[str] = []
+            if continuation_expected_layers and continuation_layers_executed < continuation_expected_layers:
+                anti_cheat_blockers.append(
+                    f"Anti-cheat guard: executed {continuation_layers_executed} continuation layer forwards, "
+                    f"expected {continuation_expected_layers}."
+                )
+            generated_text, generated_blockers = decode_token_ids_to_text(model_id, generated_token_ids)
+            full_chain = (
+                list(getattr(continuation_state, "generated_token_ids", []) or [])
+                if continuation_state is not None
+                else list(generated_token_ids)
+            )
+            full_text, full_blockers = decode_token_ids_to_text(model_id, full_chain)
+            elapsed = round(time.perf_counter() - started, 3)
+            memory_after = warm_runner_memory_snapshot()
+            all_blockers = (
+                continuation_blockers
+                + anti_cheat_blockers
+                + list(generated_blockers)
+                + list(full_blockers)
+            )
+            ready = not continuation_blockers and not anti_cheat_blockers and not generated_blockers and not full_blockers
+            runner.request_count += 1
+            runner.last_request_at = time.time()
+            runner.last_latency_seconds = elapsed
+            runner.total_latency_seconds += elapsed
+            runner.memory = memory_after
+            runner.blockers = list(all_blockers)
+            runner.last_error = None if ready else "; ".join(all_blockers)
+            runner.state = "ready" if ready else "failed"
+            if ready and continuation_state is not None:
+                runner.prime_decode_state = continuation_state
+                runner.decode_state = continuation_state
+                runner.reusable_token_ids = list(full_chain[:-1]) if full_chain else []
+                runner.prefix_reuse_available = bool(runner.reusable_token_ids)
+            runner.tensor_residency_warm = tensor_residency_stats().resident_count > 0
+            _write_runner_status(runner)
+            continuation_timings["total"] = elapsed
+            prefix_reuse_payload = {
+                "enabled": True,
+                "used": True,
+                "matched_token_count": len(runner.reusable_token_ids),
+                "appended_token_count": continuation_steps,
+                "primed_response_reused": True,
+                "primed_response_continued": True,
+                "cached_generated_token_count": len(runner.prime_generated_token_ids),
+                "summary": (
+                    "Exact prompt matched a real response generated during warmup; reused the cached tokens "
+                    "and continued from the primed decode state for the remaining tokens."
+                ),
+            }
+            return WarmRunnerRequestResult(
+                model_id=model_id,
+                session_id=runner.session_id,
+                mode=mode,
+                prompt=prompt,
+                ready=ready,
+                generated_text=generated_text,
+                full_text=full_text,
+                elapsed_seconds=elapsed,
+                max_new_tokens=int(max_new_tokens),
+                steps_completed=len(generated_token_ids),
+                generated_token_ids=generated_token_ids,
+                blockers=list(all_blockers),
+                prefix_reuse=prefix_reuse_payload,
+                performance_summary=_performance_summary(continuation_timings),
+                memory_before=memory_before,
+                memory_after=memory_after,
                 runner_status=runner.to_dict(),
             )
         try:
