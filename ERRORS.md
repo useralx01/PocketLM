@@ -308,3 +308,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: the existing production runtime still resolves model tensors through Python tensor loader/residency objects. A true monolithic layer stack needs C-owned stable pointers for all required weights after first load. Re-entering Python for each layer/tensor would preserve the exact Python/C crossing overhead the phase is supposed to remove.
 - Current fix: added `pcketlm_forward.dll` plus ctypes wrappers and deterministic commit/rollback tests as the ABI foundation. Added the first copied u16 tensor-registration ABI so C can own weight bytes after first import. Real-model routing remains blocked on per-model registration and native layer dispatch against those registered weights rather than on KV semantics.
 
+## Phase Monolithic Integration / anti-bluff failure
+- Symptom: anti-bluff gate showed `0` monolithic calls in both enabled and disabled Qwen3 Q4 warm-runner rows; enabled `0.9736s/token`, disabled `0.94055s/token`.
+- Root cause: production `layer_bridge.py` still correctly uses the existing Python/native-component layer stack because `pcketlm_forward.dll` does not yet compute real transformer logits from registered model weights. Directly routing to it would corrupt model output.
+- Fix state: added missing registry/counter ABI and confirmed the failure honestly. Remaining fix is native layer dispatch using the registered weights, then production routing.
+

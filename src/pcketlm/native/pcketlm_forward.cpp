@@ -13,10 +13,18 @@ struct ForwardSession {
     int64_t vocab_size = 0;
     int64_t max_seq_len = 0;
     int64_t layers_executed = 0;
+    int64_t prefill_calls = 0;
+    int64_t decode_calls = 0;
+    int64_t verify_calls = 0;
     std::vector<int64_t> committed_tokens;
     std::vector<int64_t> tentative_tokens;
     std::unordered_map<std::string, std::vector<uint16_t>> u16_weights;
+    std::unordered_map<std::string, std::string> tensor_roles;
 };
+
+static int64_t g_prefill_calls = 0;
+static int64_t g_decode_calls = 0;
+static int64_t g_verify_calls = 0;
 
 static int64_t parse_json_int(const char* json, const char* key, int64_t fallback) {
     if (json == nullptr || key == nullptr) {
@@ -138,6 +146,52 @@ extern "C" __declspec(dllexport) int64_t pcketlm_layers_executed(void* handle) {
     return session->layers_executed;
 }
 
+extern "C" __declspec(dllexport) int64_t pcketlm_session_call_count(void* handle, int64_t call_type) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    if (call_type == 0) {
+        return session->prefill_calls;
+    }
+    if (call_type == 1) {
+        return session->decode_calls;
+    }
+    if (call_type == 2) {
+        return session->verify_calls;
+    }
+    return session->prefill_calls + session->decode_calls + session->verify_calls;
+}
+
+extern "C" __declspec(dllexport) int64_t pcketlm_global_call_count(int64_t call_type) {
+    if (call_type == 0) {
+        return g_prefill_calls;
+    }
+    if (call_type == 1) {
+        return g_decode_calls;
+    }
+    if (call_type == 2) {
+        return g_verify_calls;
+    }
+    return g_prefill_calls + g_decode_calls + g_verify_calls;
+}
+
+extern "C" __declspec(dllexport) void pcketlm_reset_global_call_counts(void) {
+    g_prefill_calls = 0;
+    g_decode_calls = 0;
+    g_verify_calls = 0;
+}
+
+extern "C" __declspec(dllexport) int pcketlm_session_clear_tensors(void* handle) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr) {
+        return 1;
+    }
+    session->u16_weights.clear();
+    session->tensor_roles.clear();
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int pcketlm_session_register_u16_tensor(
     void* handle,
     const char* tensor_name,
@@ -153,6 +207,30 @@ extern "C" __declspec(dllexport) int pcketlm_session_register_u16_tensor(
         std::memcpy(copied.data(), tensor_data, static_cast<size_t>(value_count) * sizeof(uint16_t));
     }
     session->u16_weights[std::string(tensor_name)] = std::move(copied);
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int pcketlm_session_register_tensor(
+    void* handle,
+    int64_t layer_idx,
+    int64_t tensor_role,
+    const uint16_t* tensor_data,
+    int64_t n_rows,
+    int64_t n_cols,
+    int64_t dtype_code
+) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr || tensor_data == nullptr || n_rows < 0 || n_cols < 0) {
+        return 1;
+    }
+    const int64_t value_count = n_rows * n_cols;
+    std::vector<uint16_t> copied(static_cast<size_t>(value_count));
+    if (value_count > 0) {
+        std::memcpy(copied.data(), tensor_data, static_cast<size_t>(value_count) * sizeof(uint16_t));
+    }
+    const std::string key = std::to_string(layer_idx) + ":" + std::to_string(tensor_role);
+    session->u16_weights[key] = std::move(copied);
+    session->tensor_roles[key] = std::to_string(n_rows) + "x" + std::to_string(n_cols) + ":dtype=" + std::to_string(dtype_code);
     return 0;
 }
 
@@ -196,6 +274,8 @@ extern "C" __declspec(dllexport) int pcketlm_forward_prefill(
     for (int64_t i = 0; i < num_tokens; ++i) {
         session->committed_tokens.push_back(input_token_ids[i]);
     }
+    session->prefill_calls += 1;
+    g_prefill_calls += 1;
     session->layers_executed += session->layer_count * num_tokens;
     const int64_t previous = input_token_ids[num_tokens - 1];
     write_logits(session, choose_next_token(session, previous, 0), output_logits_buffer);
@@ -216,6 +296,8 @@ extern "C" __declspec(dllexport) int pcketlm_forward_decode(
     }
     session->tentative_tokens.clear();
     session->committed_tokens.push_back(new_token_id);
+    session->decode_calls += 1;
+    g_decode_calls += 1;
     session->layers_executed += session->layer_count;
     write_logits(session, choose_next_token(session, new_token_id, 0), output_logits_buffer);
     return 0;
@@ -235,6 +317,8 @@ extern "C" __declspec(dllexport) int pcketlm_forward_verify(
         return 2;
     }
     session->tentative_tokens.clear();
+    session->verify_calls += 1;
+    g_verify_calls += 1;
     int64_t previous = session->committed_tokens.empty() ? 0 : session->committed_tokens.back();
     for (int64_t i = 0; i < k; ++i) {
         write_logits(session, choose_next_token(session, previous, i), output_logits_buffer + i * session->vocab_size);

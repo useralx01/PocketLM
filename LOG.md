@@ -5605,3 +5605,17 @@ Result: 297 passed in 21.83s
 - Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `4 passed in 2.51s`.
 - Full regression validation: `python -m pytest tests/ -q` -> `378 passed in 22.49s`.
 - Integration finding: this pass creates and validates the native monolithic session boundary, C-owned token/KV state, and first C-owned weight-copy ABI, but does not yet route real Qwen/Qwen3/Mixtral weights through it. Real production routing still needs per-model tensor registration and layer dispatch against those owned weights.
+
+## Phase Monolithic Integration / Setup
+- Branch: `phase-monolithic-integration`.
+
+## Phase Monolithic Integration / Tensor Registry And Counters
+- Extended `pcketlm_forward.dll` with `pcketlm_session_register_tensor(session, layer_idx, tensor_role, ptr, n_rows, n_cols, dtype)`, `pcketlm_session_clear_tensors`, per-session call counters, and global prefill/decode/verify counters.
+- Rebuilt only `src/pcketlm/native/pcketlm_forward.dll`.
+- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `4 passed in 2.49s`.
+- Full regression validation: `python -m pytest tests/ -q` -> `378 passed in 22.23s`.
+
+## Phase Monolithic Integration / Anti-Bluff Gate
+- Monolithic enabled row: `state/phase-monolithic-integration-antibluff-enabled.json`; Qwen3-30B-A3B Q4 warm runner generated coherent `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"` in `19.472s` for 20 visible tokens (`0.9736s/token`), `monolithic_calls=0`.
+- Monolithic disabled row: `state/phase-monolithic-integration-antibluff-disabled.json`; same prompt/text in `18.811s` for 20 visible tokens (`0.94055s/token`), `monolithic_calls=0`.
+- Delta: enabled was `3.51%` slower than disabled, below the required `20%`, and the counter stayed `0`. Anti-bluff gate: FAIL. Production is not using the monolithic forward DLL yet.

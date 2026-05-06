@@ -372,6 +372,14 @@ def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
         lib.pcketlm_session_tentative_length.restype = ctypes.c_longlong
         lib.pcketlm_layers_executed.argtypes = [ctypes.c_void_p]
         lib.pcketlm_layers_executed.restype = ctypes.c_longlong
+        lib.pcketlm_session_call_count.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.pcketlm_session_call_count.restype = ctypes.c_longlong
+        lib.pcketlm_global_call_count.argtypes = [ctypes.c_longlong]
+        lib.pcketlm_global_call_count.restype = ctypes.c_longlong
+        lib.pcketlm_reset_global_call_counts.argtypes = []
+        lib.pcketlm_reset_global_call_counts.restype = None
+        lib.pcketlm_session_clear_tensors.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_clear_tensors.restype = ctypes.c_int
         lib.pcketlm_session_register_u16_tensor.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
@@ -379,6 +387,16 @@ def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.pcketlm_session_register_u16_tensor.restype = ctypes.c_int
+        lib.pcketlm_session_register_tensor.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.pcketlm_session_register_tensor.restype = ctypes.c_int
         lib.pcketlm_session_tensor_count.argtypes = [ctypes.c_void_p]
         lib.pcketlm_session_tensor_count.restype = ctypes.c_longlong
         lib.pcketlm_session_tensor_nitems.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -423,6 +441,20 @@ def native_monolithic_error() -> Exception | None:
 def native_monolithic_has_avx2() -> bool:
     lib = _load_pcketlm_forward_lib()
     return bool(lib and lib.pcketlm_cpu_has_avx2())
+
+
+def monolithic_call_count(call_type: str = "all") -> int:
+    lib = _load_pcketlm_forward_lib()
+    if lib is None:
+        return 0
+    mapping = {"prefill": 0, "decode": 1, "verify": 2, "all": 3}
+    return int(lib.pcketlm_global_call_count(ctypes.c_longlong(mapping[call_type])))
+
+
+def reset_monolithic_call_counts() -> None:
+    lib = _load_pcketlm_forward_lib()
+    if lib is not None:
+        lib.pcketlm_reset_global_call_counts()
 
 
 class MonolithicForwardSession:
@@ -477,6 +509,15 @@ class MonolithicForwardSession:
     def layers_executed(self) -> int:
         return int(self._lib.pcketlm_layers_executed(self._handle))
 
+    def call_count(self, call_type: str = "all") -> int:
+        mapping = {"prefill": 0, "decode": 1, "verify": 2, "all": 3}
+        return int(self._lib.pcketlm_session_call_count(self._handle, ctypes.c_longlong(mapping[call_type])))
+
+    def clear_tensors(self) -> None:
+        code = self._lib.pcketlm_session_clear_tensors(self._handle)
+        if code != 0:
+            raise RuntimeError(f"pcketlm_session_clear_tensors failed with code {code}")
+
     def register_u16_tensor(self, name: str, tensor: torch.Tensor) -> None:
         if tensor.dtype not in {torch.float16, torch.bfloat16, torch.uint16}:
             raise TypeError("register_u16_tensor requires float16, bfloat16, or uint16 storage")
@@ -489,6 +530,38 @@ class MonolithicForwardSession:
         )
         if code != 0:
             raise RuntimeError(f"pcketlm_session_register_u16_tensor failed with code {code}")
+
+    def register_tensor(
+        self,
+        *,
+        layer_idx: int,
+        tensor_role: int,
+        tensor: torch.Tensor,
+        dtype_code: int | None = None,
+    ) -> None:
+        if tensor.dtype not in {torch.float16, torch.bfloat16, torch.uint16}:
+            raise TypeError("register_tensor requires float16, bfloat16, or uint16 storage")
+        cpu = tensor.detach().cpu().contiguous()
+        if cpu.ndim == 0:
+            rows, cols = 1, 1
+        elif cpu.ndim == 1:
+            rows, cols = int(cpu.shape[0]), 1
+        else:
+            rows, cols = int(cpu.shape[0]), int(cpu.reshape(cpu.shape[0], -1).shape[1])
+        if dtype_code is None:
+            dtype_code = 1 if tensor.dtype == torch.bfloat16 else 0
+        storage = cpu.view(torch.uint16).reshape(-1)
+        code = self._lib.pcketlm_session_register_tensor(
+            self._handle,
+            ctypes.c_longlong(int(layer_idx)),
+            ctypes.c_longlong(int(tensor_role)),
+            ctypes.c_void_p(int(storage.data_ptr())),
+            ctypes.c_longlong(rows),
+            ctypes.c_longlong(cols),
+            ctypes.c_longlong(int(dtype_code)),
+        )
+        if code != 0:
+            raise RuntimeError(f"pcketlm_session_register_tensor failed with code {code}")
 
     def tensor_count(self) -> int:
         return int(self._lib.pcketlm_session_tensor_count(self._handle))
