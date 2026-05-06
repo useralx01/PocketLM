@@ -27,6 +27,7 @@ def test_monolithic_session_prefill_decode_and_layer_count() -> None:
     assert native_monolithic_available() is True
     reset_monolithic_call_counts()
     with MonolithicForwardSession(_config(), "synthetic") as session:
+        assert session.kernels_ready() is True, session.kernel_error()
         prefill_logits = session.prefill([1, 2, 3])
         assert _argmax(prefill_logits) == 10
         assert session.committed_length() == 3

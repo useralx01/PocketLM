@@ -372,6 +372,10 @@ def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
         lib.pcketlm_session_tentative_length.restype = ctypes.c_longlong
         lib.pcketlm_layers_executed.argtypes = [ctypes.c_void_p]
         lib.pcketlm_layers_executed.restype = ctypes.c_longlong
+        lib.pcketlm_session_kernels_ready.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_kernels_ready.restype = ctypes.c_int
+        lib.pcketlm_session_kernel_error.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_kernel_error.restype = ctypes.c_char_p
         lib.pcketlm_session_call_count.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
         lib.pcketlm_session_call_count.restype = ctypes.c_longlong
         lib.pcketlm_global_call_count.argtypes = [ctypes.c_longlong]
@@ -508,6 +512,13 @@ class MonolithicForwardSession:
 
     def layers_executed(self) -> int:
         return int(self._lib.pcketlm_layers_executed(self._handle))
+
+    def kernels_ready(self) -> bool:
+        return bool(self._lib.pcketlm_session_kernels_ready(self._handle))
+
+    def kernel_error(self) -> str:
+        raw = self._lib.pcketlm_session_kernel_error(self._handle)
+        return "" if not raw else raw.decode("utf-8", errors="replace")
 
     def call_count(self, call_type: str = "all") -> int:
         mapping = {"prefill": 0, "decode": 1, "verify": 2, "all": 3}

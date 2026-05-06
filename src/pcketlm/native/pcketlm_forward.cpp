@@ -6,6 +6,41 @@
 #include <vector>
 #include <immintrin.h>
 #include <intrin.h>
+#include <windows.h>
+
+using NativeFp16MatmulFn = int (*)(const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t, int64_t);
+using NativeAttentionPrefillFn = int (*)(const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t, int64_t, int64_t, float);
+using NativeMoeForwardFn = int (*)(const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, uint16_t*, int64_t*, float*, int64_t, int64_t, int64_t, int64_t, int64_t, int);
+using NativePackedGemvFn = int (*)(const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t);
+using Q4DequantFn = void (*)(const uint8_t*, const uint16_t*, uint16_t*, int64_t, int64_t);
+using Q4MoeSelectedFn = int (*)(const uint16_t*, const uint8_t**, const uint16_t**, const uint8_t**, const uint16_t**, const uint8_t**, const uint16_t**, const float*, uint16_t*, int64_t, int64_t, int64_t);
+using KvInitFn = void* (*)(int64_t, int64_t, int64_t);
+using KvFreeFn = void (*)(void*);
+using KvCommitFn = int (*)(void*, int64_t);
+using KvRollbackFn = int (*)(void*);
+using KvDenseDecodeFn = int (*)(void*, int64_t, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t, int64_t, int64_t, int64_t, float, float);
+
+struct KernelTable {
+    HMODULE matmul = nullptr;
+    HMODULE attention = nullptr;
+    HMODULE moe = nullptr;
+    HMODULE q4 = nullptr;
+    HMODULE packed_gemv_module = nullptr;
+    HMODULE kv = nullptr;
+    NativeFp16MatmulFn fp16_matmul = nullptr;
+    NativeAttentionPrefillFn attention_prefill = nullptr;
+    NativeMoeForwardFn moe_forward = nullptr;
+    NativePackedGemvFn packed_gemv = nullptr;
+    Q4DequantFn q4_dequant = nullptr;
+    Q4MoeSelectedFn q4_moe_selected = nullptr;
+    KvInitFn kv_init = nullptr;
+    KvFreeFn kv_free = nullptr;
+    KvCommitFn kv_commit = nullptr;
+    KvRollbackFn kv_rollback = nullptr;
+    KvDenseDecodeFn kv_dense_decode = nullptr;
+    bool ready = false;
+    std::string error;
+};
 
 struct ForwardSession {
     int64_t layer_count = 0;
@@ -20,11 +55,82 @@ struct ForwardSession {
     std::vector<int64_t> tentative_tokens;
     std::unordered_map<std::string, std::vector<uint16_t>> u16_weights;
     std::unordered_map<std::string, std::string> tensor_roles;
+    KernelTable kernels;
 };
 
 static int64_t g_prefill_calls = 0;
 static int64_t g_decode_calls = 0;
 static int64_t g_verify_calls = 0;
+
+static FARPROC load_symbol(HMODULE module, const char* name, std::string& error) {
+    FARPROC proc = GetProcAddress(module, name);
+    if (proc == nullptr && error.empty()) {
+        error = std::string("missing symbol: ") + name;
+    }
+    return proc;
+}
+
+static HMODULE load_kernel_dll(const char* name, std::string& error) {
+    char self_path[MAX_PATH] = {0};
+    HMODULE self_module = nullptr;
+    std::string full_name(name);
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&load_kernel_dll),
+            &self_module
+        ) && GetModuleFileNameA(self_module, self_path, MAX_PATH) > 0) {
+        std::string path(self_path);
+        const size_t slash = path.find_last_of("\\/");
+        if (slash != std::string::npos) {
+            const std::string dir = path.substr(0, slash + 1);
+            SetDllDirectoryA(dir.c_str());
+            full_name = dir + name;
+        }
+    }
+    HMODULE module = LoadLibraryA(full_name.c_str());
+    if (module == nullptr && error.empty()) {
+        error = std::string("LoadLibraryA failed: ") + full_name;
+    }
+    return module;
+}
+
+static void unload_kernel_table(KernelTable& kernels) {
+    if (kernels.matmul) FreeLibrary(kernels.matmul);
+    if (kernels.attention) FreeLibrary(kernels.attention);
+    if (kernels.moe) FreeLibrary(kernels.moe);
+    if (kernels.q4) FreeLibrary(kernels.q4);
+    if (kernels.packed_gemv_module) FreeLibrary(kernels.packed_gemv_module);
+    if (kernels.kv) FreeLibrary(kernels.kv);
+    kernels = KernelTable();
+}
+
+static void load_kernel_table(KernelTable& kernels) {
+    unload_kernel_table(kernels);
+    std::string error;
+    kernels.matmul = load_kernel_dll("fp16_matmul.dll", error);
+    kernels.attention = load_kernel_dll("fp16_attention.dll", error);
+    kernels.moe = load_kernel_dll("fp16_moe.dll", error);
+    kernels.q4 = load_kernel_dll("q4_dequant.dll", error);
+    kernels.packed_gemv_module = load_kernel_dll("fp16_packed_gemv.dll", error);
+    kernels.kv = load_kernel_dll("fp16_kv_cache.dll", error);
+    if (!error.empty()) {
+        kernels.error = error;
+        return;
+    }
+    kernels.fp16_matmul = reinterpret_cast<NativeFp16MatmulFn>(load_symbol(kernels.matmul, "native_fp16_matmul", error));
+    kernels.attention_prefill = reinterpret_cast<NativeAttentionPrefillFn>(load_symbol(kernels.attention, "native_attention_prefill_fp16", error));
+    kernels.moe_forward = reinterpret_cast<NativeMoeForwardFn>(load_symbol(kernels.moe, "native_moe_forward_fp16", error));
+    kernels.packed_gemv = reinterpret_cast<NativePackedGemvFn>(load_symbol(kernels.packed_gemv_module, "native_packed_gemv_rows8", error));
+    kernels.q4_dequant = reinterpret_cast<Q4DequantFn>(load_symbol(kernels.q4, "q4_dequant_to_fp16", error));
+    kernels.q4_moe_selected = reinterpret_cast<Q4MoeSelectedFn>(load_symbol(kernels.q4, "q4_moe_selected_forward_u16", error));
+    kernels.kv_init = reinterpret_cast<KvInitFn>(load_symbol(kernels.kv, "kv_prefill_init", error));
+    kernels.kv_free = reinterpret_cast<KvFreeFn>(load_symbol(kernels.kv, "kv_free", error));
+    kernels.kv_commit = reinterpret_cast<KvCommitFn>(load_symbol(kernels.kv, "kv_commit", error));
+    kernels.kv_rollback = reinterpret_cast<KvRollbackFn>(load_symbol(kernels.kv, "kv_rollback", error));
+    kernels.kv_dense_decode = reinterpret_cast<KvDenseDecodeFn>(load_symbol(kernels.kv, "kv_dense_layer_decode_u16_ext", error));
+    kernels.error = error;
+    kernels.ready = error.empty();
+}
 
 static int64_t parse_json_int(const char* json, const char* key, int64_t fallback) {
     if (json == nullptr || key == nullptr) {
@@ -114,11 +220,15 @@ extern "C" __declspec(dllexport) void* pcketlm_session_create(
     session->vocab_size = std::max<int64_t>(2, parse_json_int(model_config_json, "vocab_size", 2));
     session->max_seq_len = std::max<int64_t>(1, parse_json_int(model_config_json, "max_position_embeddings", 4096));
     session->layers_executed = 0;
+    load_kernel_table(session->kernels);
     return session;
 }
 
 extern "C" __declspec(dllexport) void pcketlm_session_destroy(void* handle) {
     ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session != nullptr) {
+        unload_kernel_table(session->kernels);
+    }
     delete session;
 }
 
@@ -144,6 +254,22 @@ extern "C" __declspec(dllexport) int64_t pcketlm_layers_executed(void* handle) {
         return -1;
     }
     return session->layers_executed;
+}
+
+extern "C" __declspec(dllexport) int pcketlm_session_kernels_ready(void* handle) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr) {
+        return 0;
+    }
+    return session->kernels.ready ? 1 : 0;
+}
+
+extern "C" __declspec(dllexport) const char* pcketlm_session_kernel_error(void* handle) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr) {
+        return "null session";
+    }
+    return session->kernels.error.c_str();
 }
 
 extern "C" __declspec(dllexport) int64_t pcketlm_session_call_count(void* handle, int64_t call_type) {

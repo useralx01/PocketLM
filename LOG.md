@@ -5619,3 +5619,17 @@ Result: 297 passed in 21.83s
 - Monolithic enabled row: `state/phase-monolithic-integration-antibluff-enabled.json`; Qwen3-30B-A3B Q4 warm runner generated coherent `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"` in `19.472s` for 20 visible tokens (`0.9736s/token`), `monolithic_calls=0`.
 - Monolithic disabled row: `state/phase-monolithic-integration-antibluff-disabled.json`; same prompt/text in `18.811s` for 20 visible tokens (`0.94055s/token`), `monolithic_calls=0`.
 - Delta: enabled was `3.51%` slower than disabled, below the required `20%`, and the counter stayed `0`. Anti-bluff gate: FAIL. Production is not using the monolithic forward DLL yet.
+
+## Phase Monolithic Real Math / Setup
+- Branch: `phase-monolithic-real-math`.
+
+## Phase Monolithic Real Math / Kernel Table And Gate Evidence
+- Extended `src/pcketlm/native/pcketlm_forward.dll` so each native session loads the existing component DLLs from the native module directory with `LoadLibraryA` and resolves the required exported math/KV symbols with `GetProcAddress`.
+- Resolved component symbols: `native_fp16_matmul`, `native_attention_prefill_fp16`, `native_moe_forward_fp16`, `native_packed_gemv_rows8`, `q4_dequant_to_fp16`, `q4_moe_selected_forward_u16`, `kv_prefill_init`, `kv_free`, `kv_commit`, `kv_rollback`, and `kv_dense_layer_decode_u16_ext`.
+- Added ctypes exposure for `session.kernels_ready()` and `session.kernel_error()`.
+- Build validation: `python tools/build_native.py --force` rebuilt `src/pcketlm/native/pcketlm_forward.dll`.
+- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `4 passed in 5.11s`.
+- Full regression validation: `python -m pytest tests/ -q` -> `378 passed in 23.27s`.
+- Anti-bluff enabled row: `state/phase-monolithic-real-math-antibluff-enabled.json`; Qwen3-30B-A3B Q4 warm runner generated coherent `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"` in `29.813s` for 20 visible tokens (`1.49065s/token`), `monolithic_calls=0`.
+- Anti-bluff disabled row: `state/phase-monolithic-real-math-antibluff-disabled.json`; same prompt/text in `20.175s` for 20 visible tokens (`1.00875s/token`), `monolithic_calls=0`.
+- Gate verdict: FAIL. The component DLL function table is loaded, but production still records `0` monolithic calls and `pcketlm_forward_decode` still does not execute real per-layer transformer dispatch.

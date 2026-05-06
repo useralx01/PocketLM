@@ -313,3 +313,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: production `layer_bridge.py` still correctly uses the existing Python/native-component layer stack because `pcketlm_forward.dll` does not yet compute real transformer logits from registered model weights. Directly routing to it would corrupt model output.
 - Fix state: added missing registry/counter ABI and confirmed the failure honestly. Remaining fix is native layer dispatch using the registered weights, then production routing.
 
+## Phase Monolithic Real Math / anti-bluff failure after function table
+- Symptom: after adding cross-DLL function loading, the enabled Qwen3 Q4 warm-runner row took `1.49065s/token`, the disabled row took `1.00875s/token`, and both reported `monolithic_calls=0`.
+- Root cause: `pcketlm_forward.dll` can now load the existing native math/KV DLLs and resolve their entry points, but its prefill/decode/verify functions still do not call them to run the real transformer layer stack. Production therefore continues through the existing safe path.
+- Fix state: function pointer table is built and tested. The remaining required fix is replacing the synthetic `write_logits` forward body with real per-layer dispatch using registered tensors and those resolved function pointers, then routing `layer_bridge.py` only after tiny-oracle token identity passes.
+
