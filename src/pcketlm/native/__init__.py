@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 from pathlib import Path
 from collections import OrderedDict
@@ -19,6 +20,7 @@ _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
 _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
+_PCKETLM_FORWARD_DLL = _NATIVE_DIR / "pcketlm_forward.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
 _FP16_LOADER_LIB: ctypes.CDLL | None = None
@@ -35,6 +37,8 @@ _FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
 _FP16_PACKED_GEMV_ERROR: Exception | None = None
 _ROW8_ARTIFACT_LIB: ctypes.CDLL | None = None
 _ROW8_ARTIFACT_ERROR: Exception | None = None
+_PCKETLM_FORWARD_LIB: ctypes.CDLL | None = None
+_PCKETLM_FORWARD_ERROR: Exception | None = None
 _PACKED_GEMV_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 _PACKED_GEMV_CACHE_BYTES = 0
 _PACKED_GEMV_CACHE_STATS = {
@@ -75,6 +79,10 @@ def _native_packed_gemv_disabled() -> bool:
 
 def _native_row8_artifact_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_ROW8_ARTIFACT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _monolithic_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _u16_storage_dtype_code(dtype: torch.dtype) -> int:
@@ -339,6 +347,171 @@ def native_row8_artifact_available() -> bool:
 def native_row8_artifact_error() -> Exception | None:
     _load_row8_artifact_lib()
     return _ROW8_ARTIFACT_ERROR
+
+
+def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
+    global _PCKETLM_FORWARD_LIB, _PCKETLM_FORWARD_ERROR
+    if _monolithic_disabled():
+        return None
+    if _PCKETLM_FORWARD_LIB is not None:
+        return _PCKETLM_FORWARD_LIB
+    if not _PCKETLM_FORWARD_DLL.exists():
+        _PCKETLM_FORWARD_ERROR = FileNotFoundError(str(_PCKETLM_FORWARD_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_PCKETLM_FORWARD_DLL))
+        lib.pcketlm_cpu_has_avx2.argtypes = []
+        lib.pcketlm_cpu_has_avx2.restype = ctypes.c_int
+        lib.pcketlm_session_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        lib.pcketlm_session_create.restype = ctypes.c_void_p
+        lib.pcketlm_session_destroy.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_destroy.restype = None
+        lib.pcketlm_session_committed_length.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_committed_length.restype = ctypes.c_longlong
+        lib.pcketlm_session_tentative_length.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_tentative_length.restype = ctypes.c_longlong
+        lib.pcketlm_layers_executed.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_layers_executed.restype = ctypes.c_longlong
+        lib.pcketlm_forward_prefill.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+        ]
+        lib.pcketlm_forward_prefill.restype = ctypes.c_int
+        lib.pcketlm_forward_decode.argtypes = [ctypes.c_void_p, ctypes.c_longlong, ctypes.c_void_p]
+        lib.pcketlm_forward_decode.restype = ctypes.c_int
+        lib.pcketlm_forward_verify.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+        ]
+        lib.pcketlm_forward_verify.restype = ctypes.c_int
+        lib.pcketlm_session_commit.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.pcketlm_session_commit.restype = ctypes.c_int
+        lib.pcketlm_session_rollback.argtypes = [ctypes.c_void_p]
+        lib.pcketlm_session_rollback.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _PCKETLM_FORWARD_ERROR = exc
+        return None
+    _PCKETLM_FORWARD_LIB = lib
+    _PCKETLM_FORWARD_ERROR = None
+    return lib
+
+
+def native_monolithic_available() -> bool:
+    return _load_pcketlm_forward_lib() is not None
+
+
+def native_monolithic_error() -> Exception | None:
+    _load_pcketlm_forward_lib()
+    return _PCKETLM_FORWARD_ERROR
+
+
+def native_monolithic_has_avx2() -> bool:
+    lib = _load_pcketlm_forward_lib()
+    return bool(lib and lib.pcketlm_cpu_has_avx2())
+
+
+class MonolithicForwardSession:
+    """Opaque ctypes session for the native monolithic forward boundary.
+
+    This wrapper intentionally exposes only token/logit and commit/rollback
+    operations; Python never reads or writes the native session internals.
+    """
+
+    def __init__(self, model_config: dict | str, weight_source: str = ""):
+        lib = _load_pcketlm_forward_lib()
+        if lib is None:
+            reason = "disabled" if _monolithic_disabled() else _PCKETLM_FORWARD_ERROR
+            raise RuntimeError(f"Native monolithic forward is unavailable: {reason}")
+        if isinstance(model_config, str):
+            config_text = model_config
+            config = json.loads(model_config)
+        else:
+            config = dict(model_config)
+            config_text = json.dumps(config, separators=(",", ":"))
+        handle = lib.pcketlm_session_create(
+            ctypes.c_char_p(config_text.encode("utf-8")),
+            ctypes.c_char_p(str(weight_source).encode("utf-8")),
+        )
+        if not handle:
+            raise RuntimeError("pcketlm_session_create returned a null handle")
+        self._lib = lib
+        self._handle = ctypes.c_void_p(handle)
+        self.config = config
+        self.vocab_size = int(config.get("vocab_size", 0) or 0)
+        if self.vocab_size <= 0:
+            self.close()
+            raise ValueError("model_config must include a positive vocab_size")
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._lib.pcketlm_session_destroy(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "MonolithicForwardSession":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def committed_length(self) -> int:
+        return int(self._lib.pcketlm_session_committed_length(self._handle))
+
+    def tentative_length(self) -> int:
+        return int(self._lib.pcketlm_session_tentative_length(self._handle))
+
+    def layers_executed(self) -> int:
+        return int(self._lib.pcketlm_layers_executed(self._handle))
+
+    def prefill(self, token_ids: torch.Tensor | list[int]) -> torch.Tensor:
+        tokens = torch.as_tensor(token_ids, dtype=torch.int64).detach().cpu().contiguous().reshape(-1)
+        out = torch.empty((self.vocab_size,), dtype=torch.float16)
+        code = self._lib.pcketlm_forward_prefill(
+            self._handle,
+            ctypes.c_void_p(int(tokens.data_ptr())),
+            ctypes.c_longlong(int(tokens.numel())),
+            ctypes.c_void_p(int(out.data_ptr())),
+        )
+        if code != 0:
+            raise RuntimeError(f"pcketlm_forward_prefill failed with code {code}")
+        return out
+
+    def decode(self, token_id: int) -> torch.Tensor:
+        out = torch.empty((self.vocab_size,), dtype=torch.float16)
+        code = self._lib.pcketlm_forward_decode(
+            self._handle,
+            ctypes.c_longlong(int(token_id)),
+            ctypes.c_void_p(int(out.data_ptr())),
+        )
+        if code != 0:
+            raise RuntimeError(f"pcketlm_forward_decode failed with code {code}")
+        return out
+
+    def verify(self, candidate_token_ids: torch.Tensor | list[int]) -> torch.Tensor:
+        tokens = torch.as_tensor(candidate_token_ids, dtype=torch.int64).detach().cpu().contiguous().reshape(-1)
+        out = torch.empty((int(tokens.numel()) + 1, self.vocab_size), dtype=torch.float16)
+        code = self._lib.pcketlm_forward_verify(
+            self._handle,
+            ctypes.c_void_p(int(tokens.data_ptr())),
+            ctypes.c_longlong(int(tokens.numel())),
+            ctypes.c_void_p(int(out.data_ptr())),
+        )
+        if code != 0:
+            raise RuntimeError(f"pcketlm_forward_verify failed with code {code}")
+        return out
+
+    def commit(self, count: int) -> None:
+        code = self._lib.pcketlm_session_commit(self._handle, ctypes.c_longlong(int(count)))
+        if code != 0:
+            raise RuntimeError(f"pcketlm_session_commit failed with code {code}")
+
+    def rollback(self) -> None:
+        code = self._lib.pcketlm_session_rollback(self._handle)
+        if code != 0:
+            raise RuntimeError(f"pcketlm_session_rollback failed with code {code}")
 
 
 class NativeRow8Tensor:

@@ -303,3 +303,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: native packed-Q4 MoE execution remained correct, but dequantized fp16 residency plus packed Q4 cache could push the process into an unstable low-memory zone. Disabling native Q4 MoE avoided the crash but lost the speed path, proving the issue was memory pressure around the native Q4 MoE path rather than token math.
 - Fix: add a Q4-MoE-only low-RAM guard that clears dequantized fp16 residency while keeping packed Q4 bytes warm. The accepted default threshold is `800 MB`, with a `512 MB` continuation guard floor.
 
+## Phase Monolithic Forward / production routing block
+- Symptom: a native monolithic session boundary can be built and tested, but routing real Qwen/Qwen3/Mixtral through it safely is not complete in this pass.
+- Root cause: the existing production runtime still resolves model tensors through Python tensor loader/residency objects. A true monolithic layer stack needs C-owned stable pointers for all required weights after first load. Re-entering Python for each layer/tensor would preserve the exact Python/C crossing overhead the phase is supposed to remove.
+- Current fix: added `pcketlm_forward.dll` plus ctypes wrappers and deterministic commit/rollback tests as the ABI foundation. Real-model routing remains blocked on a C-side weight/session ABI rather than on KV semantics.
+

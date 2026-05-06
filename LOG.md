@@ -5595,3 +5595,13 @@ Result: 297 passed in 21.83s
 - Budget probes: explicit `8192 MB` row `state/phase-q4-moe-final-budget8192-localai20.json` reached `1.36595s/token`; explicit `7168 MB` row `state/phase-q4-moe-final-budget7168-localai20.json` reached `1.3221s/token`; explicit `6144 MB` row `state/phase-q4-moe-final-budget6144-localai20.json` reached `1.34575s/token` with `free_ram_mb=1314` after the run.
 - Accepted default proof: `state/phase-q4-moe-final-default6144-localai20.json` with no explicit cache env generated the same coherent 20-token Qwen3 thinking text in `26.757s` (`1.33785s/token`) after a `67.729s` 10-token prompt-specific prime. Packed-cache stats: `hits=14661`, `misses=7661`, `stores=7661`, `evictions=0`, `resident_bytes=6317202176`, `budget_bytes=6442450944`.
 - Regression evidence: `python -m pytest tests/ -q` -> `374 passed in 24.56s`.
+
+## Phase Monolithic Forward / Setup
+- Branch: `phase-monolithic-forward`.
+
+## Phase Monolithic Forward / Scaffold Evidence
+- Built new native module `src/pcketlm/native/pcketlm_forward.dll` from `src/pcketlm/native/pcketlm_forward.cpp` with `python tools/build_native.py --force`.
+- Added ctypes wrapper `MonolithicForwardSession` exposing session create/destroy, prefill, decode, verify, commit, rollback, layer-count telemetry, and the `PCKETLM_DISABLE_MONOLITHIC` kill switch.
+- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `3 passed in 1.85s`.
+- Full regression validation: `python -m pytest tests/ -q` -> `377 passed in 28.49s`.
+- Integration finding: this pass creates and validates the native monolithic session boundary and C-owned token/KV state, but does not yet route real Qwen/Qwen3/Mixtral weights through it. Real production routing still needs a C-side weight/session ABI that can own loaded tensor pointers across all layers without per-layer Python callbacks.
