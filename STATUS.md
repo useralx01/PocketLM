@@ -667,3 +667,4 @@ Phase Monolithic Real Math: component DLL function pointer loading now works ins
 Phase Monolithic Narrow Or Study: tiny dense fp16 monolithic decode now performs real registered-weight layer math and passes its 5-token oracle test; production Qwen 14B routing is still not met because local 14B is BF16 and the current copied tensor registration is not safe for full-model routing. Full suite passes with `379` tests.
 Phase Native BF16 No-Copy: monolithic dense decode now borrows tensor storage, supports BF16 tiny dense decode, and passes 380 tests; production Qwen 14B registration glue remains next.
 Phase Native BF16 Qwen14 Registration: Qwen 14B dense catalog tensors can now be loaded and registered into a no-copy BF16 monolithic session; full suite 381 passed.
+Phase Native BF16 Steps 1-3: native dense prefill is real, Qwen14 has an opt-in monolithic production route, BF16 MoE expert packed caching and RAM-scaled paging defaults are active; full suite 385 passed.

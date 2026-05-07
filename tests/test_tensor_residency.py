@@ -127,6 +127,28 @@ def test_q4_moe_default_uses_front_layer_attention_cache_only(monkeypatch) -> No
     assert policy.model_aware_budget_active is True
 
 
+def test_bf16_moe_policy_samples_free_ram_for_large_model_paging(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "auto")
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MEMORY_GUARD", raising=False)
+    monkeypatch.delenv("PCKETLM_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.delenv("PCKETLM_EXPERT_TENSOR_CACHE_MB", raising=False)
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_residency._free_memory_bytes", lambda: 10 * 1024**3)
+    fake_catalog = SimpleNamespace(
+        num_hidden_layers=48,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
+    monkeypatch.setattr("pcketlm.core.runtime.tensor_catalog.load_tensor_catalog", lambda _model_id: fake_catalog)
+
+    policy = TensorResidencyPolicy.from_environment("bf16-moe-policy-test")
+
+    assert policy.free_memory_bytes == 10 * 1024**3
+    assert policy.max_resident_bytes >= 4 * 1024**3
+    assert policy.expert_max_resident_bytes >= 2048 * 1024**2
+    assert policy.max_resident_experts_per_layer >= 8
+    assert policy.model_aware_budget_active is True
+
+
 def test_load_resident_tensor_reuses_converted_tensor_when_within_policy(tmp_path: Path, monkeypatch) -> None:
     clear_tensor_residency_cache()
     model_id = "resident-cache-test"

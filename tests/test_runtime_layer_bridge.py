@@ -464,6 +464,91 @@ def test_monolithic_qwen14_registration_uses_dense_tensor_catalog(monkeypatch) -
         assert torch.isfinite(logits).all()
 
 
+def test_prompt_decode_loop_routes_qwen14_bf16_through_monolithic(monkeypatch, tmp_path: Path) -> None:
+    model_id, _model_dir = _bootstrap_layer_bridge_fixture(tmp_path, monkeypatch)
+
+    class FakeMonolithicSession:
+        def __init__(self) -> None:
+            self._committed = 0
+            self._layers = 0
+            self.closed = False
+
+        def _logits(self, token_id: int) -> torch.Tensor:
+            logits = torch.full((8,), -10.0, dtype=torch.float16)
+            logits[int(token_id)] = 10.0
+            return logits
+
+        def prefill(self, token_ids: list[int]) -> torch.Tensor:
+            self._committed += len(token_ids)
+            self._layers += 2 * len(token_ids)
+            return self._logits(3)
+
+        def decode(self, token_id: int) -> torch.Tensor:
+            assert int(token_id) == 3
+            self._committed += 1
+            self._layers += 2
+            return self._logits(4)
+
+        def committed_length(self) -> int:
+            return self._committed
+
+        def layers_executed(self) -> int:
+            return self._layers
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_session = FakeMonolithicSession()
+    monkeypatch.setenv("PCKETLM_ENABLE_MONOLITHIC_QWEN14", "1")
+    monkeypatch.setattr(layer_bridge_module, "_is_qwen14_dense_bf16_config", lambda _model_id, _config: True)
+    monkeypatch.setattr(
+        layer_bridge_module,
+        "create_qwen14_monolithic_session",
+        lambda *_args, **_kwargs: (fake_session, []),
+    )
+
+    result = run_prompt_decode_loop(
+        model_id,
+        prompt="hello world",
+        steps=2,
+        start_layer=0,
+        lm_head_chunk_rows=3,
+        top_k=3,
+        selection_policy="greedy",
+        apply_chat_format=False,
+    )
+
+    assert result.ready is True
+    assert result.strategy == "greedy-prompt-monolithic-native"
+    assert result.generated_token_ids == [3, 4]
+    assert result.generated_text == "there friend"
+    assert result.layers_executed == 6
+    assert result.expected_layers_executed == 6
+    assert result.anti_cheat_passed is True
+    assert result.cache_sequence_lengths == {"monolithic": 3}
+    assert result.final_decode_state is not None
+    assert result.final_decode_state.native_kv_sessions[-1] is fake_session
+    assert "monolithic_prompt_decode" in result.timings
+    assert fake_session.closed is False
+
+
+def test_bf16_moe_decode_enables_packed_expert_cache_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", raising=False)
+    monkeypatch.delenv("PCKETLM_DISABLE_FP16_DECODE_EXPERT_PACKED_CACHE", raising=False)
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "auto")
+
+    assert layer_bridge_module._fp16_decode_expert_packed_cache_enabled() is True
+
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "q4")
+    assert layer_bridge_module._fp16_decode_expert_packed_cache_enabled() is False
+
+    monkeypatch.setenv("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "1")
+    assert layer_bridge_module._fp16_decode_expert_packed_cache_enabled() is True
+
+    monkeypatch.setenv("PCKETLM_DISABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "1")
+    assert layer_bridge_module._fp16_decode_expert_packed_cache_enabled() is False
+
+
 def test_native_dense_decode_uses_row8_artifact_without_original_projection_load(monkeypatch) -> None:
     from tools.pack_weights_row8 import pack_rows8_tensor
     from pcketlm.core.runtime import packed_artifact_loader

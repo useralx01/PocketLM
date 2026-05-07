@@ -1077,12 +1077,19 @@ def _runtime_math_dtype() -> torch.dtype:
 
 
 def _fp16_decode_expert_packed_cache_enabled() -> bool:
-    return os.environ.get("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "0").strip().lower() in {
+    if os.environ.get("PCKETLM_DISABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "0").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
-    }
+    }:
+        return False
+    explicit = os.environ.get("PCKETLM_ENABLE_FP16_DECODE_EXPERT_PACKED_CACHE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower() != "q4"
 
 
 def _native_moe_selected_enabled_for_current_source() -> bool:
@@ -4955,6 +4962,143 @@ def _run_prompt_decode_loop(
     record_phase("configure_generation", phase_started)
 
     effective_stop_token_ids = list(config.eos_token_ids) if stop_token_ids is None else [int(value) for value in stop_token_ids]
+    if (
+        _qwen14_monolithic_enabled()
+        and initial_decode_state is None
+        and not initial_token_ids
+        and start_layer == 0
+        and _is_qwen14_dense_bf16_config(model_id, config)
+        and effective_layer_count == configured_layer_count
+    ):
+        monolithic_started = time.perf_counter()
+        monolithic_session = None
+        monolithic_blockers: list[str] = []
+        try:
+            monolithic_session, monolithic_blockers = create_qwen14_monolithic_session(
+                model_id,
+                layer_count=effective_layer_count,
+            )
+            if monolithic_session is None or monolithic_blockers:
+                raise RuntimeError("; ".join(monolithic_blockers) or "Native monolithic session creation failed.")
+            generated_token_ids: list[int] = []
+            latest_logits = monolithic_session.prefill(prompt_token_ids).view(1, 1, -1)
+            for step_index in range(effective_max_new_tokens):
+                if _cancel_requested(should_cancel):
+                    return canceled_result(
+                        generated_token_ids=generated_token_ids,
+                        full_chain=list(prompt_token_ids) + generated_token_ids,
+                        cache_sequence_lengths={"monolithic": monolithic_session.committed_length()},
+                        steps_completed=len(generated_token_ids),
+                    )
+                selection = select_next_token(
+                    latest_logits,
+                    policy=effective_policy,
+                    top_k=effective_top_k,
+                    top_p=effective_top_p,
+                    temperature=effective_temperature,
+                    repetition_penalty=effective_repetition_penalty,
+                    recent_token_ids=list(prompt_token_ids) + generated_token_ids,
+                    sample_seed=None if sample_seed is None else sample_seed + step_index,
+                )
+                if not selection.ready or selection.chosen_token_id is None:
+                    monolithic_blockers.extend(selection.blockers or ["Native monolithic token selection failed."])
+                    break
+                next_token = int(selection.chosen_token_id)
+                generated_token_ids.append(next_token)
+                record_token_summary(len(generated_token_ids), next_token, time.perf_counter() - monolithic_started)
+                if (
+                    len(generated_token_ids) >= effective_min_new_tokens
+                    and next_token in effective_stop_token_ids
+                ):
+                    break
+                if len(generated_token_ids) >= effective_max_new_tokens:
+                    break
+                latest_logits = monolithic_session.decode(next_token).view(1, 1, -1)
+            full_chain = list(prompt_token_ids) + generated_token_ids
+            generated_text, generated_blockers = decode_token_ids_to_text(model_id, generated_token_ids)
+            full_text, full_blockers = decode_token_ids_to_text(model_id, full_chain)
+            generated_text, triggered_stop_string = _trim_generated_text_at_stop_string(generated_text, effective_stop_strings)
+            stop_reason = "step-limit"
+            if generated_token_ids and generated_token_ids[-1] in effective_stop_token_ids and len(generated_token_ids) >= effective_min_new_tokens:
+                stop_reason = "eos-token" if stop_token_ids is None else "custom-stop-token"
+            if triggered_stop_string is not None:
+                stop_reason = "stop-string"
+            layers_executed = monolithic_session.layers_executed()
+            expected_layers = effective_layer_count * (len(prompt_token_ids) + max(0, len(generated_token_ids) - 1))
+            anti_cheat_blockers = []
+            if is_default_full_stack_run and layers_executed < expected_layers:
+                anti_cheat_blockers.append(
+                    f"Anti-cheat guard: native monolithic executed {layers_executed} layer-token forwards, "
+                    f"expected {expected_layers}."
+                )
+            cache_lengths = {"monolithic": monolithic_session.committed_length()}
+            final_state = KVDecodeState(
+                model_id=model_id,
+                next_token_id=-1 if not generated_token_ids else int(generated_token_ids[-1]),
+                next_position=len(prompt_token_ids) + max(0, len(generated_token_ids) - 1),
+                generated_token_ids=list(full_chain),
+                cache_sequence_lengths=dict(cache_lengths),
+                native_kv_sessions={-1: monolithic_session},
+                finished=stop_reason != "step-limit",
+                stop_reason=stop_reason,
+                ready=True,
+            )
+            record_phase("monolithic_prompt_decode", monolithic_started)
+            return PromptDecodeLoopResult(
+                model_id=model_id,
+                prompt=prepared_prompt_result.prepared_prompt,
+                prompt_token_ids=prompt_token_ids,
+                generated_token_ids=generated_token_ids,
+                generated_text=generated_text,
+                full_text=full_text,
+                steps_requested=effective_max_new_tokens,
+                max_new_tokens=effective_max_new_tokens,
+                min_new_tokens=effective_min_new_tokens,
+                steps_completed=len(generated_token_ids),
+                strategy=f"{effective_policy}-prompt-monolithic-native",
+                stop_reason=stop_reason,
+                stop_token_ids=[] if stop_token_ids is None else [int(value) for value in stop_token_ids],
+                stop_strings=list(effective_stop_strings),
+                cache_sequence_lengths=cache_lengths,
+                blockers=list(monolithic_blockers) + list(generated_blockers) + list(full_blockers) + anti_cheat_blockers,
+                ready=not monolithic_blockers and not generated_blockers and not full_blockers and not anti_cheat_blockers,
+                timings=finish_timings(),
+                token_summaries=token_summaries,
+                prefix_reuse={"monolithic": True, "used": False},
+                reusable_token_ids=list(full_chain[:-1]) if generated_token_ids else list(prompt_token_ids),
+                configured_layer_count=configured_layer_count,
+                prompt_layer_count=effective_layer_count,
+                layers_executed=layers_executed,
+                expected_layers_executed=expected_layers,
+                anti_cheat_passed=not anti_cheat_blockers,
+                final_decode_state=final_state,
+            )
+        except Exception as exc:
+            if monolithic_session is not None:
+                try:
+                    monolithic_session.close()
+                except Exception:
+                    pass
+            if os.environ.get("PCKETLM_FORCE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}:
+                return PromptDecodeLoopResult(
+                    model_id=model_id,
+                    prompt=prepared_prompt_result.prepared_prompt,
+                    prompt_token_ids=prompt_token_ids,
+                    generated_token_ids=[],
+                    generated_text="",
+                    full_text=prompt,
+                    steps_requested=effective_max_new_tokens,
+                    max_new_tokens=effective_max_new_tokens,
+                    min_new_tokens=effective_min_new_tokens,
+                    steps_completed=0,
+                    strategy=f"{effective_policy}-prompt-monolithic-native",
+                    stop_token_ids=[] if stop_token_ids is None else [int(value) for value in stop_token_ids],
+                    stop_strings=list(effective_stop_strings),
+                    blockers=[f"Forced Qwen14 monolithic path failed: {exc}"],
+                    ready=False,
+                    timings=finish_timings(),
+                )
+
     supplied_prefix_ids = [] if initial_token_ids is None else [int(value) for value in initial_token_ids]
     try:
         max_prefix_append_tokens = max(1, int(os.environ.get("PCKETLM_PREFIX_REUSE_MAX_APPEND_TOKENS", "64")))

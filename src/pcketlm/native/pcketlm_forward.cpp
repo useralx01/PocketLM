@@ -675,6 +675,19 @@ extern "C" __declspec(dllexport) int pcketlm_forward_prefill(
         return 2;
     }
     session->tentative_tokens.clear();
+    if (has_dense_decode_weights(session)) {
+        for (int64_t i = 0; i < num_tokens; ++i) {
+            const int code = forward_dense_decode_registered(session, input_token_ids[i], output_logits_buffer);
+            if (code != 0) {
+                return code;
+            }
+            session->committed_tokens.push_back(input_token_ids[i]);
+        }
+        session->prefill_calls += 1;
+        g_prefill_calls += 1;
+        session->layers_executed += session->layer_count * num_tokens;
+        return 0;
+    }
     for (int64_t i = 0; i < num_tokens; ++i) {
         session->committed_tokens.push_back(input_token_ids[i]);
     }

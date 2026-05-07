@@ -233,6 +233,32 @@ def test_monolithic_dense_decode_matches_tiny_bf16_python_sequence() -> None:
     assert actual == expected
 
 
+def test_monolithic_dense_prefill_runs_real_layers_and_populates_kv() -> None:
+    from pcketlm.native import MonolithicForwardSession
+
+    weights = _tiny_dense_weights()
+    prompt_tokens = [3, 15]
+    expected_next = _tiny_dense_python_sequence(weights, start_token=3, steps=2)[-1]
+    with MonolithicForwardSession(_dense_config(), "tiny-dense-prefill") as prefill_session:
+        _register_tiny_dense(prefill_session, weights)
+        prefill_logits = prefill_session.prefill(prompt_tokens)
+        assert _argmax(prefill_logits) == expected_next
+        assert prefill_session.committed_length() == len(prompt_tokens)
+        assert prefill_session.call_count("prefill") == 1
+        assert prefill_session.layers_executed() == _dense_config()["num_hidden_layers"] * len(prompt_tokens)
+
+        decode_logits = prefill_session.decode(expected_next)
+
+    with MonolithicForwardSession(_dense_config(), "tiny-dense-decode-reference") as decode_session:
+        _register_tiny_dense(decode_session, weights)
+        token = prompt_tokens[0]
+        for _ in prompt_tokens:
+            token = _argmax(decode_session.decode(token))
+        reference_logits = decode_session.decode(token)
+
+    assert _argmax(decode_logits) == _argmax(reference_logits)
+
+
 def test_monolithic_kill_switch(monkeypatch) -> None:
     monkeypatch.setenv("PCKETLM_DISABLE_MONOLITHIC", "1")
     from pcketlm.native import MonolithicForwardSession

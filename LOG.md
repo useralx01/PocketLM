@@ -5674,3 +5674,11 @@ Result: 297 passed in 21.83s
 - Real Qwen 14B catalog sanity checked 27 representative names across layer 0 and layer 47: `missing=[]`.
 - Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_monolithic_qwen14_registration_uses_dense_tensor_catalog tests\test_native_monolithic_forward.py -q` -> 7 passed.
 - Full tests: `python -m pytest tests\ -q` -> 381 passed.
+
+## Phase Native BF16 Steps 1-3 / Evidence
+- Step 1: `pcketlm_forward_prefill` now runs real registered dense layer math token-by-token when dense tensors are registered, commits C-owned KV for each prompt token, and returns final-position logits. Tiny dense prefill+decode now matches the sequential native decode reference.
+- Step 1 production routing: Qwen 14B BF16 has an opt-in production prompt path behind `PCKETLM_ENABLE_MONOLITHIC_QWEN14=1`. The prompt loop creates/registers the Qwen14 monolithic session, runs native prefill/decode, returns monolithic cache telemetry, and keeps the native session alive in the final decode state.
+- Step 2: BF16 MoE decode now enables the fp16/BF16 packed expert byte cache by default for non-Q4 sources, while preserving explicit enable/disable env overrides and keeping Q4 on its own packed-cache path.
+- Step 3: BF16 MoE residency policy now samples free RAM even when the generic memory guard is off, allowing large MoE paging budgets to scale from machine RAM instead of staying at the small default.
+- Focused tests: `python -m pytest tests\test_native_monolithic_forward.py tests\test_runtime_layer_bridge.py::test_prompt_decode_loop_routes_qwen14_bf16_through_monolithic tests\test_runtime_layer_bridge.py::test_bf16_moe_decode_enables_packed_expert_cache_by_default tests\test_tensor_residency.py::test_bf16_moe_policy_samples_free_ram_for_large_model_paging tests\test_tensor_residency.py::test_q4_moe_default_uses_front_layer_attention_cache_only -q` -> 11 passed.
+- Full tests: `python -m pytest tests\ -q` -> 385 passed.

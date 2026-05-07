@@ -121,6 +121,15 @@ class TensorResidencyPolicy:
         free_memory_bytes = _free_memory_bytes() if _env_enabled("PCKETLM_TENSOR_CACHE_MEMORY_GUARD") else None
         if q4_source_requested and free_memory_bytes is None:
             free_memory_bytes = _free_memory_bytes()
+        if model_id and free_memory_bytes is None and not q4_source_requested:
+            try:
+                from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+                catalog = load_tensor_catalog(model_id)
+                if bool(catalog.num_experts and catalog.num_experts_per_tok):
+                    free_memory_bytes = _free_memory_bytes()
+            except Exception:
+                pass
         if free_memory_bytes is not None and free_memory_bytes < guard_threshold_mb * 1024 * 1024:
             memory_guard_active = True
             if not _env_is_set("PCKETLM_TENSOR_CACHE_MB"):
@@ -138,7 +147,11 @@ class TensorResidencyPolicy:
                 from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
 
                 catalog = load_tensor_catalog(model_id)
-                deep_model = bool(catalog.num_hidden_layers and catalog.num_hidden_layers > DEFAULT_FRONT_LAYER_COUNT * 4)
+                deep_model = bool(
+                    not q4_source_requested
+                    and catalog.num_hidden_layers
+                    and catalog.num_hidden_layers >= DEFAULT_FRONT_LAYER_COUNT * 4
+                )
             except Exception:
                 deep_model = False
             available_mb = int(free_memory_bytes // (1024**2))
