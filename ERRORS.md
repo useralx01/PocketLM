@@ -318,3 +318,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: `pcketlm_forward.dll` can now load the existing native math/KV DLLs and resolve their entry points, but its prefill/decode/verify functions still do not call them to run the real transformer layer stack. Production therefore continues through the existing safe path.
 - Fix state: function pointer table is built and tested. The remaining required fix is replacing the synthetic `write_logits` forward body with real per-layer dispatch using registered tensors and those resolved function pointers, then routing `layer_bridge.py` only after tiny-oracle token identity passes.
 
+## Phase Monolithic Narrow Or Study / production gate failure
+- Symptom: the tiny dense registered-weight monolithic path passes, but Qwen 14B production timing did not produce a valid enabled/disabled row. Enabled and disabled diagnostic attempts exited after the `before` row; disabled runs returned native code `0xC0000005`.
+- Root cause: two separate blockers remain. First, local Qwen 14B is BF16 while the narrow path is fp16-only. Second, the current monolithic registration stores copied tensors; production Qwen 14B needs stable non-copy tensor pointers or mapped handles before it can be routed without duplicating tens of GB into RAM.
+- Fix state: Path 2 reference study confirmed the layer math order and reinforced stable KV/tensor ownership as the next required architecture change. Do not claim production monolithic speed until a non-copy BF16-capable registration path exists and the Qwen 14B disabled baseline reaches an `after` row again.
+

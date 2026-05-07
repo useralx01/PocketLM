@@ -5633,3 +5633,25 @@ Result: 297 passed in 21.83s
 - Anti-bluff enabled row: `state/phase-monolithic-real-math-antibluff-enabled.json`; Qwen3-30B-A3B Q4 warm runner generated coherent `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"` in `29.813s` for 20 visible tokens (`1.49065s/token`), `monolithic_calls=0`.
 - Anti-bluff disabled row: `state/phase-monolithic-real-math-antibluff-disabled.json`; same prompt/text in `20.175s` for 20 visible tokens (`1.00875s/token`), `monolithic_calls=0`.
 - Gate verdict: FAIL. The component DLL function table is loaded, but production still records `0` monolithic calls and `pcketlm_forward_decode` still does not execute real per-layer transformer dispatch.
+
+## Phase Monolithic Narrow Or Study / Setup
+- Branch: `phase-monolithic-narrow-or-study`.
+
+## Phase Monolithic Narrow Or Study / Path 1 Tiny Dense
+- Implemented a registered-weight dense fp16 decode path in `pcketlm_forward_decode` for tiny dense Qwen-shaped sessions. The path calls the existing `kv_dense_layer_decode_u16_ext` function pointer for each registered dense layer, commits C-owned KV once per token, applies final RMSNorm, and computes lm_head logits in C.
+- Added tiny dense oracle coverage in `tests/test_native_monolithic_forward.py::test_monolithic_dense_decode_matches_tiny_python_sequence`.
+- Focused validation: `python -m pytest tests/test_native_monolithic_forward.py -q` -> `5 passed in 6.17s`.
+- Full validation: `python -m pytest tests/ -q` -> `379 passed in 29.07s`.
+- Tiny dense token sequence matched the Python/native-kernel baseline for 5 greedy steps. This proves the narrow registered-weight decode loop is real for small fp16 dense models.
+- Path 1 production blocker: installed `qwen2.5-14b-instruct` is `torch_dtype=bfloat16`, while this path is fp16-only. The current monolithic tensor registration also copies weights into C-owned vectors; doing that for Qwen 14B would duplicate tens of GB of weights and is not safe on this machine.
+
+## Phase Monolithic Narrow Or Study / Path 2 Reference Study
+- Cloned llama.cpp for inspection only at `C:\Users\isale\Documents\reference\llama.cpp`, commit `97f06e9ee`. No source was copied, imported, linked, or vendored into pcketlm.
+- Read `src/models/qwen2.cpp`: `llama_model_qwen2::graph::graph` shows Qwen2 order as token embedding, per-layer RMS attention norm, Q/K/V projection, RoPE on Q and K, attention, attention residual, RMS FFN norm, SiLU gated FFN, FFN residual, final RMSNorm, lm_head.
+- Read `src/llama-graph.cpp`: `llm_graph_context::build_norm` uses RMSNorm with `f_norm_rms_eps`; `llm_graph_context::build_ffn` uses SiLU with parallel gate/up multiplication for Qwen2-style GLU; attention uses `ggml_flash_attn_ext` or explicit KQ/KQV matmul with F32 precision hints.
+- Read `src/llama-kv-cache.cpp`: `llama_kv_cache` stores per-layer K/V buffers and views K as `[head_dim, n_kv_heads, n_kv, stream]`; this reinforced that pcketlm's production monolithic path needs stable pointer/handle ownership, not copied full-model tensors.
+
+## Phase Monolithic Narrow Or Study / Gates
+- GATE A: PASS for the tiny dense fp16 path. Token sequence matched for 5 greedy steps in `test_monolithic_dense_decode_matches_tiny_python_sequence`.
+- GATE B: FAIL / not measurable. Qwen 14B production `--slice=full` did not reach an `after` row. Enabled attempt `state/phase-monolithic-narrow-qwen14-enabled.jsonl` exited after `before` with `3857 MB` free RAM. Disabled attempts `state/phase-monolithic-narrow-qwen14-disabled.jsonl` and `state/phase-monolithic-narrow-qwen14-disabled-smoke1-afterrestore.jsonl` exited with native code `0xC0000005` after `before`, even with `PCKETLM_DISABLE_MONOLITHIC=1`.
+- GATE C: FAIL. No production Qwen 14B row reached monolithic decode, so there is no valid `monolithic_calls=max_new_tokens` proof.

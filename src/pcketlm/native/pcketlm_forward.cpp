@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -18,7 +20,7 @@ using KvInitFn = void* (*)(int64_t, int64_t, int64_t);
 using KvFreeFn = void (*)(void*);
 using KvCommitFn = int (*)(void*, int64_t);
 using KvRollbackFn = int (*)(void*);
-using KvDenseDecodeFn = int (*)(void*, int64_t, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t, int64_t, int64_t, int64_t, float, float);
+using KvDenseDecodeFn = int (*)(void*, int64_t, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, const uint16_t*, uint16_t*, int64_t, int64_t, int64_t, int64_t, float, float);
 
 struct KernelTable {
     HMODULE matmul = nullptr;
@@ -45,8 +47,13 @@ struct KernelTable {
 struct ForwardSession {
     int64_t layer_count = 0;
     int64_t hidden_size = 0;
+    int64_t intermediate_size = 0;
+    int64_t num_attention_heads = 0;
+    int64_t num_key_value_heads = 0;
     int64_t vocab_size = 0;
     int64_t max_seq_len = 0;
+    float rms_norm_eps = 1.0e-6f;
+    float rope_theta = 10000.0f;
     int64_t layers_executed = 0;
     int64_t prefill_calls = 0;
     int64_t decode_calls = 0;
@@ -56,6 +63,7 @@ struct ForwardSession {
     std::unordered_map<std::string, std::vector<uint16_t>> u16_weights;
     std::unordered_map<std::string, std::string> tensor_roles;
     KernelTable kernels;
+    void* kv_handle = nullptr;
 };
 
 static int64_t g_prefill_calls = 0;
@@ -168,6 +176,32 @@ static int64_t parse_json_int(const char* json, const char* key, int64_t fallbac
     return negative ? -value : value;
 }
 
+static float parse_json_float(const char* json, const char* key, float fallback) {
+    if (json == nullptr || key == nullptr) {
+        return fallback;
+    }
+    const std::string text(json);
+    const std::string needle = std::string("\"") + key + "\"";
+    size_t pos = text.find(needle);
+    if (pos == std::string::npos) {
+        return fallback;
+    }
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos) {
+        return fallback;
+    }
+    ++pos;
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) {
+        ++pos;
+    }
+    char* end = nullptr;
+    const float value = std::strtof(text.c_str() + pos, &end);
+    if (end == text.c_str() + pos) {
+        return fallback;
+    }
+    return value;
+}
+
 static inline uint16_t fp32_to_fp16(float value) {
     const __m128 full = _mm_set_ss(value);
     const __m128i half = _mm_cvtps_ph(full, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -200,6 +234,172 @@ static void write_logits(ForwardSession* session, int64_t chosen_token, uint16_t
     out_logits[chosen_token % session->vocab_size] = high;
 }
 
+static std::string tensor_key(int64_t layer_idx, int64_t role) {
+    return std::to_string(layer_idx) + ":" + std::to_string(role);
+}
+
+enum TensorRole : int64_t {
+    ROLE_EMBED = 0,
+    ROLE_INPUT_NORM = 1,
+    ROLE_POST_NORM = 2,
+    ROLE_Q = 3,
+    ROLE_K = 4,
+    ROLE_V = 5,
+    ROLE_O = 6,
+    ROLE_GATE = 7,
+    ROLE_UP = 8,
+    ROLE_DOWN = 9,
+    ROLE_FINAL_NORM = 10,
+    ROLE_LM_HEAD = 11,
+    ROLE_Q_BIAS = 12,
+    ROLE_K_BIAS = 13,
+    ROLE_V_BIAS = 14,
+    ROLE_Q_NORM = 15,
+    ROLE_K_NORM = 16,
+};
+
+static const uint16_t* optional_tensor(ForwardSession* session, int64_t layer_idx, int64_t role) {
+    const auto found = session->u16_weights.find(tensor_key(layer_idx, role));
+    if (found == session->u16_weights.end() || found->second.empty()) {
+        return nullptr;
+    }
+    return found->second.data();
+}
+
+static const uint16_t* required_tensor(ForwardSession* session, int64_t layer_idx, int64_t role) {
+    const auto found = session->u16_weights.find(tensor_key(layer_idx, role));
+    if (found == session->u16_weights.end() || found->second.empty()) {
+        return nullptr;
+    }
+    return found->second.data();
+}
+
+static inline float fp16_to_fp32(uint16_t value) {
+    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
+    const __m128 full = _mm_cvtph_ps(half);
+    return _mm_cvtss_f32(full);
+}
+
+static void rms_norm_to_u16(
+    const uint16_t* hidden,
+    const uint16_t* weight,
+    uint16_t* out,
+    int64_t hidden_size,
+    float eps
+) {
+    double sum_sq = 0.0;
+    for (int64_t i = 0; i < hidden_size; ++i) {
+        const float value = fp16_to_fp32(hidden[i]);
+        sum_sq += static_cast<double>(value) * static_cast<double>(value);
+    }
+    const float scale = 1.0f / std::sqrt(static_cast<float>(sum_sq / static_cast<double>(hidden_size)) + eps);
+    for (int64_t i = 0; i < hidden_size; ++i) {
+        out[i] = fp32_to_fp16(fp16_to_fp32(hidden[i]) * scale * fp16_to_fp32(weight[i]));
+    }
+}
+
+static bool has_dense_decode_weights(ForwardSession* session) {
+    if (session == nullptr) {
+        return false;
+    }
+    if (required_tensor(session, -1, ROLE_EMBED) == nullptr ||
+        required_tensor(session, -1, ROLE_FINAL_NORM) == nullptr ||
+        required_tensor(session, -1, ROLE_LM_HEAD) == nullptr) {
+        return false;
+    }
+    for (int64_t layer = 0; layer < session->layer_count; ++layer) {
+        for (int64_t role : {ROLE_INPUT_NORM, ROLE_POST_NORM, ROLE_Q, ROLE_K, ROLE_V, ROLE_O, ROLE_GATE, ROLE_UP, ROLE_DOWN}) {
+            if (required_tensor(session, layer, role) == nullptr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static int forward_dense_decode_registered(
+    ForwardSession* session,
+    int64_t new_token_id,
+    uint16_t* output_logits_buffer
+) {
+    if (session == nullptr || output_logits_buffer == nullptr || !session->kernels.ready || session->kernels.kv_dense_decode == nullptr) {
+        return 10;
+    }
+    if (!has_dense_decode_weights(session)) {
+        return 11;
+    }
+    if (session->kv_handle == nullptr) {
+        const int64_t head_dim = session->hidden_size / std::max<int64_t>(1, session->num_attention_heads);
+        const int64_t kv_width = session->num_key_value_heads * head_dim;
+        session->kv_handle = session->kernels.kv_init(session->layer_count, session->max_seq_len, kv_width);
+        if (session->kv_handle == nullptr) {
+            return 12;
+        }
+    }
+    if (new_token_id < 0 || new_token_id >= session->vocab_size) {
+        return 13;
+    }
+    const uint16_t* embed = required_tensor(session, -1, ROLE_EMBED);
+    const uint16_t* final_norm = required_tensor(session, -1, ROLE_FINAL_NORM);
+    const uint16_t* lm_head = required_tensor(session, -1, ROLE_LM_HEAD);
+    std::vector<uint16_t> hidden(static_cast<size_t>(session->hidden_size));
+    std::vector<uint16_t> next_hidden(static_cast<size_t>(session->hidden_size));
+    std::memcpy(
+        hidden.data(),
+        embed + static_cast<size_t>(new_token_id) * static_cast<size_t>(session->hidden_size),
+        static_cast<size_t>(session->hidden_size) * sizeof(uint16_t)
+    );
+
+    for (int64_t layer = 0; layer < session->layer_count; ++layer) {
+        const int code = session->kernels.kv_dense_decode(
+            session->kv_handle,
+            layer,
+            hidden.data(),
+            required_tensor(session, layer, ROLE_INPUT_NORM),
+            required_tensor(session, layer, ROLE_POST_NORM),
+            required_tensor(session, layer, ROLE_Q),
+            required_tensor(session, layer, ROLE_K),
+            required_tensor(session, layer, ROLE_V),
+            required_tensor(session, layer, ROLE_O),
+            required_tensor(session, layer, ROLE_GATE),
+            required_tensor(session, layer, ROLE_UP),
+            required_tensor(session, layer, ROLE_DOWN),
+            optional_tensor(session, layer, ROLE_Q_BIAS),
+            optional_tensor(session, layer, ROLE_K_BIAS),
+            optional_tensor(session, layer, ROLE_V_BIAS),
+            optional_tensor(session, layer, ROLE_Q_NORM),
+            optional_tensor(session, layer, ROLE_K_NORM),
+            next_hidden.data(),
+            session->hidden_size,
+            session->intermediate_size,
+            session->num_attention_heads,
+            session->num_key_value_heads,
+            session->rms_norm_eps,
+            session->rope_theta
+        );
+        if (code != 0) {
+            return 1000 + static_cast<int>(layer * 10) + code;
+        }
+        hidden.swap(next_hidden);
+    }
+    const int commit_code = session->kernels.kv_commit(session->kv_handle, 1);
+    if (commit_code != 0) {
+        return 20 + commit_code;
+    }
+    std::vector<uint16_t> normed(static_cast<size_t>(session->hidden_size));
+    rms_norm_to_u16(hidden.data(), final_norm, normed.data(), session->hidden_size, session->rms_norm_eps);
+
+    for (int64_t row = 0; row < session->vocab_size; ++row) {
+        const uint16_t* weight_row = lm_head + static_cast<size_t>(row) * static_cast<size_t>(session->hidden_size);
+        float acc = 0.0f;
+        for (int64_t col = 0; col < session->hidden_size; ++col) {
+            acc += fp16_to_fp32(normed[static_cast<size_t>(col)]) * fp16_to_fp32(weight_row[static_cast<size_t>(col)]);
+        }
+        output_logits_buffer[row] = fp32_to_fp16(acc);
+    }
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int pcketlm_cpu_has_avx2(void) {
     int regs[4] = {0, 0, 0, 0};
     __cpuid(regs, 0);
@@ -217,8 +417,13 @@ extern "C" __declspec(dllexport) void* pcketlm_session_create(
     ForwardSession* session = new ForwardSession();
     session->layer_count = std::max<int64_t>(1, parse_json_int(model_config_json, "num_hidden_layers", 1));
     session->hidden_size = std::max<int64_t>(1, parse_json_int(model_config_json, "hidden_size", 1));
+    session->intermediate_size = std::max<int64_t>(1, parse_json_int(model_config_json, "intermediate_size", session->hidden_size * 4));
+    session->num_attention_heads = std::max<int64_t>(1, parse_json_int(model_config_json, "num_attention_heads", 1));
+    session->num_key_value_heads = std::max<int64_t>(1, parse_json_int(model_config_json, "num_key_value_heads", session->num_attention_heads));
     session->vocab_size = std::max<int64_t>(2, parse_json_int(model_config_json, "vocab_size", 2));
     session->max_seq_len = std::max<int64_t>(1, parse_json_int(model_config_json, "max_position_embeddings", 4096));
+    session->rms_norm_eps = parse_json_float(model_config_json, "rms_norm_eps", 1.0e-6f);
+    session->rope_theta = parse_json_float(model_config_json, "rope_theta", 10000.0f);
     session->layers_executed = 0;
     load_kernel_table(session->kernels);
     return session;
@@ -227,6 +432,10 @@ extern "C" __declspec(dllexport) void* pcketlm_session_create(
 extern "C" __declspec(dllexport) void pcketlm_session_destroy(void* handle) {
     ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
     if (session != nullptr) {
+        if (session->kv_handle != nullptr && session->kernels.kv_free != nullptr) {
+            session->kernels.kv_free(session->kv_handle);
+            session->kv_handle = nullptr;
+        }
         unload_kernel_table(session->kernels);
     }
     delete session;
@@ -421,6 +630,16 @@ extern "C" __declspec(dllexport) int pcketlm_forward_decode(
         return 2;
     }
     session->tentative_tokens.clear();
+    if (has_dense_decode_weights(session)) {
+        const int code = forward_dense_decode_registered(session, new_token_id, output_logits_buffer);
+        if (code == 0) {
+            session->committed_tokens.push_back(new_token_id);
+            session->decode_calls += 1;
+            g_decode_calls += 1;
+            session->layers_executed += session->layer_count;
+            return 0;
+        }
+    }
     session->committed_tokens.push_back(new_token_id);
     session->decode_calls += 1;
     g_decode_calls += 1;
