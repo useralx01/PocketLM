@@ -387,6 +387,83 @@ def test_native_dense_decode_uses_prefetched_tensor_bundle(monkeypatch) -> None:
             result.native_kv_session.close()
 
 
+def test_monolithic_qwen14_registration_uses_dense_tensor_catalog(monkeypatch) -> None:
+    from pcketlm.native import MonolithicForwardSession
+
+    hidden_size = 8
+    intermediate_size = 16
+    cfg = SimpleNamespace(
+        ready=True,
+        blockers=[],
+        num_hidden_layers=1,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=12,
+        max_position_embeddings=16,
+        rms_norm_eps=1.0e-6,
+        rope_theta=10000.0,
+        num_experts=0,
+        num_experts_per_tok=0,
+        head_dim=4,
+    )
+    torch.manual_seed(2026)
+    tensors = {
+        "model.embed_tokens.weight": (torch.randn((12, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.norm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "lm_head.weight": (torch.randn((12, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.input_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "model.layers.0.post_attention_layernorm.weight": torch.ones((hidden_size,), dtype=torch.bfloat16),
+        "model.layers.0.self_attn.q_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.self_attn.k_proj.weight": (torch.randn((4, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.self_attn.v_proj.weight": (torch.randn((4, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.self_attn.o_proj.weight": (torch.randn((hidden_size, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.mlp.gate_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.mlp.up_proj.weight": (torch.randn((intermediate_size, hidden_size)) * 0.05).to(torch.bfloat16),
+        "model.layers.0.mlp.down_proj.weight": (torch.randn((hidden_size, intermediate_size)) * 0.05).to(torch.bfloat16),
+    }
+    requested: list[str] = []
+
+    def fake_load_resident_tensors(_model_id, tensor_names, **_kwargs):
+        requested.extend(tensor_names)
+        return {
+            name: SimpleNamespace(ready=True, tensor=tensors[name], blockers=[])
+            for name in tensor_names
+        }
+
+    monkeypatch.setattr(layer_bridge_module, "_tensor_entry_exists", lambda _model_id, name: name in tensors)
+    monkeypatch.setattr(layer_bridge_module, "load_resident_tensors", fake_load_resident_tensors)
+
+    with MonolithicForwardSession(
+        {
+            "num_hidden_layers": 1,
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "vocab_size": 12,
+            "max_position_embeddings": 16,
+            "rms_norm_eps": 1.0e-6,
+            "rope_theta": 10000.0,
+            "torch_dtype": "bfloat16",
+        },
+        "qwen14-registration-test",
+    ) as session:
+        blockers = layer_bridge_module._register_dense_monolithic_session_tensors(
+            session=session,
+            model_id="qwen2.5-14b-instruct",
+            config=cfg,
+            layer_count=1,
+        )
+        assert blockers == []
+        assert session.tensor_count() == len(tensors)
+        assert set(requested) == set(tensors)
+        logits = session.decode(3)
+        assert tuple(logits.shape) == (12,)
+        assert torch.isfinite(logits).all()
+
+
 def test_native_dense_decode_uses_row8_artifact_without_original_projection_load(monkeypatch) -> None:
     from tools.pack_weights_row8 import pack_rows8_tensor
     from pcketlm.core.runtime import packed_artifact_loader

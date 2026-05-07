@@ -464,3 +464,8 @@
 - Python session wrapper now keeps registered tensor storage alive for the native session lifetime.
 - BF16 tiny dense native decode matches Python for 5 greedy steps: `[15, 16, 17, 9, 2]`.
 - Full test suite: 380 passed.
+## Phase Native BF16 Qwen14 Registration
+- Added bridge-side Qwen 14B dense tensor registration for the native monolithic session.
+- Verified representative real Qwen 14B tensor names exist for layers 0 and 47.
+- Added registration test proving a Qwen-style BF16 dense catalog can populate a monolithic session and run decode.
+- Full test suite: 381 passed.

@@ -133,3 +133,4 @@
 - Replace the synthetic monolithic `write_logits` body with real C-side layer dispatch that calls the resolved component function pointers for norm, attention/KV, dense or MoE FFN, final norm, and lm_head. Tiny Qwen3/Mixtral oracle token identity must pass before production routing is enabled.
 - Replace copied monolithic tensor registration with stable non-copy tensor handles or mapped pointers, and add BF16 dtype support to the monolithic dense path. This is required before local `qwen2.5-14b-instruct` can be routed through monolithic honestly.
 Native BF16 follow-up: wire real Qwen 14B tensor catalog loads into `MonolithicForwardSession.register_tensor` lazily so production can use the no-copy BF16 monolithic decode path.
+Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, then turn on production routing behind `PCKETLM_ENABLE_MONOLITHIC_QWEN14`.

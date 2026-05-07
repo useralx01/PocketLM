@@ -1732,6 +1732,159 @@ def _try_native_dense_decode_bridge(
     )
 
 
+_MONOLITHIC_DENSE_ROLES = {
+    "embed": 0,
+    "input_norm": 1,
+    "post_norm": 2,
+    "q": 3,
+    "k": 4,
+    "v": 5,
+    "o": 6,
+    "gate": 7,
+    "up": 8,
+    "down": 9,
+    "final_norm": 10,
+    "lm_head": 11,
+    "q_bias": 12,
+    "k_bias": 13,
+    "v_bias": 14,
+    "q_norm": 15,
+    "k_norm": 16,
+}
+
+
+def _qwen14_monolithic_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_MONOLITHIC_QWEN14", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_qwen14_dense_bf16_config(model_id: str, config: LayerBridgeModelConfig) -> bool:
+    if model_id != "qwen2.5-14b-instruct":
+        return False
+    return (
+        config.ready
+        and not _is_moe_config(config)
+        and int(config.num_hidden_layers) == 48
+        and int(config.hidden_size) == 5120
+    )
+
+
+def _register_dense_monolithic_session_tensors(
+    *,
+    session: Any,
+    model_id: str,
+    config: LayerBridgeModelConfig,
+    tensor_policy: TensorResidencyPolicy | None = None,
+    layer_count: int | None = None,
+) -> list[str]:
+    """Load dense Qwen tensors once and register borrowed storage with the C session."""
+    effective_layers = int(config.num_hidden_layers if layer_count is None else layer_count)
+    plan: dict[tuple[int, int], str] = {
+        (-1, _MONOLITHIC_DENSE_ROLES["embed"]): "model.embed_tokens.weight",
+        (-1, _MONOLITHIC_DENSE_ROLES["final_norm"]): "model.norm.weight",
+        (-1, _MONOLITHIC_DENSE_ROLES["lm_head"]): "lm_head.weight",
+    }
+    for layer_index in range(effective_layers):
+        prefix = f"model.layers.{layer_index}"
+        required = {
+            _MONOLITHIC_DENSE_ROLES["input_norm"]: f"{prefix}.input_layernorm.weight",
+            _MONOLITHIC_DENSE_ROLES["post_norm"]: f"{prefix}.post_attention_layernorm.weight",
+            _MONOLITHIC_DENSE_ROLES["q"]: f"{prefix}.self_attn.q_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["k"]: f"{prefix}.self_attn.k_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["v"]: f"{prefix}.self_attn.v_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["o"]: f"{prefix}.self_attn.o_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["gate"]: f"{prefix}.mlp.gate_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["up"]: f"{prefix}.mlp.up_proj.weight",
+            _MONOLITHIC_DENSE_ROLES["down"]: f"{prefix}.mlp.down_proj.weight",
+        }
+        for role, tensor_name in required.items():
+            plan[(layer_index, role)] = tensor_name
+        optional = {
+            _MONOLITHIC_DENSE_ROLES["q_bias"]: f"{prefix}.self_attn.q_proj.bias",
+            _MONOLITHIC_DENSE_ROLES["k_bias"]: f"{prefix}.self_attn.k_proj.bias",
+            _MONOLITHIC_DENSE_ROLES["v_bias"]: f"{prefix}.self_attn.v_proj.bias",
+            _MONOLITHIC_DENSE_ROLES["q_norm"]: f"{prefix}.self_attn.q_norm.weight",
+            _MONOLITHIC_DENSE_ROLES["k_norm"]: f"{prefix}.self_attn.k_norm.weight",
+        }
+        for role, tensor_name in optional.items():
+            if _tensor_entry_exists(model_id, tensor_name):
+                plan[(layer_index, role)] = tensor_name
+
+    loaded = load_resident_tensors(
+        model_id,
+        list(dict.fromkeys(plan.values())),
+        dtype=_runtime_math_dtype(),
+        policy=tensor_policy,
+    )
+    blockers: list[str] = []
+    for (layer_idx, role), tensor_name in plan.items():
+        loaded_slice = loaded.get(tensor_name)
+        if loaded_slice is None or not loaded_slice.ready or loaded_slice.tensor is None:
+            blockers.extend([] if loaded_slice is None else loaded_slice.blockers)
+            blockers.append(f"Required monolithic tensor {tensor_name} could not be loaded.")
+            continue
+        session.register_tensor(
+            layer_idx=layer_idx,
+            tensor_role=role,
+            tensor=loaded_slice.tensor,
+        )
+    return blockers
+
+
+def create_qwen14_monolithic_session(
+    model_id: str = "qwen2.5-14b-instruct",
+    *,
+    tensor_policy: TensorResidencyPolicy | None = None,
+    layer_count: int | None = None,
+) -> tuple[Any | None, list[str]]:
+    """Create and fully register the narrow BF16 Qwen 14B monolithic session."""
+    config = load_layer_bridge_config(model_id)
+    blockers = list(config.blockers)
+    if not _is_qwen14_dense_bf16_config(model_id, config):
+        blockers.append("Monolithic Qwen14 session is only enabled for the local dense BF16 Qwen2.5 14B config.")
+        return None, blockers
+    try:
+        from pcketlm.native import MonolithicForwardSession
+    except Exception as exc:
+        blockers.append(f"Native monolithic session is unavailable: {exc}")
+        return None, blockers
+
+    session = MonolithicForwardSession(
+        {
+            "num_hidden_layers": int(layer_count or config.num_hidden_layers),
+            "hidden_size": int(config.hidden_size),
+            "intermediate_size": int(config.intermediate_size),
+            "num_attention_heads": int(config.num_attention_heads),
+            "num_key_value_heads": int(config.num_key_value_heads),
+            "vocab_size": int(config.vocab_size),
+            "max_position_embeddings": int(config.max_position_embeddings),
+            "rms_norm_eps": float(config.rms_norm_eps),
+            "rope_theta": float(config.rope_theta),
+            "torch_dtype": "bfloat16",
+        },
+        model_id,
+    )
+    blockers.extend(
+        _register_dense_monolithic_session_tensors(
+            session=session,
+            model_id=model_id,
+            config=config,
+            tensor_policy=tensor_policy,
+            layer_count=layer_count,
+        )
+    )
+    if blockers:
+        session.close()
+        return None, blockers
+    return session, []
+
+
 def _try_native_dense_prefill_bridge(
     *,
     model_id: str,

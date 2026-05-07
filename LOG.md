@@ -5668,3 +5668,9 @@ Result: 297 passed in 21.83s
 - Local Qwen 14B config sanity: `model_type=qwen2`, `torch_dtype=bfloat16`, `num_hidden_layers=48`, `hidden_size=5120`.
 - Focused tests: `python -m pytest tests\test_native_monolithic_forward.py -q` -> 6 passed.
 - Full tests: `python -m pytest tests\ -q` -> 380 passed.
+## Phase Native BF16 Qwen14 Registration / Evidence
+- Added Qwen 14B dense monolithic registration glue in `layer_bridge.py`.
+- The helper loads/registers borrowed storage for `model.embed_tokens.weight`, `model.norm.weight`, `lm_head.weight`, and all per-layer dense Qwen tensors: input/post norms, q/k/v/o projections, gate/up/down projections, plus optional q/k/v biases and q/k norms when present.
+- Real Qwen 14B catalog sanity checked 27 representative names across layer 0 and layer 47: `missing=[]`.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_monolithic_qwen14_registration_uses_dense_tensor_catalog tests\test_native_monolithic_forward.py -q` -> 7 passed.
+- Full tests: `python -m pytest tests\ -q` -> 381 passed.
