@@ -30,28 +30,28 @@ def _dense_config() -> dict:
     }
 
 
-def _tiny_dense_weights() -> dict[str, torch.Tensor]:
+def _tiny_dense_weights(dtype: torch.dtype = torch.float16) -> dict[str, torch.Tensor]:
     generator = torch.Generator().manual_seed(20260507)
     cfg = _dense_config()
     hidden = cfg["hidden_size"]
     inter = cfg["intermediate_size"]
     vocab = cfg["vocab_size"]
     weights: dict[str, torch.Tensor] = {
-        "embed": torch.randn(vocab, hidden, generator=generator, dtype=torch.float32).mul(0.05).to(torch.float16),
-        "final_norm": torch.ones(hidden, dtype=torch.float16),
-        "lm_head": torch.randn(vocab, hidden, generator=generator, dtype=torch.float32).mul(0.05).to(torch.float16),
+        "embed": torch.randn(vocab, hidden, generator=generator, dtype=torch.float32).mul(0.05).to(dtype),
+        "final_norm": torch.ones(hidden, dtype=dtype),
+        "lm_head": torch.randn(vocab, hidden, generator=generator, dtype=torch.float32).mul(0.05).to(dtype),
     }
     for layer in range(cfg["num_hidden_layers"]):
         prefix = f"layer{layer}"
-        weights[f"{prefix}.input_norm"] = torch.ones(hidden, dtype=torch.float16)
-        weights[f"{prefix}.post_norm"] = torch.ones(hidden, dtype=torch.float16)
-        weights[f"{prefix}.q"] = torch.randn(hidden, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.k"] = torch.randn(hidden // 2, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.v"] = torch.randn(hidden // 2, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.o"] = torch.randn(hidden, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.gate"] = torch.randn(inter, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.up"] = torch.randn(inter, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
-        weights[f"{prefix}.down"] = torch.randn(hidden, inter, generator=generator, dtype=torch.float32).mul(0.04).to(torch.float16)
+        weights[f"{prefix}.input_norm"] = torch.ones(hidden, dtype=dtype)
+        weights[f"{prefix}.post_norm"] = torch.ones(hidden, dtype=dtype)
+        weights[f"{prefix}.q"] = torch.randn(hidden, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.k"] = torch.randn(hidden // 2, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.v"] = torch.randn(hidden // 2, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.o"] = torch.randn(hidden, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.gate"] = torch.randn(inter, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.up"] = torch.randn(inter, hidden, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
+        weights[f"{prefix}.down"] = torch.randn(hidden, inter, generator=generator, dtype=torch.float32).mul(0.04).to(dtype)
     return weights
 
 
@@ -81,7 +81,7 @@ def _register_tiny_dense(session, weights: dict[str, torch.Tensor]) -> None:
 
 def _rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     normalized = hidden.float() * torch.rsqrt(hidden.float().pow(2).mean() + eps)
-    return (normalized * weight.float()).to(torch.float16)
+    return (normalized * weight.float()).to(hidden.dtype)
 
 
 def _tiny_dense_python_sequence(weights: dict[str, torch.Tensor], start_token: int, steps: int) -> list[int]:
@@ -92,7 +92,7 @@ def _tiny_dense_python_sequence(weights: dict[str, torch.Tensor], start_token: i
         layer_count=cfg["num_hidden_layers"],
         max_seq_len=cfg["max_position_embeddings"],
         kv_width=cfg["num_key_value_heads"] * (cfg["hidden_size"] // cfg["num_attention_heads"]),
-        dtype=torch.float16,
+        dtype=weights["embed"].dtype,
     )
     tokens: list[int] = []
     token = start_token
@@ -177,21 +177,24 @@ def test_monolithic_verify_commit_and_rollback_are_stateful() -> None:
         assert session.tentative_length() == 1
 
 
-def test_monolithic_session_owns_registered_weight_storage() -> None:
+def test_monolithic_session_borrows_registered_weight_storage_with_python_keepalive() -> None:
     from pcketlm.native import MonolithicForwardSession
 
     with MonolithicForwardSession(_config(), "synthetic") as session:
         weight = torch.arange(12, dtype=torch.float16).reshape(3, 4)
         session.register_u16_tensor("model.layers.0.self_attn.q_proj.weight", weight)
         session.register_tensor(layer_idx=0, tensor_role=1, tensor=weight)
-        weight.zero_()
+        registered_role_storage = session._tensor_keepalive["role:0:1"]
 
         assert session.tensor_count() == 2
         assert session.tensor_nitems("model.layers.0.self_attn.q_proj.weight") == 12
         assert session.tensor_nitems("0:1") == 12
+        assert session.tensor_data_ptr("0:1") == int(registered_role_storage.data_ptr())
+        assert session._tensor_keepalive
         assert session.tensor_nitems("missing") == -1
         session.clear_tensors()
         assert session.tensor_count() == 0
+        assert not session._tensor_keepalive
 
 
 def test_monolithic_dense_decode_matches_tiny_python_sequence() -> None:
@@ -200,6 +203,25 @@ def test_monolithic_dense_decode_matches_tiny_python_sequence() -> None:
     weights = _tiny_dense_weights()
     expected = _tiny_dense_python_sequence(weights, start_token=3, steps=5)
     with MonolithicForwardSession(_dense_config(), "tiny-dense") as session:
+        _register_tiny_dense(session, weights)
+        token = 3
+        actual: list[int] = []
+        for _ in range(5):
+            logits = session.decode(token)
+            token = _argmax(logits)
+            actual.append(token)
+
+    assert actual == expected
+
+
+def test_monolithic_dense_decode_matches_tiny_bf16_python_sequence() -> None:
+    from pcketlm.native import MonolithicForwardSession
+
+    cfg = dict(_dense_config())
+    cfg["torch_dtype"] = "bfloat16"
+    weights = _tiny_dense_weights(dtype=torch.bfloat16)
+    expected = _tiny_dense_python_sequence(weights, start_token=3, steps=5)
+    with MonolithicForwardSession(cfg, "tiny-dense-bf16") as session:
         _register_tiny_dense(session, weights)
         token = 3
         actual: list[int] = []

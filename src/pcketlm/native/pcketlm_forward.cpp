@@ -17,6 +17,7 @@ using NativePackedGemvFn = int (*)(const uint16_t*, const uint16_t*, uint16_t*, 
 using Q4DequantFn = void (*)(const uint8_t*, const uint16_t*, uint16_t*, int64_t, int64_t);
 using Q4MoeSelectedFn = int (*)(const uint16_t*, const uint8_t**, const uint16_t**, const uint8_t**, const uint16_t**, const uint8_t**, const uint16_t**, const float*, uint16_t*, int64_t, int64_t, int64_t);
 using KvInitFn = void* (*)(int64_t, int64_t, int64_t);
+using KvInitTypedFn = void* (*)(int64_t, int64_t, int64_t, int);
 using KvFreeFn = void (*)(void*);
 using KvCommitFn = int (*)(void*, int64_t);
 using KvRollbackFn = int (*)(void*);
@@ -36,6 +37,7 @@ struct KernelTable {
     Q4DequantFn q4_dequant = nullptr;
     Q4MoeSelectedFn q4_moe_selected = nullptr;
     KvInitFn kv_init = nullptr;
+    KvInitTypedFn kv_init_typed = nullptr;
     KvFreeFn kv_free = nullptr;
     KvCommitFn kv_commit = nullptr;
     KvRollbackFn kv_rollback = nullptr;
@@ -54,13 +56,21 @@ struct ForwardSession {
     int64_t max_seq_len = 0;
     float rms_norm_eps = 1.0e-6f;
     float rope_theta = 10000.0f;
+    int dtype_code = 0; // 0 = fp16 storage, 1 = bf16 storage.
     int64_t layers_executed = 0;
     int64_t prefill_calls = 0;
     int64_t decode_calls = 0;
     int64_t verify_calls = 0;
     std::vector<int64_t> committed_tokens;
     std::vector<int64_t> tentative_tokens;
-    std::unordered_map<std::string, std::vector<uint16_t>> u16_weights;
+    struct TensorRef {
+        const uint16_t* data = nullptr;
+        int64_t count = 0;
+        int64_t rows = 0;
+        int64_t cols = 0;
+        int64_t dtype_code = 0;
+    };
+    std::unordered_map<std::string, TensorRef> u16_weights;
     std::unordered_map<std::string, std::string> tensor_roles;
     KernelTable kernels;
     void* kv_handle = nullptr;
@@ -132,6 +142,7 @@ static void load_kernel_table(KernelTable& kernels) {
     kernels.q4_dequant = reinterpret_cast<Q4DequantFn>(load_symbol(kernels.q4, "q4_dequant_to_fp16", error));
     kernels.q4_moe_selected = reinterpret_cast<Q4MoeSelectedFn>(load_symbol(kernels.q4, "q4_moe_selected_forward_u16", error));
     kernels.kv_init = reinterpret_cast<KvInitFn>(load_symbol(kernels.kv, "kv_prefill_init", error));
+    kernels.kv_init_typed = reinterpret_cast<KvInitTypedFn>(load_symbol(kernels.kv, "kv_prefill_init_typed", error));
     kernels.kv_free = reinterpret_cast<KvFreeFn>(load_symbol(kernels.kv, "kv_free", error));
     kernels.kv_commit = reinterpret_cast<KvCommitFn>(load_symbol(kernels.kv, "kv_commit", error));
     kernels.kv_rollback = reinterpret_cast<KvRollbackFn>(load_symbol(kernels.kv, "kv_rollback", error));
@@ -208,6 +219,35 @@ static inline uint16_t fp32_to_fp16(float value) {
     return static_cast<uint16_t>(_mm_cvtsi128_si32(half));
 }
 
+static inline float fp16_to_fp32(uint16_t value) {
+    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
+    const __m128 full = _mm_cvtph_ps(half);
+    return _mm_cvtss_f32(full);
+}
+
+static inline float bf16_to_fp32(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(float));
+    return out;
+}
+
+static inline uint16_t fp32_to_bf16(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(uint32_t));
+    const uint32_t lsb = (bits >> 16) & 1u;
+    const uint32_t rounding_bias = 0x7fffu + lsb;
+    return static_cast<uint16_t>((bits + rounding_bias) >> 16);
+}
+
+static inline float read_u16(uint16_t value, int dtype_code) {
+    return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
+}
+
+static inline uint16_t write_storage_u16(float value, int dtype_code) {
+    return dtype_code == 1 ? fp32_to_bf16(value) : fp32_to_fp16(value);
+}
+
 static int64_t current_length(const ForwardSession* session) {
     return static_cast<int64_t>(session->committed_tokens.size() + session->tentative_tokens.size());
 }
@@ -260,24 +300,18 @@ enum TensorRole : int64_t {
 
 static const uint16_t* optional_tensor(ForwardSession* session, int64_t layer_idx, int64_t role) {
     const auto found = session->u16_weights.find(tensor_key(layer_idx, role));
-    if (found == session->u16_weights.end() || found->second.empty()) {
+    if (found == session->u16_weights.end() || found->second.data == nullptr || found->second.count <= 0) {
         return nullptr;
     }
-    return found->second.data();
+    return found->second.data;
 }
 
 static const uint16_t* required_tensor(ForwardSession* session, int64_t layer_idx, int64_t role) {
     const auto found = session->u16_weights.find(tensor_key(layer_idx, role));
-    if (found == session->u16_weights.end() || found->second.empty()) {
+    if (found == session->u16_weights.end() || found->second.data == nullptr || found->second.count <= 0) {
         return nullptr;
     }
-    return found->second.data();
-}
-
-static inline float fp16_to_fp32(uint16_t value) {
-    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
-    const __m128 full = _mm_cvtph_ps(half);
-    return _mm_cvtss_f32(full);
+    return found->second.data;
 }
 
 static void rms_norm_to_u16(
@@ -285,16 +319,17 @@ static void rms_norm_to_u16(
     const uint16_t* weight,
     uint16_t* out,
     int64_t hidden_size,
-    float eps
+    float eps,
+    int dtype_code
 ) {
     double sum_sq = 0.0;
     for (int64_t i = 0; i < hidden_size; ++i) {
-        const float value = fp16_to_fp32(hidden[i]);
+        const float value = read_u16(hidden[i], dtype_code);
         sum_sq += static_cast<double>(value) * static_cast<double>(value);
     }
     const float scale = 1.0f / std::sqrt(static_cast<float>(sum_sq / static_cast<double>(hidden_size)) + eps);
     for (int64_t i = 0; i < hidden_size; ++i) {
-        out[i] = fp32_to_fp16(fp16_to_fp32(hidden[i]) * scale * fp16_to_fp32(weight[i]));
+        out[i] = write_storage_u16(read_u16(hidden[i], dtype_code) * scale * read_u16(weight[i], dtype_code), dtype_code);
     }
 }
 
@@ -331,7 +366,9 @@ static int forward_dense_decode_registered(
     if (session->kv_handle == nullptr) {
         const int64_t head_dim = session->hidden_size / std::max<int64_t>(1, session->num_attention_heads);
         const int64_t kv_width = session->num_key_value_heads * head_dim;
-        session->kv_handle = session->kernels.kv_init(session->layer_count, session->max_seq_len, kv_width);
+        session->kv_handle = session->kernels.kv_init_typed != nullptr
+            ? session->kernels.kv_init_typed(session->layer_count, session->max_seq_len, kv_width, session->dtype_code)
+            : session->kernels.kv_init(session->layer_count, session->max_seq_len, kv_width);
         if (session->kv_handle == nullptr) {
             return 12;
         }
@@ -387,13 +424,14 @@ static int forward_dense_decode_registered(
         return 20 + commit_code;
     }
     std::vector<uint16_t> normed(static_cast<size_t>(session->hidden_size));
-    rms_norm_to_u16(hidden.data(), final_norm, normed.data(), session->hidden_size, session->rms_norm_eps);
+    rms_norm_to_u16(hidden.data(), final_norm, normed.data(), session->hidden_size, session->rms_norm_eps, session->dtype_code);
 
     for (int64_t row = 0; row < session->vocab_size; ++row) {
         const uint16_t* weight_row = lm_head + static_cast<size_t>(row) * static_cast<size_t>(session->hidden_size);
         float acc = 0.0f;
         for (int64_t col = 0; col < session->hidden_size; ++col) {
-            acc += fp16_to_fp32(normed[static_cast<size_t>(col)]) * fp16_to_fp32(weight_row[static_cast<size_t>(col)]);
+            acc += read_u16(normed[static_cast<size_t>(col)], session->dtype_code) *
+                read_u16(weight_row[static_cast<size_t>(col)], session->dtype_code);
         }
         output_logits_buffer[row] = fp32_to_fp16(acc);
     }
@@ -424,6 +462,15 @@ extern "C" __declspec(dllexport) void* pcketlm_session_create(
     session->max_seq_len = std::max<int64_t>(1, parse_json_int(model_config_json, "max_position_embeddings", 4096));
     session->rms_norm_eps = parse_json_float(model_config_json, "rms_norm_eps", 1.0e-6f);
     session->rope_theta = parse_json_float(model_config_json, "rope_theta", 10000.0f);
+    const std::string config_text = model_config_json == nullptr ? "" : std::string(model_config_json);
+    if (
+        config_text.find("\"torch_dtype\":\"bfloat16\"") != std::string::npos ||
+        config_text.find("\"torch_dtype\": \"bfloat16\"") != std::string::npos ||
+        config_text.find("\"dtype\":\"bfloat16\"") != std::string::npos ||
+        config_text.find("\"dtype\": \"bfloat16\"") != std::string::npos
+    ) {
+        session->dtype_code = 1;
+    }
     session->layers_executed = 0;
     load_kernel_table(session->kernels);
     return session;
@@ -537,11 +584,13 @@ extern "C" __declspec(dllexport) int pcketlm_session_register_u16_tensor(
     if (session == nullptr || tensor_name == nullptr || tensor_data == nullptr || value_count < 0) {
         return 1;
     }
-    std::vector<uint16_t> copied(static_cast<size_t>(value_count));
-    if (value_count > 0) {
-        std::memcpy(copied.data(), tensor_data, static_cast<size_t>(value_count) * sizeof(uint16_t));
-    }
-    session->u16_weights[std::string(tensor_name)] = std::move(copied);
+    session->u16_weights[std::string(tensor_name)] = ForwardSession::TensorRef{
+        tensor_data,
+        value_count,
+        value_count,
+        1,
+        session->dtype_code,
+    };
     return 0;
 }
 
@@ -558,13 +607,18 @@ extern "C" __declspec(dllexport) int pcketlm_session_register_tensor(
     if (session == nullptr || tensor_data == nullptr || n_rows < 0 || n_cols < 0) {
         return 1;
     }
-    const int64_t value_count = n_rows * n_cols;
-    std::vector<uint16_t> copied(static_cast<size_t>(value_count));
-    if (value_count > 0) {
-        std::memcpy(copied.data(), tensor_data, static_cast<size_t>(value_count) * sizeof(uint16_t));
+    if (dtype_code == 0 || dtype_code == 1) {
+        session->dtype_code = static_cast<int>(dtype_code);
     }
+    const int64_t value_count = n_rows * n_cols;
     const std::string key = std::to_string(layer_idx) + ":" + std::to_string(tensor_role);
-    session->u16_weights[key] = std::move(copied);
+    session->u16_weights[key] = ForwardSession::TensorRef{
+        tensor_data,
+        value_count,
+        n_rows,
+        n_cols,
+        dtype_code,
+    };
     session->tensor_roles[key] = std::to_string(n_rows) + "x" + std::to_string(n_cols) + ":dtype=" + std::to_string(dtype_code);
     return 0;
 }
@@ -589,7 +643,22 @@ extern "C" __declspec(dllexport) int64_t pcketlm_session_tensor_nitems(
     if (found == session->u16_weights.end()) {
         return -1;
     }
-    return static_cast<int64_t>(found->second.size());
+    return static_cast<int64_t>(found->second.count);
+}
+
+extern "C" __declspec(dllexport) uintptr_t pcketlm_session_tensor_data_ptr(
+    void* handle,
+    const char* tensor_name
+) {
+    ForwardSession* session = reinterpret_cast<ForwardSession*>(handle);
+    if (session == nullptr || tensor_name == nullptr) {
+        return 0;
+    }
+    const auto found = session->u16_weights.find(std::string(tensor_name));
+    if (found == session->u16_weights.end() || found->second.data == nullptr) {
+        return 0;
+    }
+    return reinterpret_cast<uintptr_t>(found->second.data);
 }
 
 extern "C" __declspec(dllexport) int pcketlm_forward_prefill(

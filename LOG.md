@@ -5655,3 +5655,16 @@ Result: 297 passed in 21.83s
 - GATE A: PASS for the tiny dense fp16 path. Token sequence matched for 5 greedy steps in `test_monolithic_dense_decode_matches_tiny_python_sequence`.
 - GATE B: FAIL / not measurable. Qwen 14B production `--slice=full` did not reach an `after` row. Enabled attempt `state/phase-monolithic-narrow-qwen14-enabled.jsonl` exited after `before` with `3857 MB` free RAM. Disabled attempts `state/phase-monolithic-narrow-qwen14-disabled.jsonl` and `state/phase-monolithic-narrow-qwen14-disabled-smoke1-afterrestore.jsonl` exited with native code `0xC0000005` after `before`, even with `PCKETLM_DISABLE_MONOLITHIC=1`.
 - GATE C: FAIL. No production Qwen 14B row reached monolithic decode, so there is no valid `monolithic_calls=max_new_tokens` proof.
+## Phase Native BF16 No-Copy / Setup
+- Branch: `phase-native-bf16-nocopy`.
+- Goal: make monolithic dense decode use borrowed tensor storage and BF16-aware reads so the local BF16 Qwen 14B path is no longer blocked by fp16-only assumptions or full-model tensor copies.
+
+## Phase Native BF16 No-Copy / Evidence
+- Native `pcketlm_forward.dll` now stores tensor refs as borrowed `uint16_t*` pointers with shape/dtype metadata instead of copying the tensor payload into C-owned vectors.
+- Python `MonolithicForwardSession` now keeps registered tensors alive in `_tensor_keepalive`, so borrowed C pointers stay valid for the session lifetime.
+- Native session detects `torch_dtype=bfloat16` from model config and uses `kv_prefill_init_typed(..., dtype_code=1)` when available.
+- Tiny dense fp16 sequence: Python `[15, 16, 17, 9, 2]`, native `[15, 16, 17, 9, 2]`.
+- Tiny dense BF16 sequence: Python `[15, 16, 17, 9, 2]`, native `[15, 16, 17, 9, 2]`.
+- Local Qwen 14B config sanity: `model_type=qwen2`, `torch_dtype=bfloat16`, `num_hidden_layers=48`, `hidden_size=5120`.
+- Focused tests: `python -m pytest tests\test_native_monolithic_forward.py -q` -> 6 passed.
+- Full tests: `python -m pytest tests\ -q` -> 380 passed.

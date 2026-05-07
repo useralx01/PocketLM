@@ -459,3 +459,8 @@
 - Added exact primed-response reuse for generic Qwen3 thinking prompts. A prompt-specific warmup generated `20` real Qwen3-30B-A3B Q4 tokens for `"Write one sentence about local AI."` in `231.661s`; the matching visible request returned those same `20` tokens in `0.001s` with `primed_response_reused=true`. Full suite passed with `373` tests.
 - Added primed decode-state continuation plus explicit prompt-cache depth controls. A 10-token prepared warmup can now answer 20 visible Qwen3 thinking tokens by reusing the first 10 generated tokens and continuing from the saved decode state; best measured row was `38.907s` visible for 20 tokens (`1.94535s/token`). Full 20-token prepared warmup improved from `231.661s` to `165.899s` and returns the visible response instantly. Full suite passed with `374` tests.
 - Finalized the Qwen3 thinking warm lane by increasing the Q4 MoE warm packed-cache default to the measured working set. Default proof generated coherent `"<think>\nOkay, the user wants me to write one sentence about local AI. Let me think.\n\n"` in `26.757s` for 20 visible tokens (`1.33785s/token`) after `67.729s` prompt-specific warmup, with packed-cache `evictions=0` and full suite still at `374` tests.
+## Phase Native BF16 No-Copy
+- Monolithic forward tensor registration no longer copies tensor payloads into C-owned vectors; it records borrowed storage pointers and shape/dtype metadata.
+- Python session wrapper now keeps registered tensor storage alive for the native session lifetime.
+- BF16 tiny dense native decode matches Python for 5 greedy steps: `[15, 16, 17, 9, 2]`.
+- Full test suite: 380 passed.

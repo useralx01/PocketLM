@@ -405,6 +405,8 @@ def _load_pcketlm_forward_lib() -> ctypes.CDLL | None:
         lib.pcketlm_session_tensor_count.restype = ctypes.c_longlong
         lib.pcketlm_session_tensor_nitems.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         lib.pcketlm_session_tensor_nitems.restype = ctypes.c_longlong
+        lib.pcketlm_session_tensor_data_ptr.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        lib.pcketlm_session_tensor_data_ptr.restype = ctypes.c_ulonglong
         lib.pcketlm_forward_prefill.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -489,6 +491,7 @@ class MonolithicForwardSession:
         self._handle = ctypes.c_void_p(handle)
         self.config = config
         self.vocab_size = int(config.get("vocab_size", 0) or 0)
+        self._tensor_keepalive: dict[str, torch.Tensor] = {}
         if self.vocab_size <= 0:
             self.close()
             raise ValueError("model_config must include a positive vocab_size")
@@ -528,11 +531,13 @@ class MonolithicForwardSession:
         code = self._lib.pcketlm_session_clear_tensors(self._handle)
         if code != 0:
             raise RuntimeError(f"pcketlm_session_clear_tensors failed with code {code}")
+        self._tensor_keepalive.clear()
 
     def register_u16_tensor(self, name: str, tensor: torch.Tensor) -> None:
         if tensor.dtype not in {torch.float16, torch.bfloat16, torch.uint16}:
             raise TypeError("register_u16_tensor requires float16, bfloat16, or uint16 storage")
         cpu = tensor.detach().cpu().contiguous().view(torch.uint16).reshape(-1)
+        self._tensor_keepalive[f"name:{name}"] = cpu
         code = self._lib.pcketlm_session_register_u16_tensor(
             self._handle,
             ctypes.c_char_p(str(name).encode("utf-8")),
@@ -562,6 +567,7 @@ class MonolithicForwardSession:
         if dtype_code is None:
             dtype_code = 1 if tensor.dtype == torch.bfloat16 else 0
         storage = cpu.view(torch.uint16).reshape(-1)
+        self._tensor_keepalive[f"role:{int(layer_idx)}:{int(tensor_role)}"] = storage
         code = self._lib.pcketlm_session_register_tensor(
             self._handle,
             ctypes.c_longlong(int(layer_idx)),
@@ -580,6 +586,14 @@ class MonolithicForwardSession:
     def tensor_nitems(self, name: str) -> int:
         return int(
             self._lib.pcketlm_session_tensor_nitems(
+                self._handle,
+                ctypes.c_char_p(str(name).encode("utf-8")),
+            )
+        )
+
+    def tensor_data_ptr(self, name: str) -> int:
+        return int(
+            self._lib.pcketlm_session_tensor_data_ptr(
                 self._handle,
                 ctypes.c_char_p(str(name).encode("utf-8")),
             )
