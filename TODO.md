@@ -134,3 +134,4 @@
 - Replace copied monolithic tensor registration with stable non-copy tensor handles or mapped pointers, and add BF16 dtype support to the monolithic dense path. This is required before local `qwen2.5-14b-instruct` can be routed through monolithic honestly.
 Native BF16 follow-up: wire real Qwen 14B tensor catalog loads into `MonolithicForwardSession.register_tensor` lazily so production can use the no-copy BF16 monolithic decode path.
 Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, then turn on production routing behind `PCKETLM_ENABLE_MONOLITHIC_QWEN14`.
+- Before Kimi/DeepSeek download: reduce BF16 MoE full-stack tensor-load churn and RAM pressure. Mixtral now proves correctness, but its full one-token row is `307.91s` with only `40 MB` free RAM at the worst point.

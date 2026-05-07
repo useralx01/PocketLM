@@ -268,6 +268,48 @@ def test_runtime_diagnose_cli_full_repeat_runs_in_one_process(monkeypatch, capsy
     assert calls["count"] == 3
 
 
+def test_runtime_diagnose_cli_top_k_experts_repeat_runs_special_callback(monkeypatch, capsys, tmp_path) -> None:
+    gb = 1024**3
+    calls = {"count": 0}
+
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "_memory_snapshot",
+        lambda: SimpleNamespace(total_bytes=16 * gb, free_bytes=8 * gb),
+    )
+    monkeypatch.setattr(runtime_diagnose_cli, "_working_set_mb", lambda: 123)
+    monkeypatch.setattr(runtime_diagnose_cli, "original_model_root", lambda model_id: tmp_path)
+    monkeypatch.setattr(
+        runtime_diagnose_cli,
+        "expert_residency_snapshot",
+        lambda: {"expert_residency": {"expert_hits": calls["count"]}},
+    )
+
+    def fake_top_k(model_id: str, slice_name: str, started_at: float) -> dict:
+        calls["count"] += 1
+        return {
+            "ready": True,
+            "blockers": [],
+            "selected_experts": [1, 5],
+            "fp16_packed_cache_stats": {"hits": calls["count"] - 1, "misses": 1},
+        }
+
+    monkeypatch.setattr(runtime_diagnose_cli, "_moe_top_k_experts", fake_top_k)
+
+    exit_code = runtime_diagnose_cli.main(
+        ["--model", "mixtral-test", "--slice", "top-k-experts", "--repeat", "2"]
+    )
+
+    assert exit_code == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    after_lines = [line for line in lines if line["event"] == "after"]
+    assert len(after_lines) == 2
+    assert calls["count"] == 2
+    assert after_lines[0]["result"]["selected_experts"] == [1, 5]
+    assert after_lines[1]["result"]["fp16_packed_cache_stats"]["hits"] == 1
+    assert lines[-1]["ready"] is True
+
+
 def test_runtime_diagnose_cli_compare_with_reference_reports_token_overlap(monkeypatch, capsys, tmp_path) -> None:
     gb = 1024**3
     fixture_dir = tmp_path / "fixtures" / "qwen_moe_test_moe_reference"

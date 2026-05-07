@@ -469,3 +469,10 @@
 - Verified representative real Qwen 14B tensor names exist for layers 0 and 47.
 - Added registration test proving a Qwen-style BF16 dense catalog can populate a monolithic session and run decode.
 - Full test suite: 381 passed.
+
+## Phase BF16 MoE Proof
+- Proved the BF16 MoE path on the local real Mixtral-8x7B-Instruct model before attempting Kimi/DeepSeek.
+- Layer-0 top-k expert proof: repeat run selected experts `[1, 5]`, reused the six selected expert tensors, and improved from `2.852s` to `0.345s`.
+- Full 32-layer MoE proof: `all-layers-moe` executed `32/32` layers with BF16 output and no blockers.
+- Fixed the Mixtral full decode crash by enabling a BF16 MoE full lm-head cache; full one-token decode now returns `"<s> The capital of France is a"` with anti-cheat passing.
+- Full test suite: 388 passed.

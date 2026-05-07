@@ -5682,3 +5682,20 @@ Result: 297 passed in 21.83s
 - Step 3: BF16 MoE residency policy now samples free RAM even when the generic memory guard is off, allowing large MoE paging budgets to scale from machine RAM instead of staying at the small default.
 - Focused tests: `python -m pytest tests\test_native_monolithic_forward.py tests\test_runtime_layer_bridge.py::test_prompt_decode_loop_routes_qwen14_bf16_through_monolithic tests\test_runtime_layer_bridge.py::test_bf16_moe_decode_enables_packed_expert_cache_by_default tests\test_tensor_residency.py::test_bf16_moe_policy_samples_free_ram_for_large_model_paging tests\test_tensor_residency.py::test_q4_moe_default_uses_front_layer_attention_cache_only -q` -> 11 passed.
 - Full tests: `python -m pytest tests\ -q` -> 385 passed.
+
+## Phase BF16 MoE Proof / Setup
+- Branch: `phase-bf16-moe-proof`.
+- Goal: prove the next Kimi/DeepSeek foundation on a smaller real BF16 MoE model before attempting huge model downloads.
+
+## Phase BF16 MoE Proof / Mixtral Evidence
+- Local real MoE chosen: `mixtral-8x7b-instruct-v01`, `torch_dtype=bfloat16`, `model_type=mixtral`, `32` layers, `8` experts, top-2 routing.
+- Initial full Mixtral `--slice=full --max-new-tokens 2` failed after the `before` row with low free RAM around `4.4 GB`; no Python traceback was emitted.
+- `load-config` passed and confirmed `hidden_size=4096`, `num_hidden_layers=32`, `num_experts=8`, `num_experts_per_tok=2`, `source_dtype=bfloat16`.
+- `router-only` passed on layer 0 and selected experts `[1, 5]`.
+- `top-k-experts --repeat 2` passed after fixing the diagnostic repeat path. Run 1 took `2.852s`, selected `[1, 5]`, loaded `6` expert tensors, output dtype `torch.bfloat16`, resident expert bytes `704643072`. Run 2 took `0.345s`; expert hits rose to `6`, misses stayed at `6`, and expert hit rate reached `0.5`.
+- `all-layers-moe` passed across all `32/32` Mixtral layers with BF16 output shape `[1, 1, 4096]`. Layer-stack time was `46.274s`; `op_load_tensors=37.6622s`, `op_mlp=7.98s`; free RAM dropped from `4782 MB` to `1313 MB`.
+- Full Mixtral crash localized with `python -X faulthandler`: Windows access violation in `run_decode_tail -> stream_lm_head -> lm_head_slice[start:end].to(...)`.
+- Added BF16 MoE full lm-head cache so MoE fp16/BF16 paths load `lm_head.weight` once instead of repeatedly slicing safetensors storage.
+- Full Mixtral `--slice=full --max-new-tokens 1 --prompt "The capital of France is" --source fp16` now passes: generated text `"a"`, full text `"<s> The capital of France is a"`, `32/32` layers, anti-cheat true. Runtime was `307.91s`, with `prefill_stack=303.3945s`, `op_load_tensors=229.8928s`, and peak working set `7233 MB`.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_run_decode_tail_caches_full_bf16_moe_lm_head_by_default tests\test_runtime_layer_bridge.py::test_run_decode_tail_full_bf16_moe_lm_head_cache_kill_switch tests\test_runtime_layer_bridge.py::test_run_decode_tail_can_cache_full_q4_moe_lm_head tests\test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_top_k_experts_repeat_runs_special_callback -q` -> 4 passed.
+- Full tests: `python -m pytest tests\ -q` -> 388 passed.

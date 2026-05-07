@@ -323,3 +323,9 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: two separate blockers remain. First, local Qwen 14B is BF16 while the narrow path is fp16-only. Second, the current monolithic registration stores copied tensors; production Qwen 14B needs stable non-copy tensor pointers or mapped handles before it can be routed without duplicating tens of GB into RAM.
 - Fix state: Path 2 reference study confirmed the layer math order and reinforced stable KV/tensor ownership as the next required architecture change. Do not claim production monolithic speed until a non-copy BF16-capable registration path exists and the Qwen 14B disabled baseline reaches an `after` row again.
 
+## Phase BF16 MoE Proof / Mixtral full decode crash
+- Symptom: Mixtral `--slice=full` exited after the `before` row with no Python traceback.
+- Root cause: rerunning with `python -X faulthandler` showed a Windows access violation in `torch.storage.__getitem__` while `run_decode_tail` streamed `lm_head.weight` via `safe_open(...).get_slice(...)[start:end]`.
+- Fix: added a BF16 MoE full lm-head cache path so MoE fp16/BF16 decode tail loads `lm_head.weight` once through the normal resident tensor loader and computes top-k from the resident tensor. The Q4 MoE cache behavior remains intact, and a kill switch is available as `PCKETLM_DISABLE_BF16_MOE_LM_HEAD_FULL_CACHE=1`.
+- Result: Mixtral full one-token decode now completes with coherent text `"<s> The capital of France is a"` and `32/32` layers executed, but it remains too slow and memory-heavy for Kimi/DeepSeek-scale downloads.
+

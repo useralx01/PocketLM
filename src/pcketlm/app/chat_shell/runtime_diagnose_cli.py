@@ -363,6 +363,7 @@ def _moe_top_k_experts(model_id: str, slice_name: str, started_at: float) -> dic
         "touched_experts": touched,
         "output_shape": [int(value) for value in output.shape],
         "output_dtype": str(output.dtype),
+        "fp16_packed_cache_stats": fp16_packed_cache_stats().to_dict(),
         **expert_residency_snapshot(),
     }
 
@@ -1169,7 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
             result.pop("decode_state", None)
         elif slice_name == "decode-step-2":
             result = _second_decode_step_checkpoint(model_id, slice_name, started_at)
-        elif slice_name == "router-only":
+        elif slice_name == "router-only" and repeat == 1:
             result = _run_checkpoint(
                 model_id=model_id,
                 slice_name=slice_name,
@@ -1177,7 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
                 started_at=started_at,
                 callback=lambda: _moe_router_only(model_id, slice_name, started_at),
             )
-        elif slice_name == "one-expert":
+        elif slice_name == "one-expert" and repeat == 1:
             result = _run_checkpoint(
                 model_id=model_id,
                 slice_name=slice_name,
@@ -1185,7 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
                 started_at=started_at,
                 callback=lambda: _moe_one_expert(model_id, slice_name, started_at),
             )
-        elif slice_name == "top-k-experts":
+        elif slice_name == "top-k-experts" and repeat == 1:
             result = _run_checkpoint(
                 model_id=model_id,
                 slice_name=slice_name,
@@ -1267,9 +1268,16 @@ def main(argv: list[str] | None = None) -> int:
         elif repeat > 1:
             repeated: list[dict[str, Any]] = []
             for run_index in range(1, repeat + 1):
-                selected_callback = (
-                    (lambda _model_id: _full_forward(_model_id, max_new_tokens, args.prompt)) if slice_name == "full" else callback
-                )
+                if slice_name == "full":
+                    selected_callback = lambda _model_id: _full_forward(_model_id, max_new_tokens, args.prompt)
+                elif slice_name == "router-only":
+                    selected_callback = lambda _model_id: _moe_router_only(_model_id, slice_name, started_at)
+                elif slice_name == "top-k-experts":
+                    selected_callback = lambda _model_id: _moe_top_k_experts(_model_id, slice_name, started_at)
+                elif slice_name == "one-expert":
+                    selected_callback = lambda _model_id: _moe_one_expert(_model_id, slice_name, started_at)
+                else:
+                    selected_callback = callback
                 run_result = _run_checkpoint(
                     model_id=model_id,
                     slice_name=slice_name,

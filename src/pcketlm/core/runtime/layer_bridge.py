@@ -1198,6 +1198,32 @@ def _q4_moe_lm_head_full_cache_enabled(config: LayerBridgeModelConfig) -> bool:
     return False
 
 
+def _bf16_moe_lm_head_full_cache_enabled(config: LayerBridgeModelConfig) -> bool:
+    if os.environ.get("PCKETLM_DISABLE_BF16_MOE_LM_HEAD_FULL_CACHE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    if not _is_moe_config(config):
+        return False
+    tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+    if tensor_source == "q4":
+        return False
+    explicit = os.environ.get("PCKETLM_ENABLE_BF16_MOE_LM_HEAD_FULL_CACHE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    source_dtype = str(config.source_dtype).strip().lower()
+    return source_dtype in {"bfloat16", "bf16", "float16", "fp16"}
+
+
+def _moe_lm_head_full_cache_enabled(config: LayerBridgeModelConfig) -> bool:
+    return _q4_moe_lm_head_full_cache_enabled(config) or _bf16_moe_lm_head_full_cache_enabled(config)
+
+
 def _clear_lm_head_full_cache() -> None:
     _lm_head_full_cache.clear()
 
@@ -3622,7 +3648,7 @@ def run_decode_tail(
         except Exception:
             native_lm_head_topk = None
 
-    if _q4_moe_lm_head_full_cache_enabled(config) and native_lm_head_topk is None:
+    if _moe_lm_head_full_cache_enabled(config) and native_lm_head_topk is None:
         lm_head_weight, lm_head_cache_blockers, _cache_hit = _load_lm_head_full_cached(model_id, dtype=math_dtype)
         if lm_head_weight is not None:
             logits_matrix = F.linear(hidden_vector, lm_head_weight)
