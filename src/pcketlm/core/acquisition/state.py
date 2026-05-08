@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from pcketlm.core.model_import.download_state import estimate_download_state
+from pcketlm.core.model_import.q4_plan import plan_model_dir_to_q4
 
 
 def _to_gb(value: int | None) -> float | None:
@@ -44,6 +46,18 @@ def _build_next_step(status: str) -> str:
     return "The source is ready, so the next step is import and runtime readiness validation."
 
 
+def _build_compact_q4_plan(model_dir: Path, status: str) -> dict | None:
+    if status != "ready":
+        return None
+    index_path = model_dir / "model.safetensors.index.json"
+    if not index_path.exists():
+        return None
+    try:
+        return plan_model_dir_to_q4(model_dir)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 @dataclass(slots=True)
 class AcquisitionSnapshot:
     """Product-facing acquisition summary for one source model."""
@@ -61,6 +75,7 @@ class AcquisitionSnapshot:
     missing_core_files: list[str]
     plain_english_summary: str
     recommended_next_step: str
+    compact_q4_plan: dict | None = None
 
     def to_dict(self) -> dict:
         """Serialize the acquisition snapshot."""
@@ -78,12 +93,20 @@ class AcquisitionSnapshot:
             "missing_core_files": list(self.missing_core_files),
             "plain_english_summary": self.plain_english_summary,
             "recommended_next_step": self.recommended_next_step,
+            "compact_q4_plan": self.compact_q4_plan,
         }
 
 
 def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
     """Build a richer user-facing acquisition snapshot for a source model folder."""
     state = estimate_download_state(model_dir)
+    compact_q4_plan = _build_compact_q4_plan(model_dir, state.status)
+    recommended_next_step = _build_next_step(state.status)
+    if compact_q4_plan and compact_q4_plan.get("ready_for_conversion"):
+        q4_gb = _to_gb(int(compact_q4_plan.get("estimated_total_q4_bytes", 0))) or 0.0
+        recommended_next_step = (
+            f"The source is complete. Build the compact Q4 artifact first; estimated output is about {q4_gb} GB."
+        )
     return AcquisitionSnapshot(
         model_dir=model_dir,
         status=state.status,
@@ -101,5 +124,6 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
             state.progress_pct,
             state.missing_core_files,
         ),
-        recommended_next_step=_build_next_step(state.status),
+        recommended_next_step=recommended_next_step,
+        compact_q4_plan=compact_q4_plan,
     )

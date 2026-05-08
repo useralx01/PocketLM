@@ -492,6 +492,7 @@
 ## Phase Huge MoE Compact Readiness
 - Added a no-payload-read Q4 planning mode to `tools\quantize_to_q4.py`.
 - The planner estimates compact artifact size, expert vs non-expert bytes, compression ratio, missing shards, and disk headroom from safetensors headers only.
+- Acquisition snapshots now expose the same compact Q4 plan for complete safetensors sources and recommend compact conversion before runtime validation.
 - Verified on local real MoE models: Mixtral plans to about `23.37 GB` Q4 from `93.41 GB` source; Qwen3-30B-A3B plans to about `15.31 GB` Q4 from `61.06 GB` source.
 - Added regression coverage for dry-run planning, expert/non-expert byte accounting, and missing-shard blocking.
-- Full test suite: 394 passed.
+- Full test suite: 395 passed.
