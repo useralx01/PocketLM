@@ -476,3 +476,9 @@
 - Full 32-layer MoE proof: `all-layers-moe` executed `32/32` layers with BF16 output and no blockers.
 - Fixed the Mixtral full decode crash by enabling a BF16 MoE full lm-head cache; full one-token decode now returns `"<s> The capital of France is a"` with anti-cheat passing.
 - Full test suite: 388 passed.
+
+## Phase BF16 MoE Load Reuse
+- Added automatic low-RAM chunked BF16 MoE prompt prefill with KV carried between chunks.
+- Real Mixtral BF16 full one-token row improved from `307.91s` to `268.187s` and avoided the near-crash RAM floor: free RAM after the row improved from `40 MB` to `2153 MB`.
+- Rejected chunk size `2` as a default because it was slower and left only `384 MB` free.
+- Full test suite: 390 passed.

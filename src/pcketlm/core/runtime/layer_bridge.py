@@ -1366,6 +1366,46 @@ def _recommended_prompt_layer_count(
     return config.num_hidden_layers
 
 
+def _bf16_moe_prefill_chunk_size(
+    model_id: str,
+    config: LayerBridgeModelConfig,
+    prompt_token_count: int,
+) -> int:
+    """Return a safe prompt-prefill chunk size for fp16/BF16 MoE models."""
+    if prompt_token_count <= 1:
+        return 0
+    if os.environ.get("PCKETLM_DISABLE_BF16_MOE_CHUNKED_PREFILL", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return 0
+    tensor_source = os.environ.get("PCKETLM_TENSOR_SOURCE", "auto").strip().lower()
+    if tensor_source == "q4" or not _is_moe_config(config):
+        return 0
+    source_dtype = str(config.source_dtype).strip().lower()
+    if source_dtype not in {"bfloat16", "bf16", "float16", "fp16"}:
+        return 0
+    explicit = os.environ.get("PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS", "").strip().lower()
+    if explicit and explicit != "auto":
+        try:
+            return max(0, min(prompt_token_count, int(explicit)))
+        except ValueError:
+            return 0
+    policy = TensorResidencyPolicy.from_environment(model_id)
+    free_memory_bytes = policy.free_memory_bytes
+    if free_memory_bytes is None:
+        return 0
+    try:
+        threshold_mb = max(0, int(os.environ.get("PCKETLM_BF16_MOE_CHUNKED_PREFILL_FREE_MB", "8192") or "8192"))
+    except ValueError:
+        threshold_mb = 8192
+    if free_memory_bytes <= threshold_mb * 1024 * 1024:
+        return 1
+    return 0
+
+
 def initialize_kv_decode_state(model_id: str, seed_token_id: int) -> KVDecodeState:
     """Create the first explicit decode state for the K/V-aware runtime path."""
     blockers: list[str] = []
@@ -3521,6 +3561,102 @@ def run_layer_bridge_stack(
     )
 
 
+@torch.inference_mode()
+def _run_chunked_prompt_prefill_stack(
+    model_id: str,
+    *,
+    start_layer: int,
+    layer_count: int,
+    input_hidden: torch.Tensor,
+    chunk_tokens: int,
+    should_cancel: Callable[[], bool] | None = None,
+    collect_metrics: bool = False,
+) -> LayerBridgeStackResult:
+    """Prefill a prompt in small chunks to cap BF16 MoE expert working set."""
+    total_started = time.perf_counter()
+    if input_hidden.ndim != 3 or input_hidden.shape[1] <= 0:
+        return LayerBridgeStackResult(
+            model_id=model_id,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            input_mode="provided",
+            input_shape=[int(value) for value in input_hidden.shape] if input_hidden.ndim else [],
+            output_shape=[],
+            output_dtype="unknown",
+            blockers=["Chunked prefill expects rank-3 prompt hidden states with at least one token."],
+            ready=False,
+            timings={"total": round(time.perf_counter() - total_started, 4), "chunk_count": 0.0},
+        )
+    chunk_tokens = max(1, int(chunk_tokens))
+    sequence_length = int(input_hidden.shape[1])
+    combined_timings: dict[str, float] = {}
+    executed_layers: list[int] = []
+    step_summaries: list[LayerBridgeStepSummary] = []
+    cache_sequence_lengths: dict[str, int] = {}
+    next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    next_native_kv_sessions: dict[int, Any] = {}
+    output_tensor: torch.Tensor | None = None
+    blockers: list[str] = []
+    chunk_count = 0
+
+    def add_timings(source: dict[str, float]) -> None:
+        for key, value in source.items():
+            combined_timings[key] = round(combined_timings.get(key, 0.0) + float(value), 4)
+
+    for start in range(0, sequence_length, chunk_tokens):
+        if _cancel_requested(should_cancel):
+            blockers.append(CANCEL_BLOCKER)
+            break
+        end = min(sequence_length, start + chunk_tokens)
+        chunk = input_hidden[:, start:end, :].contiguous()
+        chunk_count += 1
+        stack = run_layer_bridge_stack(
+            model_id,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            input_hidden=chunk,
+            past_key_values=next_kv_caches if next_kv_caches else None,
+            position_offset=start,
+            return_kv_cache=True,
+            should_cancel=should_cancel,
+            collect_step_summaries=False,
+            collect_metrics=collect_metrics,
+            native_kv_sessions=next_native_kv_sessions if next_native_kv_sessions else None,
+        )
+        add_timings(stack.timings)
+        step_summaries.extend(stack.step_summaries)
+        executed_layers.extend(stack.executed_layers)
+        cache_sequence_lengths = dict(stack.cache_sequence_lengths)
+        next_kv_caches = dict(stack.next_kv_caches)
+        next_native_kv_sessions = dict(stack.next_native_kv_sessions)
+        output_tensor = stack.output_tensor
+        if not stack.ready or stack.output_tensor is None:
+            blockers.extend(stack.blockers or [f"Chunked prompt prefill failed at token range {start}:{end}."])
+            break
+
+    combined_timings["chunk_count"] = float(chunk_count)
+    combined_timings["chunk_tokens"] = float(chunk_tokens)
+    combined_timings["total"] = round(time.perf_counter() - total_started, 4)
+    return LayerBridgeStackResult(
+        model_id=model_id,
+        start_layer=start_layer,
+        layer_count=layer_count,
+        input_mode="provided-chunked-prefill",
+        input_shape=[int(value) for value in input_hidden.shape],
+        output_shape=[] if output_tensor is None else [int(value) for value in output_tensor.shape],
+        output_dtype="unknown" if output_tensor is None else str(output_tensor.dtype),
+        executed_layers=executed_layers,
+        step_summaries=step_summaries,
+        cache_sequence_lengths=cache_sequence_lengths,
+        blockers=blockers,
+        ready=not blockers and output_tensor is not None and chunk_count == math.ceil(sequence_length / chunk_tokens),
+        timings=combined_timings,
+        output_tensor=output_tensor,
+        next_kv_caches=next_kv_caches,
+        next_native_kv_sessions=next_native_kv_sessions,
+    )
+
+
 def run_token_entry_layer_bridge(
     model_id: str,
     token_ids: list[int],
@@ -4730,24 +4866,40 @@ def _run_prompt_prefill_session(
         )
 
     phase_started = time.perf_counter()
-    prefill_stack = run_layer_bridge_stack(
-        model_id,
-        start_layer=start_layer,
-        layer_count=effective_layer_count,
-        input_hidden=prompt_hidden_state,
-        return_kv_cache=True,
-        should_cancel=should_cancel,
-        collect_step_summaries=False,
-        collect_metrics=False,
-    )
+    prefill_chunk_size = _bf16_moe_prefill_chunk_size(model_id, config, int(prompt_hidden_state.shape[1]))
+    prefill_expected_layers = effective_layer_count
+    if prefill_chunk_size > 0:
+        prefill_stack = _run_chunked_prompt_prefill_stack(
+            model_id,
+            start_layer=start_layer,
+            layer_count=effective_layer_count,
+            input_hidden=prompt_hidden_state,
+            chunk_tokens=prefill_chunk_size,
+            should_cancel=should_cancel,
+            collect_metrics=False,
+        )
+        prefill_expected_layers = effective_layer_count * math.ceil(
+            int(prompt_hidden_state.shape[1]) / prefill_chunk_size
+        )
+    else:
+        prefill_stack = run_layer_bridge_stack(
+            model_id,
+            start_layer=start_layer,
+            layer_count=effective_layer_count,
+            input_hidden=prompt_hidden_state,
+            return_kv_cache=True,
+            should_cancel=should_cancel,
+            collect_step_summaries=False,
+            collect_metrics=False,
+        )
     record_phase("prefill_stack", phase_started)
     for key, value in prefill_stack.timings.items():
         timings[f"prefill_stack_{key}"] = round(float(value), 4)
     layers_executed = len(prefill_stack.executed_layers)
     anti_cheat_blockers: list[str] = []
-    if is_default_full_stack_run and layers_executed < effective_layer_count:
+    if is_default_full_stack_run and layers_executed < prefill_expected_layers:
         anti_cheat_blockers.append(
-            f"Anti-cheat guard: executed {layers_executed} layer forwards, expected {effective_layer_count}."
+            f"Anti-cheat guard: executed {layers_executed} layer forwards, expected {prefill_expected_layers}."
         )
     ready = prefill_stack.ready and prefill_stack.output_tensor is not None and not anti_cheat_blockers
     full_text, full_blockers = decode_token_ids_to_text(model_id, prompt_token_ids)
@@ -4780,12 +4932,16 @@ def _run_prompt_prefill_session(
         blockers=list(prefill_stack.blockers) + list(full_blockers) + anti_cheat_blockers,
         ready=ready,
         timings=finish_timings(),
-        prefix_reuse={"prefill_session": ready},
+        prefix_reuse={
+            "prefill_session": ready,
+            "bf16_moe_chunked_prefill": prefill_chunk_size > 0,
+            "bf16_moe_prefill_chunk_tokens": prefill_chunk_size,
+        },
         reusable_token_ids=list(prompt_token_ids) if ready else [],
         configured_layer_count=configured_layer_count,
         prompt_layer_count=effective_layer_count,
         layers_executed=layers_executed,
-        expected_layers_executed=effective_layer_count,
+        expected_layers_executed=prefill_expected_layers,
         anti_cheat_passed=not anti_cheat_blockers,
         final_decode_state=final_decode_state,
     )
@@ -4977,6 +5133,7 @@ def _run_prompt_decode_loop(
             f"layers for a {configured_layer_count}-layer model."
         )
     layers_executed_total = 0
+    prefill_expected_layers = effective_layer_count
 
     if generation_settings.ready:
         if top_k == 5:
@@ -5529,16 +5686,33 @@ def _run_prompt_decode_loop(
             return canceled_result()
 
         phase_started = time.perf_counter()
-        prefill_stack = run_layer_bridge_stack(
-            model_id,
-            start_layer=start_layer,
-            layer_count=effective_layer_count,
-            input_hidden=prompt_hidden_state,
-            return_kv_cache=True,
-            should_cancel=should_cancel,
-            collect_step_summaries=False,
-            collect_metrics=False,
-        )
+        prefill_chunk_size = _bf16_moe_prefill_chunk_size(model_id, config, int(prompt_hidden_state.shape[1]))
+        if prefill_chunk_size > 0:
+            prefill_stack = _run_chunked_prompt_prefill_stack(
+                model_id,
+                start_layer=start_layer,
+                layer_count=effective_layer_count,
+                input_hidden=prompt_hidden_state,
+                chunk_tokens=prefill_chunk_size,
+                should_cancel=should_cancel,
+                collect_metrics=False,
+            )
+            prefix_reuse["bf16_moe_chunked_prefill"] = True
+            prefix_reuse["bf16_moe_prefill_chunk_tokens"] = prefill_chunk_size
+            prefill_expected_layers = effective_layer_count * math.ceil(
+                int(prompt_hidden_state.shape[1]) / prefill_chunk_size
+            )
+        else:
+            prefill_stack = run_layer_bridge_stack(
+                model_id,
+                start_layer=start_layer,
+                layer_count=effective_layer_count,
+                input_hidden=prompt_hidden_state,
+                return_kv_cache=True,
+                should_cancel=should_cancel,
+                collect_step_summaries=False,
+                collect_metrics=False,
+            )
         record_phase("prefill_stack", phase_started)
         add_nested_timings("prefill_stack", prefill_stack.timings)
         layers_executed_total += len(prefill_stack.executed_layers)
@@ -5707,8 +5881,8 @@ def _run_prompt_decode_loop(
             configured_layer_count=configured_layer_count,
             prompt_layer_count=effective_layer_count,
             layers_executed=layers_executed_total,
-            expected_layers_executed=0 if first_token_from_cached_prefill else effective_layer_count,
-            anti_cheat_passed=True if first_token_from_cached_prefill else layers_executed_total >= effective_layer_count,
+            expected_layers_executed=0 if first_token_from_cached_prefill else prefill_expected_layers,
+            anti_cheat_passed=True if first_token_from_cached_prefill else layers_executed_total >= prefill_expected_layers,
             final_decode_state=decode_state,
         )
     generated_token_ids = [first_generated_token_id]
@@ -5795,6 +5969,8 @@ def _run_prompt_decode_loop(
         0 if first_token_from_cached_prefill else 1,
         steps_completed - (1 if first_token_from_cached_prefill else 0),
     )
+    if not first_token_from_cached_prefill:
+        expected_layers_executed += max(0, prefill_expected_layers - effective_layer_count)
     anti_cheat_blockers: list[str] = []
     if is_default_full_stack_run and layers_executed_total < expected_layers_executed:
         anti_cheat_blockers.append(

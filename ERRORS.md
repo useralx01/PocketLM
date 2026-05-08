@@ -329,3 +329,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Fix: added a BF16 MoE full lm-head cache path so MoE fp16/BF16 decode tail loads `lm_head.weight` once through the normal resident tensor loader and computes top-k from the resident tensor. The Q4 MoE cache behavior remains intact, and a kill switch is available as `PCKETLM_DISABLE_BF16_MOE_LM_HEAD_FULL_CACHE=1`.
 - Result: Mixtral full one-token decode now completes with coherent text `"<s> The capital of France is a"` and `32/32` layers executed, but it remains too slow and memory-heavy for Kimi/DeepSeek-scale downloads.
 
+## Phase BF16 MoE Load Reuse / chunk-size 2 rejected
+- Symptom: explicit `PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS=2` completed Mixtral full one-token decode but left only `384 MB` free RAM and took `281.385s`.
+- Root cause: two-token chunks still gather too many selected BF16 experts per layer on this 16 GB machine, recreating the low-RAM pressure the phase was trying to avoid.
+- Fix: keep automatic low-RAM BF16 MoE chunking at `1` token unless the operator explicitly overrides it.
+

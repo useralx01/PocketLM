@@ -5699,3 +5699,14 @@ Result: 297 passed in 21.83s
 - Full Mixtral `--slice=full --max-new-tokens 1 --prompt "The capital of France is" --source fp16` now passes: generated text `"a"`, full text `"<s> The capital of France is a"`, `32/32` layers, anti-cheat true. Runtime was `307.91s`, with `prefill_stack=303.3945s`, `op_load_tensors=229.8928s`, and peak working set `7233 MB`.
 - Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_run_decode_tail_caches_full_bf16_moe_lm_head_by_default tests\test_runtime_layer_bridge.py::test_run_decode_tail_full_bf16_moe_lm_head_cache_kill_switch tests\test_runtime_layer_bridge.py::test_run_decode_tail_can_cache_full_q4_moe_lm_head tests\test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_top_k_experts_repeat_runs_special_callback -q` -> 4 passed.
 - Full tests: `python -m pytest tests\ -q` -> 388 passed.
+
+## Phase BF16 MoE Load Reuse / Setup
+- Branch: `phase-bf16-moe-load-reuse`.
+- Goal: reduce BF16 MoE full-stack memory pressure and loader churn before any Kimi/DeepSeek download.
+
+## Phase BF16 MoE Load Reuse / Evidence
+- Added automatic low-RAM chunked BF16 MoE prompt prefill. On non-Q4 MoE BF16/fp16 models, when free RAM is under `8192 MB`, prompt prefill is split into small token chunks and KV is carried between chunks. Kill switch: `PCKETLM_DISABLE_BF16_MOE_CHUNKED_PREFILL=1`; tuning knob: `PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS`.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_bf16_moe_prefill_chunk_size_auto_uses_low_ram tests\test_runtime_layer_bridge.py::test_chunked_prompt_prefill_carries_kv_between_chunks tests\test_runtime_layer_bridge.py::test_run_decode_tail_caches_full_bf16_moe_lm_head_by_default tests\test_runtime_diagnose_cli.py::test_runtime_diagnose_cli_top_k_experts_repeat_runs_special_callback -q` -> 4 passed.
+- Mixtral default/auto chunk size `1`: `--slice=full --max-new-tokens 1 --prompt "The capital of France is" --source fp16` completed with `"<s> The capital of France is a"`, anti-cheat true, `layers_executed=192`, `expected_layers_executed=192`, `chunk_count=6`, `chunk_tokens=1`. Runtime improved from `307.91s` to `268.187s`; free RAM after the row improved from `40 MB` to `2153 MB`; `prefill_stack_op_load_tensors=226.1019s`, `prefill_stack_op_mlp=39.0033s`.
+- Mixtral explicit chunk size `2` was tested and rejected as default. It completed correctly but regressed to `281.385s`, left only `384 MB` free RAM, and used `chunk_count=3`. Keep automatic chunk size `1` for low-RAM BF16 MoE.
+- Full tests: `python -m pytest tests\ -q` -> 390 passed.
