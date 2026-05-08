@@ -1398,10 +1398,19 @@ def _bf16_moe_prefill_chunk_size(
     if free_memory_bytes is None:
         return 0
     try:
-        threshold_mb = max(0, int(os.environ.get("PCKETLM_BF16_MOE_CHUNKED_PREFILL_FREE_MB", "8192") or "8192"))
+        threshold_mb = max(0, int(os.environ.get("PCKETLM_BF16_MOE_CHUNKED_PREFILL_FREE_MB", "12288") or "12288"))
     except ValueError:
-        threshold_mb = 8192
+        threshold_mb = 12288
     if free_memory_bytes <= threshold_mb * 1024 * 1024:
+        try:
+            chunk2_threshold_mb = max(
+                0,
+                int(os.environ.get("PCKETLM_BF16_MOE_CHUNKED_PREFILL_CHUNK2_FREE_MB", "10240") or "10240"),
+            )
+        except ValueError:
+            chunk2_threshold_mb = 10240
+        if free_memory_bytes >= chunk2_threshold_mb * 1024 * 1024:
+            return min(prompt_token_count, 2)
         return 1
     return 0
 
@@ -3572,7 +3581,13 @@ def _run_chunked_prompt_prefill_stack(
     should_cancel: Callable[[], bool] | None = None,
     collect_metrics: bool = False,
 ) -> LayerBridgeStackResult:
-    """Prefill a prompt in small chunks to cap BF16 MoE expert working set."""
+    """Prefill a prompt in small chunks to cap BF16 MoE expert working set.
+
+    The chunking is layer-major on purpose: each layer consumes all prompt
+    chunks before the next layer starts. That keeps the current layer's weights
+    and selected experts hot across prompt chunks instead of cycling through the
+    whole model once per chunk.
+    """
     total_started = time.perf_counter()
     if input_hidden.ndim != 3 or input_hidden.shape[1] <= 0:
         return LayerBridgeStackResult(
@@ -3597,45 +3612,80 @@ def _run_chunked_prompt_prefill_stack(
     next_native_kv_sessions: dict[int, Any] = {}
     output_tensor: torch.Tensor | None = None
     blockers: list[str] = []
-    chunk_count = 0
+    chunk_ranges = [
+        (start, min(sequence_length, start + chunk_tokens))
+        for start in range(0, sequence_length, chunk_tokens)
+    ]
+    chunk_count = len(chunk_ranges)
 
     def add_timings(source: dict[str, float]) -> None:
         for key, value in source.items():
             combined_timings[key] = round(combined_timings.get(key, 0.0) + float(value), 4)
 
-    for start in range(0, sequence_length, chunk_tokens):
+    current_hidden = input_hidden
+    for layer_index in range(start_layer, start_layer + layer_count):
         if _cancel_requested(should_cancel):
             blockers.append(CANCEL_BLOCKER)
             break
-        end = min(sequence_length, start + chunk_tokens)
-        chunk = input_hidden[:, start:end, :].contiguous()
-        chunk_count += 1
-        stack = run_layer_bridge_stack(
-            model_id,
-            start_layer=start_layer,
-            layer_count=layer_count,
-            input_hidden=chunk,
-            past_key_values=next_kv_caches if next_kv_caches else None,
-            position_offset=start,
-            return_kv_cache=True,
-            should_cancel=should_cancel,
-            collect_step_summaries=False,
-            collect_metrics=collect_metrics,
-            native_kv_sessions=next_native_kv_sessions if next_native_kv_sessions else None,
-        )
-        add_timings(stack.timings)
-        step_summaries.extend(stack.step_summaries)
-        executed_layers.extend(stack.executed_layers)
-        cache_sequence_lengths = dict(stack.cache_sequence_lengths)
-        next_kv_caches = dict(stack.next_kv_caches)
-        next_native_kv_sessions = dict(stack.next_native_kv_sessions)
-        output_tensor = stack.output_tensor
-        if not stack.ready or stack.output_tensor is None:
-            blockers.extend(stack.blockers or [f"Chunked prompt prefill failed at token range {start}:{end}."])
+
+        layer_outputs: list[torch.Tensor] = []
+        layer_kv_cache = next_kv_caches.get(layer_index)
+        layer_native_kv_session = next_native_kv_sessions.get(layer_index)
+        for start, end in chunk_ranges:
+            if _cancel_requested(should_cancel):
+                blockers.append(CANCEL_BLOCKER)
+                break
+            chunk = current_hidden[:, start:end, :].contiguous()
+            layer_past = {layer_index: layer_kv_cache} if layer_kv_cache is not None else None
+            layer_native_sessions = (
+                {layer_index: layer_native_kv_session}
+                if layer_native_kv_session is not None
+                else None
+            )
+            stack = run_layer_bridge_stack(
+                model_id,
+                start_layer=layer_index,
+                layer_count=1,
+                input_hidden=chunk,
+                past_key_values=layer_past,
+                position_offset=start,
+                return_kv_cache=True,
+                should_cancel=should_cancel,
+                collect_step_summaries=False,
+                collect_metrics=collect_metrics,
+                native_kv_sessions=layer_native_sessions,
+            )
+            add_timings(stack.timings)
+            step_summaries.extend(stack.step_summaries)
+            executed_layers.extend(stack.executed_layers)
+            cache_sequence_lengths.update(stack.cache_sequence_lengths)
+            if layer_index in stack.next_kv_caches:
+                layer_kv_cache = stack.next_kv_caches[layer_index]
+            if layer_index in stack.next_native_kv_sessions:
+                layer_native_kv_session = stack.next_native_kv_sessions[layer_index]
+            if not stack.ready or stack.output_tensor is None:
+                blockers.extend(
+                    stack.blockers
+                    or [f"Chunked prompt prefill failed at layer {layer_index}, token range {start}:{end}."]
+                )
+                break
+            layer_outputs.append(stack.output_tensor)
+        if blockers:
             break
+        if layer_kv_cache is not None:
+            next_kv_caches[layer_index] = layer_kv_cache
+        if layer_native_kv_session is not None:
+            next_native_kv_sessions[layer_index] = layer_native_kv_session
+        if not layer_outputs:
+            blockers.append(f"Chunked prompt prefill produced no outputs for layer {layer_index}.")
+            break
+        current_hidden = torch.cat(layer_outputs, dim=1).contiguous()
+        output_tensor = current_hidden
 
     combined_timings["chunk_count"] = float(chunk_count)
     combined_timings["chunk_tokens"] = float(chunk_tokens)
+    combined_timings["chunk_layer_passes"] = float(len(executed_layers))
+    combined_timings["chunk_order_layer_major"] = 1.0
     combined_timings["total"] = round(time.perf_counter() - total_started, 4)
     return LayerBridgeStackResult(
         model_id=model_id,

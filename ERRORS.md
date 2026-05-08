@@ -334,3 +334,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: two-token chunks still gather too many selected BF16 experts per layer on this 16 GB machine, recreating the low-RAM pressure the phase was trying to avoid.
 - Fix: keep automatic low-RAM BF16 MoE chunking at `1` token unless the operator explicitly overrides it.
 
+## Phase Kimi DeepSeek Readiness / full BF16 download still unsafe
+- Symptom: the local Mixtral BF16 MoE proof now completes more safely, but even the improved layer-major run still spends `152-167s` in tensor loading for a single token.
+- Root cause: the current BF16 path still reads/materializes too many large expert tensors. Kimi K2 and DeepSeek-V3 are much larger MoE checkpoints, so full BF16 download would magnify the same bottleneck instead of proving product speed.
+- Fix: do not start full BF16 Kimi/DeepSeek download yet. The next fix must be a compact huge-MoE artifact/executor path or native selected-expert streaming that cuts bytes loaded before the first giant checkpoint attempt.
+

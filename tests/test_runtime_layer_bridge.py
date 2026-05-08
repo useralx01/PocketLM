@@ -231,10 +231,28 @@ def test_bf16_moe_prefill_chunk_size_auto_uses_low_ram(monkeypatch) -> None:
     monkeypatch.setattr(
         layer_bridge_module.TensorResidencyPolicy,
         "from_environment",
-        classmethod(lambda cls, _model_id=None: cls(free_memory_bytes=6 * 1024**3)),
+        classmethod(lambda cls, _model_id=None: cls(free_memory_bytes=5 * 1024**3)),
     )
 
     assert layer_bridge_module._bf16_moe_prefill_chunk_size("mixtral-test", config, 6) == 1
+
+
+def test_bf16_moe_prefill_chunk_size_auto_uses_two_tokens_when_ram_allows(monkeypatch) -> None:
+    config = SimpleNamespace(
+        num_experts=8,
+        num_experts_per_tok=2,
+        source_dtype="bfloat16",
+    )
+    monkeypatch.setenv("PCKETLM_TENSOR_SOURCE", "fp16")
+    monkeypatch.delenv("PCKETLM_DISABLE_BF16_MOE_CHUNKED_PREFILL", raising=False)
+    monkeypatch.delenv("PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS", raising=False)
+    monkeypatch.setattr(
+        layer_bridge_module.TensorResidencyPolicy,
+        "from_environment",
+        classmethod(lambda cls, _model_id=None: cls(free_memory_bytes=11 * 1024**3)),
+    )
+
+    assert layer_bridge_module._bf16_moe_prefill_chunk_size("mixtral-test", config, 6) == 2
 
 
 def test_chunked_prompt_prefill_carries_kv_between_chunks(monkeypatch) -> None:
@@ -262,7 +280,7 @@ def test_chunked_prompt_prefill_carries_kv_between_chunks(monkeypatch) -> None:
                 "return_kv_cache": return_kv_cache,
             }
         )
-        past_length = 0 if past_key_values is None else int(past_key_values[0][0].shape[-2])
+        past_length = 0 if past_key_values is None else int(past_key_values[start_layer][0].shape[-2])
         current_length = int(input_hidden.shape[1]) + past_length
         key = torch.zeros((1, 1, current_length, 4), dtype=torch.bfloat16)
         value = torch.zeros((1, 1, current_length, 4), dtype=torch.bfloat16)
@@ -274,12 +292,12 @@ def test_chunked_prompt_prefill_carries_kv_between_chunks(monkeypatch) -> None:
             input_shape=[int(value) for value in input_hidden.shape],
             output_shape=[int(value) for value in input_hidden.shape],
             output_dtype=str(input_hidden.dtype),
-            executed_layers=[0, 1],
-            cache_sequence_lengths={"0": current_length, "1": current_length},
+            executed_layers=[start_layer],
+            cache_sequence_lengths={str(start_layer): current_length},
             ready=True,
             timings={"total": 0.1},
-            output_tensor=input_hidden,
-            next_kv_caches={0: (key, value), 1: (key, value)},
+            output_tensor=input_hidden + float(start_layer + 1),
+            next_kv_caches={start_layer: (key, value)},
         )
 
     monkeypatch.setattr(layer_bridge_module, "run_layer_bridge_stack", fake_run_layer_bridge_stack)
@@ -294,14 +312,21 @@ def test_chunked_prompt_prefill_carries_kv_between_chunks(monkeypatch) -> None:
     )
 
     assert result.ready is True
-    assert len(calls) == 3
-    assert [call["position_offset"] for call in calls] == [0, 1, 2]
+    assert len(calls) == 6
+    assert [call["start_layer"] for call in calls] == [0, 0, 0, 1, 1, 1]
+    assert [call["position_offset"] for call in calls] == [0, 1, 2, 0, 1, 2]
     assert calls[0]["past"] is None
     assert calls[1]["past"] is not None
     assert calls[2]["past"] is not None
+    assert calls[3]["past"] is None
+    assert calls[4]["past"] is not None
+    assert calls[5]["past"] is not None
     assert result.cache_sequence_lengths == {"0": 3, "1": 3}
     assert result.timings["chunk_count"] == 3.0
-    assert result.executed_layers == [0, 1, 0, 1, 0, 1]
+    assert result.timings["chunk_order_layer_major"] == 1.0
+    assert result.executed_layers == [0, 0, 0, 1, 1, 1]
+    assert result.output_tensor is not None
+    assert result.output_tensor.shape == hidden.shape
 
 
 def test_native_dense_decode_dispatch_runs_one_token_dense_layer(monkeypatch) -> None:

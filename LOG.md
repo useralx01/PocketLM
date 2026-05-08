@@ -5710,3 +5710,16 @@ Result: 297 passed in 21.83s
 - Mixtral default/auto chunk size `1`: `--slice=full --max-new-tokens 1 --prompt "The capital of France is" --source fp16` completed with `"<s> The capital of France is a"`, anti-cheat true, `layers_executed=192`, `expected_layers_executed=192`, `chunk_count=6`, `chunk_tokens=1`. Runtime improved from `307.91s` to `268.187s`; free RAM after the row improved from `40 MB` to `2153 MB`; `prefill_stack_op_load_tensors=226.1019s`, `prefill_stack_op_mlp=39.0033s`.
 - Mixtral explicit chunk size `2` was tested and rejected as default. It completed correctly but regressed to `281.385s`, left only `384 MB` free RAM, and used `chunk_count=3`. Keep automatic chunk size `1` for low-RAM BF16 MoE.
 - Full tests: `python -m pytest tests\ -q` -> 390 passed.
+
+## Phase Kimi DeepSeek Readiness / Setup
+- Branch: `phase-kimi-deepseek-readiness`.
+- Goal: finish the BF16 MoE readiness work before attempting a much larger Kimi/DeepSeek download.
+
+## Phase Kimi DeepSeek Readiness / Evidence
+- Reordered BF16 MoE chunked prefill from token-major to layer-major. The runtime now processes all prompt chunks for layer N before moving to layer N+1, so layer-local weights and selected experts stay hot across chunks while KV is still carried correctly.
+- Focused tests: `python -m pytest tests\test_runtime_layer_bridge.py::test_bf16_moe_prefill_chunk_size_auto_uses_low_ram tests\test_runtime_layer_bridge.py::test_bf16_moe_prefill_chunk_size_auto_uses_two_tokens_when_ram_allows tests\test_runtime_layer_bridge.py::test_chunked_prompt_prefill_carries_kv_between_chunks -q` -> 3 passed.
+- Mixtral auto chunk size `1`, layer-major: completed `"<s> The capital of France is a"`, anti-cheat true, `layers_executed=192`, `expected_layers_executed=192`, `chunk_order_layer_major=1`. Runtime improved to `211.960s`; free RAM after row `2302 MB`; loaded bytes dropped to `133500.51 MB`; `prefill_stack_op_load_tensors=167.0361s`.
+- Mixtral explicit chunk size `2`, layer-major: completed `"<s> The capital of France is a"`, anti-cheat true, `layers_executed=96`, `expected_layers_executed=96`, runtime `206.121s`; free RAM after row `1843 MB`; loaded bytes `109116.51 MB`; `prefill_stack_op_load_tensors=154.5129s`.
+- Mixtral explicit chunk size `3`, layer-major: completed `"<s> The capital of France is a"` and reached `201.319s`, but free RAM after row was only `1095 MB`, so it remains a manual tuning option, not the default.
+- Automatic chunk policy is conservative: low RAM uses chunk size `1`; chunk size `2` is only automatic when sampled free RAM is at least `10240 MB` or when explicitly requested with `PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS=2`.
+- Full tests: `python -m pytest tests\ -q` -> 391 passed.

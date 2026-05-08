@@ -482,3 +482,9 @@
 - Real Mixtral BF16 full one-token row improved from `307.91s` to `268.187s` and avoided the near-crash RAM floor: free RAM after the row improved from `40 MB` to `2153 MB`.
 - Rejected chunk size `2` as a default because it was slower and left only `384 MB` free.
 - Full test suite: 390 passed.
+
+## Phase Kimi DeepSeek Readiness
+- Reworked BF16 MoE chunked prefill to layer-major ordering so layer weights are reused across prompt chunks instead of reloaded after every full-model pass.
+- Real Mixtral BF16 one-token row improved further: default-safe layer-major chunking reached `211.960s`, and tuned chunk size `2` reached `206.121s` with the same coherent output `"<s> The capital of France is a"`.
+- Added conservative automatic chunk sizing: chunk size `1` for low-RAM safety, chunk size `2` only with at least `10240 MB` sampled free RAM or explicit operator override.
+- Full test suite: 391 passed.
