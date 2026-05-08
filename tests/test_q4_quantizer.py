@@ -17,6 +17,7 @@ from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, 
 from tools.quantize_to_q4 import (
     dequantize_q4_tensor,
     pack_int4,
+    plan_model_dir_to_q4,
     quantize_model_dir_to_q4,
     quantize_tensor_to_q4,
     unpack_int4,
@@ -96,6 +97,63 @@ def test_q4_artifact_size_is_about_quarter_fp16(tmp_path: Path) -> None:
     manifest = quantize_model_dir_to_q4(model_dir, tmp_path / "q4")
 
     assert manifest["compression_ratio"] < 0.27
+
+
+def test_q4_dry_run_plan_reads_headers_without_writing_artifact(tmp_path: Path) -> None:
+    model_dir = _write_quantizer_fixture(tmp_path, torch.arange(8192, dtype=torch.float16).reshape(64, 128))
+    output_dir = tmp_path / "q4-plan-only"
+
+    plan = plan_model_dir_to_q4(model_dir, output_dir)
+
+    assert plan["ready_for_conversion"] is True
+    assert plan["q4_tensor_count"] == 1
+    assert plan["missing_shards"] == []
+    assert plan["estimated_total_q4_bytes"] > 0
+    assert plan["estimated_total_q4_bytes"] < plan["total_original_bytes"] * 0.27
+    assert plan["planned_output_dir"] == str(output_dir.resolve())
+    assert not output_dir.exists()
+
+
+def test_q4_dry_run_plan_splits_expert_and_non_expert_bytes(tmp_path: Path) -> None:
+    model_dir = tmp_path / "source"
+    model_dir.mkdir(parents=True)
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    tensors = {
+        "model.layers.0.block_sparse_moe.experts.0.gate_proj.weight": torch.ones((8, 8), dtype=torch.bfloat16),
+        "model.layers.0.self_attn.q_proj.weight": torch.ones((8, 8), dtype=torch.bfloat16),
+    }
+    save_file(tensors, str(shard))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard.stat().st_size},
+                "weight_map": {name: shard.name for name in tensors},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = plan_model_dir_to_q4(model_dir, tmp_path / "q4")
+
+    assert plan["q4_tensor_count"] == 2
+    assert plan["estimated_expert_q4_bytes"] > 0
+    assert plan["estimated_non_expert_q4_bytes"] > 0
+    assert plan["estimated_expert_q4_bytes"] == plan["estimated_non_expert_q4_bytes"]
+
+
+def test_q4_dry_run_plan_blocks_missing_shards(tmp_path: Path) -> None:
+    model_dir = tmp_path / "source"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight": "missing.safetensors"}}),
+        encoding="utf-8",
+    )
+
+    plan = plan_model_dir_to_q4(model_dir, tmp_path / "q4")
+
+    assert plan["ready_for_conversion"] is False
+    assert plan["missing_shards"] == ["missing.safetensors"]
+    assert plan["q4_tensor_count"] == 0
 
 
 def test_q4_loader_dequantizes_to_runtime_tensor(tmp_path: Path, monkeypatch) -> None:

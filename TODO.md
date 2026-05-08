@@ -134,4 +134,4 @@
 - Replace copied monolithic tensor registration with stable non-copy tensor handles or mapped pointers, and add BF16 dtype support to the monolithic dense path. This is required before local `qwen2.5-14b-instruct` can be routed through monolithic honestly.
 Native BF16 follow-up: wire real Qwen 14B tensor catalog loads into `MonolithicForwardSession.register_tensor` lazily so production can use the no-copy BF16 monolithic decode path.
 Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, then turn on production routing behind `PCKETLM_ENABLE_MONOLITHIC_QWEN14`.
-- Before Kimi/DeepSeek download: build a compact huge-MoE artifact/executor path rather than downloading full BF16 first. Layer-major chunking improved Mixtral BF16 to `211.960s` safe/default and `206.121s` tuned, but the row still spends `152-167s` loading tensors and full BF16 Kimi/DeepSeek checkpoints are far beyond this 16 GB machine.
+- Before Kimi/DeepSeek download: connect the new Q4 dry-run planner to acquisition/download flow so a huge checkpoint is converted into a compact artifact before any full BF16 runtime attempt.

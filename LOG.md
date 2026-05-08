@@ -5723,3 +5723,15 @@ Result: 297 passed in 21.83s
 - Mixtral explicit chunk size `3`, layer-major: completed `"<s> The capital of France is a"` and reached `201.319s`, but free RAM after row was only `1095 MB`, so it remains a manual tuning option, not the default.
 - Automatic chunk policy is conservative: low RAM uses chunk size `1`; chunk size `2` is only automatic when sampled free RAM is at least `10240 MB` or when explicitly requested with `PCKETLM_BF16_MOE_PREFILL_CHUNK_TOKENS=2`.
 - Full tests: `python -m pytest tests\ -q` -> 391 passed.
+
+## Phase Huge MoE Compact Readiness / Setup
+- Branch: `phase-huge-moe-compact-readiness`.
+- Goal: add a no-payload-read compact artifact readiness gate before attempting Kimi/DeepSeek-sized MoE downloads.
+
+## Phase Huge MoE Compact Readiness / Evidence
+- Added `tools\quantize_to_q4.py --dry-run`, which reads safetensors headers only and estimates compact Q4 artifact size without reading tensor payload bytes or writing artifacts.
+- The plan output reports source tensor count, Q4 tensor count, missing shards, total source bytes, estimated packed bytes, scale bytes, expert Q4 bytes, non-expert Q4 bytes, compression ratio, and required disk with 10% headroom.
+- Local Mixtral dry-run: `995` tensors, no missing shards, `93,405,585,408` source bytes -> `23,369,489,920` estimated Q4 bytes, compression ratio `0.250194`, expert Q4 bytes `22,565,355,520`, non-expert Q4 bytes `804,134,400`, disk with headroom `25,706,438,913` bytes.
+- Local Qwen3-30B-A3B dry-run: `18,867` tensors, no missing shards, `61,064,245,248` source bytes -> `15,311,831,552` estimated Q4 bytes, compression ratio `0.25075`, expert Q4 bytes `14,539,554,816`, non-expert Q4 bytes `772,276,736`, disk with headroom `16,843,014,708` bytes.
+- Focused tests: `python -m pytest tests\test_q4_quantizer.py -q` -> 10 passed.
+- Full tests: `python -m pytest tests\ -q` -> 394 passed.
