@@ -527,3 +527,10 @@
 - Real DeepSeek layer `3` block proof passed from `D:\PocketLM\sources\deepseek-v3`, producing a real `[1, 1, 7168]` output with no blockers.
 - Real DeepSeek tail proof streamed `1,853,358,080` lm_head bytes in `64` chunks and produced top token ids with no blockers.
 - Full test suite: 408 passed.
+
+## Phase FP8 Single Token Stack
+- Added single-row token embedding loading.
+- Added dense FP8 MLP execution for DeepSeek layers `0-2`.
+- Added bounded single-token forward from embedding through layer blocks plus optional streamed lm-head tail.
+- Real DeepSeek token `0` executed all layers `0-61` from `D:\PocketLM\sources\deepseek-v3`, streamed the lm-head, and produced top token ids `[5, 201, 30, 372, 7249]` with no blockers.
+- Full test suite: 411 passed.

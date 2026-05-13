@@ -5802,3 +5802,16 @@ Result: 297 passed in 21.83s
 - Real DeepSeek tail proof: ones hidden vector, `chunk_rows=2048`, `chunk_count=64`, loaded lm_head bytes `1,853,358,080`, top token ids `[14126, 64437, 30740, 106705, 112833]`, top logits `[12.7646389, 11.8792324, 11.5150452, 11.4512529, 11.3375969]`, `ready=true`.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 24 passed.
 - Full tests: `python -m pytest tests\ -q` -> 408 passed.
+
+## Phase FP8 Single Token Stack / Evidence
+- Added `load_fp8_token_embedding()` to read one BF16 embedding row directly from source shards without loading the full `model.embed_tokens.weight`.
+- Added `run_fp8_dense_mlp()` for DeepSeek's dense layers `0-2`, using the same FP8+scale dequant bridge as the selected expert path.
+- Updated the single-token block runner to choose dense MLP for layers below `first_k_dense_replace` and selected MoE for later layers.
+- Added `run_fp8_single_token_forward()` to execute a bounded single-token path from embedding through N layers and optional streamed lm-head tail.
+- Real DeepSeek embedding proof: token `0` loaded `[1, 1, 7168]` from `14,336` bytes, `ready=true`.
+- Real DeepSeek dense proof: layer `0` dense MLP output `[1, 1, 7168]`, loaded FP8+scale bytes `396,458,496`, dequantized bytes `792,723,456`, `output_mean_abs=0.600094318`, `output_max_abs=11.5625`, `ready=true`.
+- Real DeepSeek one-layer token proof: token `0`, layer `0`, streamed tail, top token ids `[6462, 44624, 107484, 24792, 65148]`, no blockers, `ready=true`.
+- Real DeepSeek dense-to-MoE transition proof: token `0`, layers `0-3`, executed dense layers `0-2` then MoE layer `3`; layer `3` selected experts `[18, 29, 34, 43, 226, 235, 254, 255]`; streamed tail top token ids `[6462, 20024, 20272, 63418, 99870]`, `ready=true`.
+- Real DeepSeek full single-token stack proof: token `0`, layers `0-61`, all `62` layers executed, streamed tail top token ids `[5, 201, 30, 372, 7249]`, top logits `[20.328207, 19.397022, 18.519918, 18.450245, 18.250309]`, no blockers, `ready=true`. Wall time was `568.5s` with the current Python/materialized proof path.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 27 passed.
+- Full tests: `python -m pytest tests\ -q` -> 411 passed.

@@ -672,3 +672,4 @@ Phase FP8 Aware Planner: DeepSeek V3 is correctly detected as FP8-native with 63
 Phase FP8 Native Paged Runtime: runtime catalog, selected-expert working-set planning, and raw FP8+scale pair loading now work on real DeepSeek V3 from D:\PocketLM; full suite passes with 402 tests.
 Phase FP8 Numeric Expert Proof: one real DeepSeek FP8 expert can now be dequantized and executed through a Python selected-expert MLP proof; full suite passes with 405 tests.
 Phase FP8 Router MoE Block Proof: real DeepSeek layer-3 router, selected FP8 MoE, single-token MLA attention, one-block proof, and streamed lm_head top-k tail now pass from D:\PocketLM\sources\deepseek-v3; full suite passes with 408 tests.
+Phase FP8 Single Token Stack: DeepSeek token 0 now runs from embedding through all 62 FP8 layers and streamed lm_head tail with no blockers; proof path is correct but slow at 568.5s because FP8 dequant is still materialized in Python; full suite passes with 411 tests.

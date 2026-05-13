@@ -6,13 +6,16 @@ import torch
 
 from pcketlm.core.runtime.fp8_source import (
     dequantize_fp8_block_scaled,
+    load_fp8_token_embedding,
     run_fp8_decode_tail_topk,
+    run_fp8_dense_mlp,
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
     run_fp8_expert_mlp,
     run_fp8_moe,
     run_fp8_router,
+    run_fp8_single_token_forward,
 )
 from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog, find_tensor_catalog_entry
 
@@ -23,9 +26,9 @@ def test_tensor_catalog_records_fp8_weight_scale_pairs(tmp_path: Path, monkeypat
     catalog = build_tensor_catalog(model_id, model_dir)
 
     assert catalog.ready is True
-    assert catalog.fp8_weight_count == 8
-    assert catalog.fp8_scale_count == 8
-    assert catalog.fp8_pair_count == 8
+    assert catalog.fp8_weight_count == 11
+    assert catalog.fp8_scale_count == 11
+    assert catalog.fp8_pair_count == 11
     weight = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight")
     scale = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv")
     assert weight is not None
@@ -52,8 +55,8 @@ def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path,
     assert "model.layers.0.mlp.experts.1.down_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.shared_experts.gate_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.experts.0.gate_proj.weight" not in plan.tensor_names
-    assert plan.fp8_weight_count == 7
-    assert plan.scale_count == 7
+    assert plan.fp8_weight_count == 10
+    assert plan.scale_count == 10
     assert plan.total_nbytes == plan.fp8_weight_bytes + plan.scale_bytes + plan.non_fp8_bytes
 
 
@@ -142,6 +145,18 @@ def test_run_fp8_moe_combines_routed_and_shared_experts(tmp_path: Path, monkeypa
     assert result.dequantized_weight_bytes > 0
 
 
+def test_run_fp8_dense_mlp_materializes_dense_layer(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_dense_mlp(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert result.output_shape == [1, 1, 4]
+
+
 def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:
     model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
     build_tensor_catalog(model_id, model_dir)
@@ -153,6 +168,30 @@ def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch)
     assert result.chunk_count == 2
     assert result.top_token_ids[0] == 1
     assert result.loaded_lm_head_bytes == 3 * 4 * 2
+
+
+def test_load_fp8_token_embedding_reads_one_row(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    result = load_fp8_token_embedding(model_id, 1)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert result.output_shape == [1, 1, 4]
+    assert torch.allclose(result.output_tensor.float(), torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]))
+
+
+def test_run_fp8_single_token_forward_loads_embedding_without_tail(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    result = run_fp8_single_token_forward(model_id, 1, layer_count=0, include_tail=False, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.executed_layers == []
+    assert result.output_tensor is not None
+    assert result.hidden_shape == [1, 1, 4]
 
 
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
@@ -175,6 +214,7 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
                 "n_routed_experts": 2,
                 "num_experts_per_tok": 1,
                 "rms_norm_eps": 1e-6,
+                "first_k_dense_replace": 1,
                 "n_group": 1,
                 "topk_group": 1,
                 "scoring_func": "sigmoid",
@@ -188,6 +228,9 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
     attention = torch.tensor([[0.5, 1.0, 2.0, -1.0], [3.0, 4.0, -2.0, -0.5]], dtype=torch.float32)
     router_gate = torch.tensor([[4.0, 4.0, 4.0, 4.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    dense_gate = torch.tensor([[0.5, 1.0, -0.5, 0.25], [1.0, 0.0, 0.5, -0.25]], dtype=torch.float32)
+    dense_up = torch.tensor([[0.25, -0.25, 1.0, 0.5], [0.75, 0.5, -0.5, 0.25]], dtype=torch.float32)
+    dense_down = torch.tensor([[1.0, -0.5], [0.25, 0.75], [-0.25, 0.5], [0.5, -1.0]], dtype=torch.float32)
     expert_gate = torch.tensor([[1.0, 0.5, -1.0, 2.0], [0.25, -0.5, 1.5, -2.0]], dtype=torch.float32)
     expert_up = torch.tensor([[0.5, -1.0, 1.0, 0.25], [1.5, 0.5, -0.25, 1.0]], dtype=torch.float32)
     expert_down = torch.tensor([[1.0, -0.5], [0.25, 1.5], [-1.0, 0.5], [2.0, -1.5]], dtype=torch.float32)
@@ -195,11 +238,18 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     shared_up = torch.tensor([[0.5, 0.5, -0.5, -0.5], [1.0, 0.25, 0.5, -0.25]], dtype=torch.float32)
     shared_down = torch.tensor([[0.25, -0.25], [0.5, 1.0], [-0.75, 0.5], [1.25, -1.0]], dtype=torch.float32)
     lm_head = torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.5, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    embedding = torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
     tensors = {
         "model.layers.0.self_attn.q_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(attention))),
         "model.layers.0.self_attn.q_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 0.5)),
         "model.layers.0.mlp.gate.weight": ("F32", [2, 4], _f32_payload(router_gate)),
         "model.layers.0.mlp.gate.e_score_correction_bias": ("F32", [2], struct.pack("<ff", -20.0, 0.0)),
+        "model.layers.0.mlp.gate_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(dense_gate))),
+        "model.layers.0.mlp.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.mlp.up_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(dense_up))),
+        "model.layers.0.mlp.up_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.mlp.down_proj.weight": ("F8_E4M3", [4, 2], bytes(_fp8_bytes(dense_down))),
+        "model.layers.0.mlp.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [2, 4], bytes([9, 10, 11, 12, 13, 14, 15, 16])),
         "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.mlp.experts.1.gate_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(expert_gate))),
@@ -215,6 +265,8 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
         "model.layers.0.mlp.shared_experts.down_proj.weight": ("F8_E4M3", [4, 2], bytes(_fp8_bytes(shared_down))),
         "model.layers.0.mlp.shared_experts.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.input_layernorm.weight": ("BF16", [4], b"\x00\x00" * 4),
+        "model.layers.0.post_attention_layernorm.weight": ("BF16", [4], _bf16_payload(torch.ones(4))),
+        "model.embed_tokens.weight": ("BF16", [3, 4], _bf16_payload(embedding)),
         "model.norm.weight": ("BF16", [4], _bf16_payload(torch.ones(4))),
         "lm_head.weight": ("BF16", [3, 4], _bf16_payload(lm_head)),
     }

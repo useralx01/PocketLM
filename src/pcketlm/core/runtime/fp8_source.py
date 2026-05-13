@@ -149,6 +149,34 @@ class FP8ExpertMLPResult:
 
 
 @dataclass(slots=True)
+class FP8DenseMLPResult:
+    """One dense MLP run using dequantized FP8 gate/up/down weights."""
+
+    model_id: str
+    layer_index: int
+    hidden_shape: list[int]
+    output_shape: list[int]
+    loaded_weight_bytes: int
+    dequantized_weight_bytes: int
+    output_tensor: torch.Tensor | None = None
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "layer_index": self.layer_index,
+            "hidden_shape": list(self.hidden_shape),
+            "output_shape": list(self.output_shape),
+            "loaded_weight_bytes": self.loaded_weight_bytes,
+            "dequantized_weight_bytes": self.dequantized_weight_bytes,
+            "output_materialized": self.output_tensor is not None,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
 class FP8RouterResult:
     """DeepSeek-style router top-k result for one FP8 MoE layer."""
 
@@ -260,6 +288,7 @@ class FP8BlockResult:
     output_shape: list[int]
     attention: FP8AttentionResult | None = None
     moe: FP8MoEResult | None = None
+    dense_mlp: FP8DenseMLPResult | None = None
     output_tensor: torch.Tensor | None = None
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
@@ -272,6 +301,7 @@ class FP8BlockResult:
             "output_shape": list(self.output_shape),
             "attention": None if self.attention is None else self.attention.to_dict(),
             "moe": None if self.moe is None else self.moe.to_dict(),
+            "dense_mlp": None if self.dense_mlp is None else self.dense_mlp.to_dict(),
             "output_materialized": self.output_tensor is not None,
             "blockers": list(self.blockers),
             "ready": self.ready,
@@ -301,6 +331,64 @@ class FP8DecodeTailResult:
             "chunk_rows": self.chunk_rows,
             "chunk_count": self.chunk_count,
             "loaded_lm_head_bytes": self.loaded_lm_head_bytes,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
+class FP8TokenEmbeddingResult:
+    """One token embedding row loaded from the DeepSeek source."""
+
+    model_id: str
+    token_id: int
+    output_shape: list[int]
+    loaded_bytes: int
+    output_tensor: torch.Tensor | None = None
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "token_id": self.token_id,
+            "output_shape": list(self.output_shape),
+            "loaded_bytes": self.loaded_bytes,
+            "output_materialized": self.output_tensor is not None,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
+class FP8TokenForwardResult:
+    """Single-token FP8 forward proof over a bounded layer range."""
+
+    model_id: str
+    token_id: int
+    start_layer: int
+    layer_count: int
+    executed_layers: list[int]
+    hidden_shape: list[int]
+    embedding: FP8TokenEmbeddingResult | None = None
+    tail: FP8DecodeTailResult | None = None
+    step_summaries: list[dict] = field(default_factory=list)
+    output_tensor: torch.Tensor | None = None
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "token_id": self.token_id,
+            "start_layer": self.start_layer,
+            "layer_count": self.layer_count,
+            "executed_layers": list(self.executed_layers),
+            "hidden_shape": list(self.hidden_shape),
+            "embedding": None if self.embedding is None else self.embedding.to_dict(),
+            "tail": None if self.tail is None else self.tail.to_dict(),
+            "step_summaries": [dict(item) for item in self.step_summaries],
+            "output_materialized": self.output_tensor is not None,
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -477,6 +565,29 @@ def run_fp8_expert_mlp(
         model_id=model_id,
         layer_index=int(layer_index),
         expert_index=int(expert_index),
+        hidden_shape=[int(value) for value in hidden.shape],
+        output_shape=[] if output is None else [int(value) for value in output.shape],
+        loaded_weight_bytes=int(loaded_bytes),
+        dequantized_weight_bytes=int(dequantized_bytes),
+        output_tensor=output,
+        blockers=blockers,
+        ready=not blockers and output is not None,
+    )
+
+
+def run_fp8_dense_mlp(
+    model_id: str,
+    layer_index: int,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8DenseMLPResult:
+    """Run one dense DeepSeek MLP layer using dequantized FP8 gate/up/down weights."""
+    prefix = f"model.layers.{int(layer_index)}.mlp"
+    output, loaded_bytes, dequantized_bytes, blockers = _run_fp8_mlp_prefix(model_id, prefix, hidden, dtype=dtype)
+    return FP8DenseMLPResult(
+        model_id=model_id,
+        layer_index=int(layer_index),
         hidden_shape=[int(value) for value in hidden.shape],
         output_shape=[] if output is None else [int(value) for value in output.shape],
         loaded_weight_bytes=int(loaded_bytes),
@@ -729,6 +840,7 @@ def run_fp8_single_token_block(
     blockers = list(input_norm[1]) + list(post_norm[1])
     attention = None
     moe = None
+    dense_mlp = None
     output = None
     if input_norm[0] is None:
         blockers.append("Input layer norm did not materialize.")
@@ -741,10 +853,16 @@ def run_fp8_single_token_block(
         if attention.output_tensor is not None:
             after_attention = hidden_3d.to(dtype=dtype) + attention.output_tensor
             ffn_input = _rms_norm_any(after_attention, post_norm[0].float(), float(config["rms_norm_eps"]))
-            moe = run_fp8_moe(model_id, layer_index, ffn_input, dtype=dtype)
-            blockers.extend(moe.blockers)
-            if moe.output_tensor is not None and not blockers:
-                output = (after_attention + moe.output_tensor).contiguous()
+            if int(layer_index) < int(config["first_k_dense_replace"]):
+                dense_mlp = run_fp8_dense_mlp(model_id, layer_index, ffn_input, dtype=dtype)
+                blockers.extend(dense_mlp.blockers)
+                if dense_mlp.output_tensor is not None and not blockers:
+                    output = (after_attention + dense_mlp.output_tensor).contiguous()
+            else:
+                moe = run_fp8_moe(model_id, layer_index, ffn_input, dtype=dtype)
+                blockers.extend(moe.blockers)
+                if moe.output_tensor is not None and not blockers:
+                    output = (after_attention + moe.output_tensor).contiguous()
 
     return FP8BlockResult(
         model_id=model_id,
@@ -753,6 +871,7 @@ def run_fp8_single_token_block(
         output_shape=[] if output is None else [int(value) for value in output.shape],
         attention=attention,
         moe=moe,
+        dense_mlp=dense_mlp,
         output_tensor=output,
         blockers=blockers,
         ready=not blockers and output is not None,
@@ -822,6 +941,93 @@ def run_fp8_decode_tail_topk(
         loaded_lm_head_bytes=int(loaded_bytes),
         blockers=blockers,
         ready=not blockers and bool(token_ids),
+    )
+
+
+def load_fp8_token_embedding(model_id: str, token_id: int) -> FP8TokenEmbeddingResult:
+    """Load a single embedding row for one token id."""
+    entry = find_tensor_catalog_entry(model_id, "model.embed_tokens.weight")
+    blockers: list[str] = []
+    tensor = None
+    loaded_bytes = 0
+    if entry is None:
+        blockers.append("model.embed_tokens.weight is not present in the tensor catalog.")
+    elif len(entry.shape) != 2:
+        blockers.append("model.embed_tokens.weight is not a 2D tensor.")
+    elif int(token_id) < 0 or int(token_id) >= int(entry.shape[0]):
+        blockers.append(f"Token id {int(token_id)} is outside embedding vocab size {int(entry.shape[0])}.")
+    elif entry.dtype not in {"BF16", "F16", "F32"}:
+        blockers.append(f"Embedding dtype {entry.dtype} is not supported for row loading.")
+    else:
+        row = _read_tensor_rows(entry, int(token_id), int(token_id) + 1)
+        loaded_bytes = int(entry.shape[1]) * _dtype_element_size(entry.dtype)
+        tensor = row.reshape(1, 1, int(entry.shape[1])).contiguous()
+
+    return FP8TokenEmbeddingResult(
+        model_id=model_id,
+        token_id=int(token_id),
+        output_shape=[] if tensor is None else [int(value) for value in tensor.shape],
+        loaded_bytes=int(loaded_bytes),
+        output_tensor=tensor,
+        blockers=blockers,
+        ready=not blockers and tensor is not None,
+    )
+
+
+def run_fp8_single_token_forward(
+    model_id: str,
+    token_id: int,
+    *,
+    start_layer: int = 0,
+    layer_count: int = 1,
+    include_tail: bool = True,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8TokenForwardResult:
+    """Run a bounded single-token FP8 forward path from embedding through layers."""
+    embedding = load_fp8_token_embedding(model_id, token_id)
+    blockers = list(embedding.blockers)
+    hidden = embedding.output_tensor
+    executed_layers: list[int] = []
+    step_summaries: list[dict] = []
+    tail = None
+    if hidden is None:
+        blockers.append("Token embedding did not materialize.")
+
+    if not blockers and hidden is not None:
+        for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
+            step = run_fp8_single_token_block(model_id, layer_index, hidden.to(dtype=dtype), dtype=dtype)
+            step_summaries.append(
+                {
+                    "layer_index": int(layer_index),
+                    "ready": bool(step.ready),
+                    "output_shape": list(step.output_shape),
+                    "ffn_type": "dense" if step.dense_mlp is not None else "moe",
+                    "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
+                    "blockers": list(step.blockers),
+                }
+            )
+            blockers.extend(step.blockers)
+            if not step.ready or step.output_tensor is None:
+                break
+            hidden = step.output_tensor
+            executed_layers.append(int(layer_index))
+        if include_tail and not blockers and hidden is not None:
+            tail = run_fp8_decode_tail_topk(model_id, hidden)
+            blockers.extend(tail.blockers)
+
+    return FP8TokenForwardResult(
+        model_id=model_id,
+        token_id=int(token_id),
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        executed_layers=executed_layers,
+        hidden_shape=[] if hidden is None else [int(value) for value in hidden.shape],
+        embedding=embedding,
+        tail=tail,
+        step_summaries=step_summaries,
+        output_tensor=hidden,
+        blockers=blockers,
+        ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
     )
 
 
@@ -1011,6 +1217,8 @@ def _load_deepseek_config(model_id: str) -> dict:
         "kv_lora_rank": int(payload.get("kv_lora_rank", 512) or 512),
         "rms_norm_eps": float(payload.get("rms_norm_eps", 1e-6) or 1e-6),
         "softmax_scale": float(softmax_scale),
+        "first_k_dense_replace": int(payload.get("first_k_dense_replace", payload.get("n_dense_layers", 0)) or 0),
+        "num_hidden_layers": int(payload.get("num_hidden_layers", catalog.num_hidden_layers or catalog.layer_count) or 0),
     }
 
 

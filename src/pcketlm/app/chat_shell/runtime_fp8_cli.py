@@ -9,15 +9,18 @@ import torch
 
 from pcketlm.core.runtime import (
     fp8_source_status,
+    load_fp8_token_embedding,
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
     run_fp8_decode_tail_topk,
+    run_fp8_dense_mlp,
     run_fp8_expert_mlp,
     run_fp8_moe,
     run_fp8_router,
     run_fp8_single_token_attention,
     run_fp8_single_token_block,
+    run_fp8_single_token_forward,
 )
 
 
@@ -34,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --attention <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --block <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --tail")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --embedding <token-id>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --dense <layer>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --token-forward <token-id> [--start-layer n] [--layers n] [--no-tail]")
         return 1
 
     model_id = args[0]
@@ -154,6 +160,48 @@ def main(argv: list[str] | None = None) -> int:
         result = run_fp8_decode_tail_topk(model_id, hidden)
         print(json.dumps(result.to_dict(), indent=2))
         return 0 if result.ready else 2
+    if mode == "--embedding":
+        if len(args) < 3:
+            print("--embedding requires a token id")
+            return 1
+        result = load_fp8_token_embedding(model_id, int(args[2]))
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.ready else 2
+    if mode == "--dense":
+        if len(args) < 3:
+            print("--dense requires a layer index")
+            return 1
+        layer_index = int(args[2])
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, 1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_dense_mlp(model_id, layer_index, hidden)
+        payload = result.to_dict()
+        if result.output_tensor is not None:
+            values = result.output_tensor.float()
+            payload["output_mean_abs"] = float(values.abs().mean().item())
+            payload["output_max_abs"] = float(values.abs().max().item())
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--token-forward":
+        if len(args) < 3:
+            print("--token-forward requires a token id")
+            return 1
+        start_layer = _int_option(args, "--start-layer", 0)
+        layer_count = _int_option(args, "--layers", 1)
+        result = run_fp8_single_token_forward(
+            model_id,
+            int(args[2]),
+            start_layer=start_layer,
+            layer_count=layer_count,
+            include_tail="--no-tail" not in args,
+        )
+        payload = result.to_dict()
+        if result.output_tensor is not None:
+            values = result.output_tensor.float()
+            payload["hidden_mean_abs"] = float(values.abs().mean().item())
+            payload["hidden_max_abs"] = float(values.abs().max().item())
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
 
     print(f"Unknown mode: {mode}")
     return 1
@@ -164,6 +212,15 @@ def _hidden_size_from_status(model_id: str) -> int:
 
     catalog = load_tensor_catalog(model_id)
     return int(catalog.hidden_size or 7168)
+
+
+def _int_option(args: list[str], name: str, default: int) -> int:
+    if name not in args:
+        return int(default)
+    index = args.index(name)
+    if index + 1 >= len(args):
+        return int(default)
+    return int(args[index + 1])
 
 
 if __name__ == "__main__":

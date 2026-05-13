@@ -1431,4 +1431,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use the catalog model directory as the source of `config.json`. DeepSeek lives on `D:\PocketLM\sources`, so runtime FP8 helpers must not assume `models\<id>\original`.
 - Shared experts are always part of the active MoE working set. Routed experts are selected by router top-k; shared expert gate/up/down is added for every token.
 - Stream `lm_head.weight` by rows for top-k scoring. DeepSeek's lm_head is about `1.85 GB`, so the correct low-RAM proof path reads chunks and keeps a merged top-k instead of loading the full tensor.
-- The current FP8 block proof is single-token only. It proves DeepSeek MLA, MoE, and decode-tail wiring without cache/mask complexity. Full prompt/decode still needs KV-cache carrying, token embedding row loading, dense layers `0-2`, all-layer orchestration, and a fused FP8 matmul path before it can be called a usable full runtime.
+- The current FP8 block proof is single-token only. It proves DeepSeek MLA, MoE, and decode-tail wiring without cache/mask complexity. Full prompt/decode still needs KV-cache carrying and a fused FP8 matmul path before it can be called a usable interactive runtime.
+
+## Phase FP8 Single Token Stack
+- Treat layers below `first_k_dense_replace` as dense MLP layers, not MoE. DeepSeek V3 uses dense layers `0-2`, then MoE from layer `3` onward.
+- Keep single-token stack proof as a correctness bridge, not a speed claim. The full 62-layer token proof completed from the external FP8 source, but it took `568.5s` because the current implementation materializes dequantized FP8 weights through Python.
+- Full prompt/decode remains a separate phase. The next boundary is KV-cache carrying and multi-token causal attention; the current all-layer proof is for one token at position 0.
