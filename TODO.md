@@ -134,5 +134,5 @@
 - Replace copied monolithic tensor registration with stable non-copy tensor handles or mapped pointers, and add BF16 dtype support to the monolithic dense path. This is required before local `qwen2.5-14b-instruct` can be routed through monolithic honestly.
 Native BF16 follow-up: wire real Qwen 14B tensor catalog loads into `MonolithicForwardSession.register_tensor` lazily so production can use the no-copy BF16 monolithic decode path.
 Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, then turn on production routing behind `PCKETLM_ENABLE_MONOLITHIC_QWEN14`.
-- Next DeepSeek runtime step: stream/fuse FP8 MLA attention projections for q_a/q_b/kv_a/kv_b/o_proj; MLP row streaming is now native-backed, while attention still materializes FP8 weights.
-- Next DeepSeek speed step: replace remaining materialized Python FP8 attention dequant with fused/paged matmul so attention weights do not become BF16 resident tensors.
+- Next DeepSeek runtime step: build a fused FP8 MLA attention projection path that combines q/kv/o work or reuses absorbed `kv_b`; simple independent streamed attention is available behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1` but is slower.
+- Next DeepSeek speed step: replace remaining Python-level FP8 attention work with fused kernels only where timing proves a win.

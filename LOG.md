@@ -5850,3 +5850,9 @@ Result: 297 passed in 21.83s
 - Real DeepSeek selected expert proof passed for layer `3`, expert `0`, with no blockers.
 - Real DeepSeek bounded decode still generated `[76394]` over layers `0-3`, cache lengths reached `3`, no blockers.
 - Process-level timing improved modestly: expert `3/0` from about `5.69s` to `5.20s`; dense layer `0` from about `8.90s` to `7.08s`.
+
+## Phase FP8 Attention Streaming Gate / Evidence
+- Tried streamed/native FP8 attention projections for `q_a`, `q_b`, `kv_a`, and `o_proj`, while keeping `kv_b` materialized for absorbed MLA reuse.
+- Correctness passed on real DeepSeek attention layer `3`, and opt-in streamed attention produced no blockers.
+- Speed result was a loss for default use: a single attention probe was about `7.20s` with materialized attention versus about `8.52s` with streamed attention. Bounded decode remained slow at about `140s`.
+- Decision: keep materialized attention as the default speed path and expose streamed attention only behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1` for low-memory experiments.

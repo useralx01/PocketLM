@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -804,6 +805,16 @@ def run_fp8_single_token_attention(
     This is a correctness bridge for the decode path: sequence length must be one,
     so causal masking and KV-cache extension are intentionally outside this helper.
     """
+    if not _streamed_fp8_attention_enabled():
+        return _run_fp8_single_token_attention_materialized(
+            model_id,
+            layer_index,
+            hidden,
+            dtype=dtype,
+            start_pos=start_pos,
+            previous_kv_cache=previous_kv_cache,
+        )
+
     deepseek_config = _load_deepseek_config(model_id)
     blockers: list[str] = []
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
@@ -818,35 +829,53 @@ def run_fp8_single_token_attention(
         "kv_b": f"{prefix}.kv_b_proj.weight",
         "o": f"{prefix}.o_proj.weight",
     }
-    loaded = {role: load_dequantized_fp8_weight(model_id, name, dtype=dtype) for role, name in weight_names.items()}
-    blockers.extend(blocker for item in loaded.values() for blocker in item.blockers)
+    kv_b_loaded = load_dequantized_fp8_weight(model_id, weight_names["kv_b"], dtype=dtype)
+    blockers.extend(kv_b_loaded.blockers)
     q_norm = _load_regular_tensor(model_id, f"{prefix}.q_a_layernorm.weight")
     kv_norm = _load_regular_tensor(model_id, f"{prefix}.kv_a_layernorm.weight")
     blockers.extend(q_norm[1])
     blockers.extend(kv_norm[1])
 
     output = None
-    if not blockers and all(item.tensor is not None for item in loaded.values()) and q_norm[0] is not None and kv_norm[0] is not None:
-        q_a = loaded["q_a"].tensor
-        q_b = loaded["q_b"].tensor
-        kv_a = loaded["kv_a"].tensor
-        kv_b = loaded["kv_b"].tensor
-        o_proj = loaded["o"].tensor
-        if q_a is None or q_b is None or kv_a is None or kv_b is None or o_proj is None:
-            blockers.append("One or more attention weights failed to materialize.")
+    loaded_bytes = int(kv_b_loaded.loaded_nbytes)
+    dequantized_bytes = 0 if kv_b_loaded.tensor is None else int(kv_b_loaded.tensor.nelement() * kv_b_loaded.tensor.element_size())
+    if not blockers and kv_b_loaded.tensor is not None and q_norm[0] is not None and kv_norm[0] is not None:
+        kv_b = kv_b_loaded.tensor
+        if kv_b is None:
+            blockers.append("Attention kv_b weight failed to materialize.")
         else:
             working = hidden_3d.float()
-            q_low = F.linear(working, q_a.float())
-            q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
-            q = F.linear(q_low, q_b.float())
+            q_low, q_a_loaded, q_a_dequant, q_a_blockers = _run_fp8_linear_streamed(
+                model_id, weight_names["q_a"], working, dtype=dtype
+            )
+            loaded_bytes += q_a_loaded
+            dequantized_bytes += q_a_dequant
+            blockers.extend(q_a_blockers)
+        if not blockers and q_low is not None:
+            q_low = _rms_norm_any(q_low.float(), q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            q, q_b_loaded_nbytes, q_b_dequant, q_b_blockers = _run_fp8_linear_streamed(
+                model_id, weight_names["q_b"], q_low, dtype=dtype
+            )
+            loaded_bytes += q_b_loaded_nbytes
+            dequantized_bytes += q_b_dequant
+            blockers.extend(q_b_blockers)
+        if not blockers and q is not None:
             n_heads = int(deepseek_config["num_attention_heads"])
             qk_nope = int(deepseek_config["qk_nope_head_dim"])
             qk_rope = int(deepseek_config["qk_rope_head_dim"])
             v_head_dim = int(deepseek_config["v_head_dim"])
             kv_lora_rank = int(deepseek_config["kv_lora_rank"])
+            q = q.float()
             q = q.view(int(hidden_3d.shape[0]), 1, n_heads, qk_nope + qk_rope)
             q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
-            kv = F.linear(working, kv_a.float())
+            kv, kv_a_loaded, kv_a_dequant, kv_a_blockers = _run_fp8_linear_streamed(
+                model_id, weight_names["kv_a"], working, dtype=dtype
+            )
+            loaded_bytes += kv_a_loaded
+            dequantized_bytes += kv_a_dequant
+            blockers.extend(kv_a_blockers)
+        if not blockers and kv is not None:
+            kv = kv.float()
             kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
             q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
             k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
@@ -867,14 +896,16 @@ def run_fp8_single_token_attention(
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
             attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
             attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
-            output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
-            next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
+            output, o_loaded, o_dequant, o_blockers = _run_fp8_linear_streamed(
+                model_id, weight_names["o"], attention_heads.flatten(2), dtype=dtype
+            )
+            loaded_bytes += o_loaded
+            dequantized_bytes += o_dequant
+            blockers.extend(o_blockers)
+            if output is not None:
+                output = output.to(dtype=dtype).contiguous()
+                next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
 
-    dequantized_bytes = sum(
-        0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size()
-        for item in loaded.values()
-    )
-    loaded_bytes = sum(item.loaded_nbytes for item in loaded.values())
     return FP8AttentionResult(
         model_id=model_id,
         layer_index=int(layer_index),
@@ -1521,6 +1552,105 @@ def _rms_norm_any(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float)
     normalized = hidden_float * torch.rsqrt(variance + eps)
     view_shape = [1] * (hidden_states.ndim - 1) + [-1]
     return (normalized * weight.float().view(*view_shape)).to(dtype=output_dtype)
+
+
+def _streamed_fp8_attention_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_STREAMED_FP8_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _run_fp8_single_token_attention_materialized(
+    model_id: str,
+    layer_index: int,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    start_pos: int,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None,
+) -> FP8AttentionResult:
+    deepseek_config = _load_deepseek_config(model_id)
+    blockers: list[str] = []
+    hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
+    if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) != 1:
+        blockers.append("FP8 attention proof currently supports exactly one token.")
+
+    prefix = f"model.layers.{int(layer_index)}.self_attn"
+    weight_names = {
+        "q_a": f"{prefix}.q_a_proj.weight",
+        "q_b": f"{prefix}.q_b_proj.weight",
+        "kv_a": f"{prefix}.kv_a_proj_with_mqa.weight",
+        "kv_b": f"{prefix}.kv_b_proj.weight",
+        "o": f"{prefix}.o_proj.weight",
+    }
+    loaded = {role: load_dequantized_fp8_weight(model_id, name, dtype=dtype) for role, name in weight_names.items()}
+    blockers.extend(blocker for item in loaded.values() for blocker in item.blockers)
+    q_norm = _load_regular_tensor(model_id, f"{prefix}.q_a_layernorm.weight")
+    kv_norm = _load_regular_tensor(model_id, f"{prefix}.kv_a_layernorm.weight")
+    blockers.extend(q_norm[1])
+    blockers.extend(kv_norm[1])
+
+    output = None
+    next_cache = None
+    if not blockers and all(item.tensor is not None for item in loaded.values()) and q_norm[0] is not None and kv_norm[0] is not None:
+        q_a = loaded["q_a"].tensor
+        q_b = loaded["q_b"].tensor
+        kv_a = loaded["kv_a"].tensor
+        kv_b = loaded["kv_b"].tensor
+        o_proj = loaded["o"].tensor
+        if q_a is None or q_b is None or kv_a is None or kv_b is None or o_proj is None:
+            blockers.append("One or more attention weights failed to materialize.")
+        else:
+            working = hidden_3d.float()
+            q_low = F.linear(working, q_a.float())
+            q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            q = F.linear(q_low, q_b.float())
+            n_heads = int(deepseek_config["num_attention_heads"])
+            qk_nope = int(deepseek_config["qk_nope_head_dim"])
+            qk_rope = int(deepseek_config["qk_rope_head_dim"])
+            v_head_dim = int(deepseek_config["v_head_dim"])
+            kv_lora_rank = int(deepseek_config["kv_lora_rank"])
+            q = q.view(int(hidden_3d.shape[0]), 1, n_heads, qk_nope + qk_rope)
+            q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+            kv = F.linear(working, kv_a.float())
+            kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
+            q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
+            k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
+            kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            if previous_kv_cache is not None:
+                previous_kv, previous_pe = previous_kv_cache
+                kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
+                pe_cache = torch.cat([previous_pe.to(k_pe.dtype), k_pe], dim=1)
+            else:
+                kv_cache = kv_latent
+                pe_cache = k_pe
+            wkv_b = kv_b.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
+            q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+            scores = (
+                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+                + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
+            ) * float(deepseek_config["softmax_scale"])
+            probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
+            attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
+            attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
+            output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
+            next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
+
+    dequantized_bytes = sum(
+        0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size()
+        for item in loaded.values()
+    )
+    loaded_bytes = sum(item.loaded_nbytes for item in loaded.values())
+    return FP8AttentionResult(
+        model_id=model_id,
+        layer_index=int(layer_index),
+        hidden_shape=[int(value) for value in hidden.shape],
+        output_shape=[] if output is None else [int(value) for value in output.shape],
+        loaded_weight_bytes=int(loaded_bytes),
+        dequantized_weight_bytes=int(dequantized_bytes),
+        output_tensor=output,
+        kv_cache=next_cache,
+        blockers=blockers,
+        ready=not blockers and output is not None,
+    )
 
 
 @lru_cache(maxsize=16)

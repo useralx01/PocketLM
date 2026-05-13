@@ -557,3 +557,8 @@
 - Wired streamed FP8 MLP linears through native FP8 E4M3 block-scaled math with fallback.
 - Moved streamed FP8 row reads onto the native byte reader when available.
 - Validated synthetic FP8 runtime tests and real DeepSeek dense, expert, and bounded decode probes.
+
+## Phase FP8 Attention Streaming Gate
+- Added an opt-in streamed FP8 attention projection path.
+- Restored materialized attention as the default after timing showed streamed attention is slower on current probes.
+- Verified default and opt-in real DeepSeek attention probes both pass with no blockers.

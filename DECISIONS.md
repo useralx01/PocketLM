@@ -1455,3 +1455,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep FP8 native linear behind `PCKETLM_DISABLE_NATIVE_FP8_LINEAR`; the Python dequant plus `torch.nn.functional.linear` path remains the fallback.
 - The first native kernel takes already-streamed FP8 rows and scale rows instead of owning file paging. This keeps correctness scoped and lets the existing row planner decide chunk size.
 - Native row reads use the existing `native_read_tensor_bytes` helper when available, then fall back to Python file reads. This is a real but modest speed win; larger gains still require fused attention and multi-projection kernels.
+
+## Phase FP8 Attention Streaming Gate
+- Do not default streamed attention yet. It reduces materialized attention projection residency, but the first streamed q/kv/o projection path is slower than materializing those smaller tensors for the current one-token MLA proof.
+- Gate streamed attention behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1`. This keeps the low-memory experiment available without slowing the normal DeepSeek path.
+- The next real attention speed win should fuse multiple projections or cache/reuse the absorbed `kv_b` layout, not just stream each projection independently.
