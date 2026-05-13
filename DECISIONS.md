@@ -1473,3 +1473,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 LUT Native Linear
 - The original scalar FP8 native kernel was too slow, but the LUT/block-loop version is a small real win on the bounded DeepSeek path. Promote the LUT version to default while keeping the disable switch.
 - Native lm_head top-k remains opt-in only; the LUT change does not alter that decision.
+
+## Phase FP8 Dual Gate-Up Kernel
+- Fuse only gate/up for now. It removes one hidden scan and one Python/native crossing without changing the down projection or MoE routing semantics.
+- Keep the single-linear fallback because expert paths and future kernels may need independent projection timing.

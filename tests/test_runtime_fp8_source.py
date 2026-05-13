@@ -171,6 +171,7 @@ def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: 
         return torch.nn.functional.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
 
     monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_dual_linear_available", lambda: False)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
     monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_FP8_LINEAR", "1")
     hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
@@ -180,6 +181,42 @@ def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: 
     assert result.ready is True
     assert result.output_tensor is not None
     assert calls["count"] == 3
+
+
+def test_run_fp8_dense_mlp_uses_native_dual_gate_up_when_available(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    calls = {"dual": 0, "single": 0}
+
+    def fake_dual_linear(
+        fp8_a: torch.Tensor,
+        scale_a: torch.Tensor,
+        fp8_b: torch.Tensor,
+        scale_b: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        calls["dual"] += 1
+        weight_a = dequantize_fp8_block_scaled(fp8_a, scale_a, dtype=torch.float32)
+        weight_b = dequantize_fp8_block_scaled(fp8_b, scale_b, dtype=torch.float32)
+        flat = hidden.reshape(-1, hidden.shape[-1]).float()
+        return torch.nn.functional.linear(flat, weight_a.float()), torch.nn.functional.linear(flat, weight_b.float())
+
+    def fake_native_linear(fp8_rows: torch.Tensor, scale_rows: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        calls["single"] += 1
+        weight = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=torch.float32)
+        return torch.nn.functional.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
+
+    monkeypatch.setattr(fp8_source, "native_fp8_dual_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_dual_linear_f32", fake_dual_linear)
+    monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
+    hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_dense_mlp(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert calls == {"dual": 1, "single": 1}
 
 
 def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:

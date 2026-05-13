@@ -582,3 +582,8 @@
 - Rebuilt `fp8_linear.dll` with FP8 lookup-table decode and scale-block dot loops.
 - Promoted native FP8 linear back to default after bounded DeepSeek timing improved versus the PyTorch-chunk comparison run.
 - Verified real DeepSeek expert and focused FP8 runtime tests.
+
+## Phase FP8 Dual Gate-Up Kernel
+- Added native dual FP8 linear for MLP gate/up projections.
+- Wired dense, shared, and selected expert MLP prefixes through the dual path.
+- Verified real DeepSeek dense and bounded decode probes.

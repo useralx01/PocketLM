@@ -232,6 +232,21 @@ def _load_fp8_linear_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.fp8_e4m3_block_linear_f32.restype = ctypes.c_int
+        if hasattr(lib, "fp8_e4m3_block_dual_linear_f32"):
+            lib.fp8_e4m3_block_dual_linear_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_block_dual_linear_f32.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP8_LINEAR_ERROR = exc
         return None
@@ -247,6 +262,11 @@ def native_fp8_linear_available() -> bool:
 def native_fp8_linear_error() -> Exception | None:
     _load_fp8_linear_lib()
     return _FP8_LINEAR_ERROR
+
+
+def native_fp8_dual_linear_available() -> bool:
+    lib = _load_fp8_linear_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_dual_linear_f32"))
 
 
 def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
@@ -2059,6 +2079,60 @@ def fp8_e4m3_block_linear_f32(fp8_weight: torch.Tensor, scale_inv: torch.Tensor,
     if code != 0:
         raise RuntimeError(f"fp8_e4m3_block_linear_f32 failed with code {code}")
     return out
+
+
+def fp8_e4m3_block_dual_linear_f32(
+    fp8_weight_a: torch.Tensor,
+    scale_inv_a: torch.Tensor,
+    fp8_weight_b: torch.Tensor,
+    scale_inv_b: torch.Tensor,
+    hidden: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lib = _load_fp8_linear_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_dual_linear_f32"):
+        reason = "disabled" if _native_fp8_linear_disabled() else _FP8_LINEAR_ERROR
+        raise RuntimeError(f"Native FP8 dual linear is unavailable: {reason}")
+    if fp8_weight_a.ndim != 2 or fp8_weight_b.ndim != 2:
+        raise ValueError("fp8 weights must have shape [out_rows, in_cols]")
+    weight_a_cpu = fp8_weight_a.detach().cpu().contiguous().to(torch.uint8)
+    weight_b_cpu = fp8_weight_b.detach().cpu().contiguous().to(torch.uint8)
+    if tuple(weight_a_cpu.shape) != tuple(weight_b_cpu.shape):
+        raise ValueError("dual FP8 weights must have matching shapes")
+    scale_a_cpu = scale_inv_a.detach().cpu().contiguous().to(torch.float32)
+    scale_b_cpu = scale_inv_b.detach().cpu().contiguous().to(torch.float32)
+    if tuple(scale_a_cpu.shape) != tuple(scale_b_cpu.shape):
+        raise ValueError("dual FP8 scales must have matching shapes")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    out_rows = int(weight_a_cpu.shape[0])
+    in_cols = int(weight_a_cpu.shape[1])
+    if int(hidden_cpu.shape[1]) != in_cols:
+        raise ValueError("hidden input size does not match FP8 weight columns")
+    expected_scale_rows = (out_rows + 127) // 128
+    expected_scale_cols = (in_cols + 127) // 128
+    if (
+        int(scale_a_cpu.shape[0]) != expected_scale_rows
+        or int(scale_a_cpu.shape[1]) != expected_scale_cols
+    ):
+        raise ValueError("scale_inv shape does not match FP8 128x128 block layout")
+
+    out_a = torch.empty((int(hidden_cpu.shape[0]), out_rows), dtype=torch.float32)
+    out_b = torch.empty((int(hidden_cpu.shape[0]), out_rows), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_dual_linear_f32(
+        ctypes.c_void_p(int(weight_a_cpu.data_ptr())),
+        ctypes.c_void_p(int(scale_a_cpu.data_ptr())),
+        ctypes.c_void_p(int(weight_b_cpu.data_ptr())),
+        ctypes.c_void_p(int(scale_b_cpu.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(out_a.data_ptr())),
+        ctypes.c_void_p(int(out_b.data_ptr())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(out_rows),
+        ctypes.c_longlong(in_cols),
+        ctypes.c_longlong(expected_scale_cols),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_dual_linear_f32 failed with code {code}")
+    return out_a, out_b
 
 
 def q4_dequant_to_fp16(

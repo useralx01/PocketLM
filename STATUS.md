@@ -682,3 +682,4 @@ Phase FP8 Prompt Prefill: bounded DeepSeek decode now prefills multi-token promp
 Phase FP8 Timing Visibility: FP8 prefill/decode summaries now report elapsed seconds, and `runtime_fp8_cli --prefill` gives direct prompt-prefill probes.
 Phase FP8 Measured Defaults: slower native FP8 linear and native lm_head top-k paths are opt-in only; default bounded DeepSeek decode stays on the faster PyTorch chunked path.
 Phase FP8 LUT Native Linear: native FP8 linear now uses LUT/block-loop math and is default again; bounded DeepSeek layers 0-3 still generate `76394`, with the fallback switch preserved.
+Phase FP8 Dual Gate-Up Kernel: MLP gate/up now use a native dual projection path; bounded DeepSeek layers 0-3 generated `76394` in about 66.5s.

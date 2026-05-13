@@ -15,10 +15,12 @@ import torch
 import torch.nn.functional as F
 
 from pcketlm.native import (
+    fp8_e4m3_block_dual_linear_f32,
     fp8_e4m3_block_linear_f32,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
+    native_fp8_dual_linear_available,
     native_fp8_linear_available,
     native_read_tensor_bytes,
 )
@@ -1584,12 +1586,15 @@ def _run_fp8_mlp_prefix(
     gate_name = f"{prefix}.gate_proj.weight"
     up_name = f"{prefix}.up_proj.weight"
     down_name = f"{prefix}.down_proj.weight"
-    gate_out, gate_loaded, gate_dequant, gate_blockers = _run_fp8_linear_streamed(
-        model_id, gate_name, hidden, dtype=dtype
+    gate_out, up_out, gate_up_loaded, gate_up_dequant, gate_up_blockers = _run_fp8_dual_linear_streamed(
+        model_id, gate_name, up_name, hidden, dtype=dtype
     )
-    up_out, up_loaded, up_dequant, up_blockers = _run_fp8_linear_streamed(
-        model_id, up_name, hidden, dtype=dtype
-    )
+    gate_loaded = gate_up_loaded
+    up_loaded = 0
+    gate_dequant = gate_up_dequant
+    up_dequant = 0
+    gate_blockers = gate_up_blockers
+    up_blockers: list[str] = []
     blockers = [*gate_blockers, *up_blockers]
     output = None
     down_loaded = 0
@@ -1606,6 +1611,97 @@ def _run_fp8_mlp_prefix(
     loaded_bytes = gate_loaded + up_loaded + down_loaded
     dequantized_bytes = gate_dequant + up_dequant + down_dequant
     return output, int(loaded_bytes), int(dequantized_bytes), blockers
+
+
+def _run_fp8_dual_linear_streamed(
+    model_id: str,
+    weight_name_a: str,
+    weight_name_b: str,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    chunk_rows: int = 2048,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, int, int, list[str]]:
+    if not (_native_fp8_linear_enabled() and native_fp8_dual_linear_available()):
+        output_a, loaded_a, dequant_a, blockers_a = _run_fp8_linear_streamed(
+            model_id, weight_name_a, hidden, dtype=dtype, chunk_rows=chunk_rows
+        )
+        output_b, loaded_b, dequant_b, blockers_b = _run_fp8_linear_streamed(
+            model_id, weight_name_b, hidden, dtype=dtype, chunk_rows=chunk_rows
+        )
+        return output_a, output_b, loaded_a + loaded_b, dequant_a + dequant_b, [*blockers_a, *blockers_b]
+
+    weight_a = find_tensor_catalog_entry(model_id, weight_name_a)
+    weight_b = find_tensor_catalog_entry(model_id, weight_name_b)
+    blockers: list[str] = []
+    if weight_a is None:
+        blockers.append(f"Tensor {weight_name_a} is not present in the tensor catalog.")
+    if weight_b is None:
+        blockers.append(f"Tensor {weight_name_b} is not present in the tensor catalog.")
+    if blockers or weight_a is None or weight_b is None:
+        return None, None, 0, 0, blockers
+    if not is_fp8_dtype(weight_a.dtype):
+        blockers.append(f"Tensor {weight_name_a} is {weight_a.dtype}, not FP8.")
+    if not is_fp8_dtype(weight_b.dtype):
+        blockers.append(f"Tensor {weight_name_b} is {weight_b.dtype}, not FP8.")
+    if list(weight_a.shape) != list(weight_b.shape):
+        blockers.append(f"Dual FP8 tensors {weight_name_a} and {weight_name_b} have different shapes.")
+    if not weight_a.scale_tensor_name:
+        blockers.append(f"Tensor {weight_name_a} has no scale companion.")
+    if not weight_b.scale_tensor_name:
+        blockers.append(f"Tensor {weight_name_b} has no scale companion.")
+    scale_a = find_tensor_catalog_entry(model_id, weight_a.scale_tensor_name) if weight_a.scale_tensor_name else None
+    scale_b = find_tensor_catalog_entry(model_id, weight_b.scale_tensor_name) if weight_b.scale_tensor_name else None
+    if scale_a is None:
+        blockers.append(f"Scale tensor {weight_a.scale_tensor_name} is not present in the tensor catalog.")
+    if scale_b is None:
+        blockers.append(f"Scale tensor {weight_b.scale_tensor_name} is not present in the tensor catalog.")
+    if len(weight_a.shape) != 2:
+        blockers.append(f"Tensor {weight_name_a} is not a 2D weight tensor.")
+    if blockers or scale_a is None or scale_b is None:
+        return None, None, 0, 0, blockers
+
+    flat_hidden = hidden.reshape(-1, int(hidden.shape[-1])).float()
+    out_rows = int(weight_a.shape[0])
+    in_cols = int(weight_a.shape[1])
+    if flat_hidden.shape[-1] != in_cols:
+        return None, None, 0, 0, [f"Hidden size {flat_hidden.shape[-1]} does not match input size {in_cols}."]
+
+    rows_per_chunk = max(128, int(chunk_rows))
+    if rows_per_chunk % 128 != 0:
+        rows_per_chunk = ((rows_per_chunk + 127) // 128) * 128
+    output_a = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
+    output_b = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
+    loaded_bytes = 0
+    dequantized_bytes = 0
+    for start in range(0, out_rows, rows_per_chunk):
+        end = min(out_rows, start + rows_per_chunk)
+        fp8_rows_a = _read_fp8_weight_rows(weight_a, start, end)
+        fp8_rows_b = _read_fp8_weight_rows(weight_b, start, end)
+        scale_rows_a = _read_scale_rows_for_weight_chunk(scale_a, start, end)
+        scale_rows_b = _read_scale_rows_for_weight_chunk(scale_b, start, end)
+        loaded_bytes += (
+            int(fp8_rows_a.nelement() * fp8_rows_a.element_size())
+            + int(fp8_rows_b.nelement() * fp8_rows_b.element_size())
+            + int(scale_rows_a.nelement() * scale_rows_a.element_size())
+            + int(scale_rows_b.nelement() * scale_rows_b.element_size())
+        )
+        native_a, native_b = fp8_e4m3_block_dual_linear_f32(
+            fp8_rows_a, scale_rows_a, fp8_rows_b, scale_rows_b, flat_hidden
+        )
+        dequantized_bytes += int(
+            2 * fp8_rows_a.shape[0] * fp8_rows_a.shape[1] * torch.empty((), dtype=dtype).element_size()
+        )
+        output_a[:, start:end] = native_a.to(dtype=dtype)
+        output_b[:, start:end] = native_b.to(dtype=dtype)
+
+    return (
+        output_a.reshape(*hidden.shape[:-1], out_rows).contiguous(),
+        output_b.reshape(*hidden.shape[:-1], out_rows).contiguous(),
+        int(loaded_bytes),
+        int(dequantized_bytes),
+        blockers,
+    )
 
 
 def _run_fp8_linear_streamed(

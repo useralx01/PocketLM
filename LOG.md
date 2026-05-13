@@ -5879,3 +5879,10 @@ Result: 297 passed in 21.83s
 - Real DeepSeek expert `3/0` passed with no blockers and matching output scale (`output_mean_abs` about `0.06078`).
 - Isolated timings were small wins after the LUT change: expert `3/0` about `7.06s` with native versus `7.18s` default PyTorch; dense layer `0` about `9.62s` with native versus `9.83s` default PyTorch.
 - Full bounded decode layers `0-3` generated `[76394]` with native LUT default candidate in about `70.4s`, compared with about `76.7s` on the PyTorch-chunk comparison run. Native FP8 linear is now the default again, with `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` as the fallback switch.
+
+## Phase FP8 Dual Gate-Up Kernel / Evidence
+- Added native `fp8_e4m3_block_dual_linear_f32()` so MLP gate and up projections can share the same hidden scan per streamed chunk.
+- Wired `_run_fp8_mlp_prefix()` to use the dual native path for gate/up, with the single-linear path as fallback.
+- Synthetic FP8 runtime tests passed with explicit coverage for both single native and dual native paths.
+- Real DeepSeek dense layer `0` passed with no blockers. Isolated dense timing improved to about `6.76s` native dual versus `7.24s` native-disabled fallback; selected expert `3/0` was roughly tied.
+- Real bounded DeepSeek decode over layers `0-3` generated `[76394]` with clean caches in about `66.47s`.

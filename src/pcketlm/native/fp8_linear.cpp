@@ -74,3 +74,59 @@ extern "C" __declspec(dllexport) int fp8_e4m3_block_linear_f32(
     }
     return 0;
 }
+
+extern "C" __declspec(dllexport) int fp8_e4m3_block_dual_linear_f32(
+    const uint8_t* fp8_weight_a,
+    const float* scale_inv_a,
+    const uint8_t* fp8_weight_b,
+    const float* scale_inv_b,
+    const float* hidden,
+    float* out_a,
+    float* out_b,
+    int64_t batch,
+    int64_t out_rows,
+    int64_t in_cols,
+    int64_t scale_cols
+) {
+    if (
+        fp8_weight_a == nullptr || scale_inv_a == nullptr ||
+        fp8_weight_b == nullptr || scale_inv_b == nullptr ||
+        hidden == nullptr || out_a == nullptr || out_b == nullptr
+    ) {
+        return -1;
+    }
+    if (batch <= 0 || out_rows <= 0 || in_cols <= 0 || scale_cols <= 0) {
+        return -2;
+    }
+
+    const float* lut = fp8_e4m3fn_lut();
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t row = 0; row < out_rows; ++row) {
+            const int64_t scale_row = row / 128;
+            const uint8_t* weight_row_a = fp8_weight_a + row * in_cols;
+            const uint8_t* weight_row_b = fp8_weight_b + row * in_cols;
+            const float* hidden_row = hidden + b * in_cols;
+            float acc_a = 0.0f;
+            float acc_b = 0.0f;
+            for (int64_t scale_col = 0; scale_col < scale_cols; ++scale_col) {
+                const int64_t start_col = scale_col * 128;
+                const int64_t end_col = std::min<int64_t>(in_cols, start_col + 128);
+                const float scale_a = scale_inv_a[scale_row * scale_cols + scale_col];
+                const float scale_b = scale_inv_b[scale_row * scale_cols + scale_col];
+                float block_acc_a = 0.0f;
+                float block_acc_b = 0.0f;
+                for (int64_t col = start_col; col < end_col; ++col) {
+                    const float h = hidden_row[col];
+                    block_acc_a += h * lut[weight_row_a[col]];
+                    block_acc_b += h * lut[weight_row_b[col]];
+                }
+                acc_a += block_acc_a * scale_a;
+                acc_b += block_acc_b * scale_b;
+            }
+            out_a[b * out_rows + row] = acc_a;
+            out_b[b * out_rows + row] = acc_b;
+        }
+    }
+    return 0;
+}
