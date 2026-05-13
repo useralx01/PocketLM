@@ -446,6 +446,24 @@ class FP8DecodeLoopResult:
         }
 
 
+@dataclass(slots=True)
+class FP8PromptPrefillResult:
+    """Layer-wise prompt prefill result for a bounded FP8 decode run."""
+
+    model_id: str
+    prompt_token_ids: list[int]
+    start_layer: int
+    layer_count: int
+    executed_layers: list[int]
+    hidden_shape: list[int]
+    tail: FP8DecodeTailResult | None = None
+    output_tensor: torch.Tensor | None = None
+    next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    step_summaries: list[dict] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+
 def fp8_source_status(model_id: str) -> dict:
     """Return FP8 source readiness from the persisted tensor catalog."""
     catalog = load_tensor_catalog(model_id)
@@ -818,8 +836,10 @@ def run_fp8_single_token_attention(
     deepseek_config = _load_deepseek_config(model_id)
     blockers: list[str] = []
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
-    if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) != 1:
-        blockers.append("FP8 attention proof currently supports exactly one token.")
+    if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) < 1:
+        blockers.append("FP8 attention requires hidden shape [batch, seq, hidden] with at least one token.")
+    if previous_kv_cache is not None and int(hidden_3d.shape[1]) != 1:
+        blockers.append("FP8 cached attention currently supports one appended token at a time.")
 
     prefix = f"model.layers.{int(layer_index)}.self_attn"
     weight_names = {
@@ -866,7 +886,8 @@ def run_fp8_single_token_attention(
             v_head_dim = int(deepseek_config["v_head_dim"])
             kv_lora_rank = int(deepseek_config["kv_lora_rank"])
             q = q.float()
-            q = q.view(int(hidden_3d.shape[0]), 1, n_heads, qk_nope + qk_rope)
+            seq_len = int(hidden_3d.shape[1])
+            q = q.view(int(hidden_3d.shape[0]), seq_len, n_heads, qk_nope + qk_rope)
             q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
             kv, kv_a_loaded, kv_a_dequant, kv_a_blockers = _run_fp8_linear_streamed(
                 model_id, weight_names["kv_a"], working, dtype=dtype
@@ -893,6 +914,9 @@ def run_fp8_single_token_attention(
                 torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
                 + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
             ) * float(deepseek_config["softmax_scale"])
+            if previous_kv_cache is None and seq_len > 1:
+                causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
+                scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
             attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
             attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
@@ -1079,6 +1103,139 @@ def load_fp8_token_embedding(model_id: str, token_id: int) -> FP8TokenEmbeddingR
     )
 
 
+def _load_fp8_prompt_embeddings(model_id: str, token_ids: list[int]) -> tuple[torch.Tensor | None, list[str]]:
+    rows: list[torch.Tensor] = []
+    blockers: list[str] = []
+    for token_id in token_ids:
+        loaded = load_fp8_token_embedding(model_id, int(token_id))
+        blockers.extend(loaded.blockers)
+        if loaded.output_tensor is not None:
+            rows.append(loaded.output_tensor)
+    if blockers or len(rows) != len(token_ids):
+        return None, blockers or ["One or more prompt embedding rows failed to materialize."]
+    return torch.cat(rows, dim=1).contiguous(), []
+
+
+def _run_fp8_prefill_block(
+    model_id: str,
+    layer_index: int,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8BlockResult:
+    hidden_3d = hidden.reshape(1, -1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
+    config = _load_deepseek_config(model_id)
+    input_norm = _load_regular_tensor(model_id, f"model.layers.{int(layer_index)}.input_layernorm.weight")
+    post_norm = _load_regular_tensor(model_id, f"model.layers.{int(layer_index)}.post_attention_layernorm.weight")
+    blockers = list(input_norm[1]) + list(post_norm[1])
+    attention = None
+    moe = None
+    dense_mlp = None
+    output = None
+    next_cache = None
+    if not blockers and input_norm[0] is not None and post_norm[0] is not None:
+        normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0], float(config["rms_norm_eps"]))
+        attention = _run_fp8_single_token_attention_materialized(
+            model_id,
+            layer_index,
+            normed,
+            dtype=dtype,
+            start_pos=0,
+            previous_kv_cache=None,
+        )
+        blockers.extend(attention.blockers)
+        if attention.output_tensor is not None:
+            hidden_after_attn = hidden_3d.to(dtype=dtype) + attention.output_tensor.to(dtype=dtype)
+            post_normed = _rms_norm_any(hidden_after_attn, post_norm[0], float(config["rms_norm_eps"]))
+            if int(layer_index) < int(config["first_k_dense_replace"]):
+                dense_mlp = run_fp8_dense_mlp(model_id, layer_index, post_normed, dtype=dtype)
+                blockers.extend(dense_mlp.blockers)
+                if dense_mlp.output_tensor is not None:
+                    output = hidden_after_attn + dense_mlp.output_tensor.to(dtype=dtype)
+            else:
+                moe = run_fp8_moe(model_id, layer_index, post_normed, dtype=dtype)
+                blockers.extend(moe.blockers)
+                if moe.output_tensor is not None:
+                    output = hidden_after_attn + moe.output_tensor.to(dtype=dtype)
+            next_cache = attention.kv_cache
+
+    return FP8BlockResult(
+        model_id=model_id,
+        layer_index=int(layer_index),
+        hidden_shape=[int(value) for value in hidden.shape],
+        output_shape=[] if output is None else [int(value) for value in output.shape],
+        attention=attention,
+        moe=moe,
+        dense_mlp=dense_mlp,
+        output_tensor=None if output is None else output.contiguous(),
+        next_kv_cache=next_cache,
+        blockers=blockers,
+        ready=not blockers and output is not None,
+    )
+
+
+def run_fp8_prompt_prefill(
+    model_id: str,
+    token_ids: list[int],
+    *,
+    start_layer: int = 0,
+    layer_count: int = 1,
+    include_tail: bool = True,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8PromptPrefillResult:
+    """Run a bounded prompt prefill layer-wise so prompt weights are loaded once per layer."""
+    prompt = [int(value) for value in token_ids]
+    hidden, blockers = _load_fp8_prompt_embeddings(model_id, prompt)
+    executed_layers: list[int] = []
+    summaries: list[dict] = []
+    caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    tail = None
+    if not prompt:
+        blockers.append("At least one token id is required.")
+    if hidden is None:
+        blockers.append("Prompt embeddings did not materialize.")
+
+    if not blockers and hidden is not None:
+        for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
+            step = _run_fp8_prefill_block(model_id, layer_index, hidden.to(dtype=dtype), dtype=dtype)
+            summaries.append(
+                {
+                    "layer_index": int(layer_index),
+                    "ready": bool(step.ready),
+                    "output_shape": list(step.output_shape),
+                    "ffn_type": "dense" if step.dense_mlp is not None else "moe",
+                    "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
+                    "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
+                    "blockers": list(step.blockers),
+                }
+            )
+            blockers.extend(step.blockers)
+            if not step.ready or step.output_tensor is None:
+                break
+            hidden = step.output_tensor
+            if step.next_kv_cache is not None:
+                caches[int(layer_index)] = step.next_kv_cache
+            executed_layers.append(int(layer_index))
+        if include_tail and not blockers and hidden is not None:
+            tail = run_fp8_decode_tail_topk(model_id, hidden[:, -1:, :])
+            blockers.extend(tail.blockers)
+
+    return FP8PromptPrefillResult(
+        model_id=model_id,
+        prompt_token_ids=prompt,
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        executed_layers=executed_layers,
+        hidden_shape=[] if hidden is None else [int(value) for value in hidden.shape],
+        tail=tail,
+        output_tensor=hidden,
+        next_kv_caches=caches,
+        step_summaries=summaries,
+        blockers=blockers,
+        ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
+    )
+
+
 def run_fp8_single_token_forward(
     model_id: str,
     token_id: int,
@@ -1171,6 +1328,37 @@ def run_fp8_decode_loop(
     current_tokens = list(prompt)
     if not current_tokens:
         blockers.append("At least one token id is required.")
+
+    if not blockers and len(prompt) > 1 and _fp8_prompt_prefill_enabled():
+        prefill = run_fp8_prompt_prefill(
+            model_id,
+            prompt,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            include_tail=int(max_new_tokens) > 0,
+            dtype=dtype,
+        )
+        summaries.append(
+            {
+                "position": 0,
+                "phase": "prompt_prefill",
+                "token_ids": list(prompt),
+                "ready": bool(prefill.ready),
+                "executed_layers": list(prefill.executed_layers),
+                "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
+                "cache_sequence_lengths": {
+                    str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
+                },
+                "blockers": list(prefill.blockers),
+            }
+        )
+        blockers.extend(prefill.blockers)
+        if prefill.ready:
+            caches = dict(prefill.next_kv_caches)
+            if prefill.tail is not None:
+                final_top_ids = list(prefill.tail.top_token_ids)
+                final_top_logits = list(prefill.tail.top_logits)
+            position = len(prompt)
 
     while not blockers and position < len(prompt) + max(0, int(max_new_tokens)):
         if position < len(prompt):
@@ -1558,6 +1746,10 @@ def _streamed_fp8_attention_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_STREAMED_FP8_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _fp8_prompt_prefill_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FP8_PROMPT_PREFILL", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+
 def _run_fp8_single_token_attention_materialized(
     model_id: str,
     layer_index: int,
@@ -1570,8 +1762,10 @@ def _run_fp8_single_token_attention_materialized(
     deepseek_config = _load_deepseek_config(model_id)
     blockers: list[str] = []
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
-    if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) != 1:
-        blockers.append("FP8 attention proof currently supports exactly one token.")
+    if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) < 1:
+        blockers.append("FP8 attention requires hidden shape [batch, seq, hidden] with at least one token.")
+    if previous_kv_cache is not None and int(hidden_3d.shape[1]) != 1:
+        blockers.append("FP8 cached attention currently supports one appended token at a time.")
 
     prefix = f"model.layers.{int(layer_index)}.self_attn"
     weight_names = {
@@ -1608,7 +1802,8 @@ def _run_fp8_single_token_attention_materialized(
             qk_rope = int(deepseek_config["qk_rope_head_dim"])
             v_head_dim = int(deepseek_config["v_head_dim"])
             kv_lora_rank = int(deepseek_config["kv_lora_rank"])
-            q = q.view(int(hidden_3d.shape[0]), 1, n_heads, qk_nope + qk_rope)
+            seq_len = int(hidden_3d.shape[1])
+            q = q.view(int(hidden_3d.shape[0]), seq_len, n_heads, qk_nope + qk_rope)
             q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
             kv = F.linear(working, kv_a.float())
             kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
@@ -1628,6 +1823,9 @@ def _run_fp8_single_token_attention_materialized(
                 torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
                 + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
             ) * float(deepseek_config["softmax_scale"])
+            if previous_kv_cache is None and seq_len > 1:
+                causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
+                scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
             attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
             attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])

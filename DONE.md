@@ -562,3 +562,8 @@
 - Added an opt-in streamed FP8 attention projection path.
 - Restored materialized attention as the default after timing showed streamed attention is slower on current probes.
 - Verified default and opt-in real DeepSeek attention probes both pass with no blockers.
+
+## Phase FP8 Prompt Prefill
+- Added `run_fp8_prompt_prefill()` for layer-wise prompt execution.
+- Wired multi-token prompt prefill into `run_fp8_decode_loop()` by default.
+- Real DeepSeek bounded decode generated the same token `[76394]` with prompt caches length `2` and final caches length `3`.

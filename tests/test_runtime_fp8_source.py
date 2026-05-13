@@ -11,6 +11,7 @@ from pcketlm.core.runtime.fp8_source import (
     run_fp8_decode_tail_topk,
     run_fp8_decode_loop,
     run_fp8_dense_mlp,
+    run_fp8_prompt_prefill,
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
@@ -243,6 +244,19 @@ def test_run_fp8_decode_loop_generates_from_prompt_tail(tmp_path: Path, monkeypa
     assert result.generated_token_ids == [result.final_top_token_ids[0]]
     assert result.positions_completed == 3
     assert result.step_summaries[-1]["cache_sequence_lengths"] == {}
+
+
+def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    result = run_fp8_prompt_prefill(model_id, [1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.executed_layers == [0]
+    assert result.output_tensor is not None
+    assert result.hidden_shape == [1, 2, 4]
+    assert result.next_kv_caches[0][0].shape[1] == 2
 
 
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:

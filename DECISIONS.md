@@ -1460,3 +1460,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Do not default streamed attention yet. It reduces materialized attention projection residency, but the first streamed q/kv/o projection path is slower than materializing those smaller tensors for the current one-token MLA proof.
 - Gate streamed attention behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1`. This keeps the low-memory experiment available without slowing the normal DeepSeek path.
 - The next real attention speed win should fuse multiple projections or cache/reuse the absorbed `kv_b` layout, not just stream each projection independently.
+
+## Phase FP8 Prompt Prefill
+- Default bounded decode should prefill multi-token prompts layer-wise unless `PCKETLM_DISABLE_FP8_PROMPT_PREFILL=1` is set. This avoids reloading the same prompt-layer weights once per prompt token.
+- Multi-token prefill uses materialized attention with a causal mask. Cached decode remains one appended token at a time.
+- Keep the old single-token loop available through the disable flag for debugging and comparison.

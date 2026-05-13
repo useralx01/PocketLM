@@ -5856,3 +5856,9 @@ Result: 297 passed in 21.83s
 - Correctness passed on real DeepSeek attention layer `3`, and opt-in streamed attention produced no blockers.
 - Speed result was a loss for default use: a single attention probe was about `7.20s` with materialized attention versus about `8.52s` with streamed attention. Bounded decode remained slow at about `140s`.
 - Decision: keep materialized attention as the default speed path and expose streamed attention only behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1` for low-memory experiments.
+
+## Phase FP8 Prompt Prefill / Evidence
+- Added layer-wise prompt prefill for bounded FP8 decode. Prompts with more than one token now run the whole prompt through each layer once, then generation continues with carried KV caches.
+- Extended materialized FP8 MLA attention to handle multi-token prefill with a causal mask while keeping cached decode to one appended token at a time.
+- Real DeepSeek bounded decode proof: prompt `[0, 1]`, layers `0-3`, `max_new=1`, prompt prefill cache lengths reached `2`, generated `[76394]`, final cache lengths reached `3`, no blockers.
+- Timing improved from the prior `130-140s` range to about `113.12s` for the same bounded run.
