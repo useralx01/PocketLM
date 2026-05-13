@@ -1450,3 +1450,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Streamed MLP
 - Stream MLP weights by output rows before attempting native kernels. This cuts peak dequantized memory for dense/expert/shared MLPs and keeps the path external-disk friendly while preserving exact FP8+scale math.
 - Keep attention materialized for now. MLA attention has different projection shapes and absorbed-cache math, so MLP row streaming is the lower-risk first speed/memory route.
+
+## Phase FP8 Native Streamed Linear
+- Keep FP8 native linear behind `PCKETLM_DISABLE_NATIVE_FP8_LINEAR`; the Python dequant plus `torch.nn.functional.linear` path remains the fallback.
+- The first native kernel takes already-streamed FP8 rows and scale rows instead of owning file paging. This keeps correctness scoped and lets the existing row planner decide chunk size.
+- Native row reads use the existing `native_read_tensor_bytes` helper when available, then fall back to Python file reads. This is a real but modest speed win; larger gains still require fused attention and multi-projection kernels.

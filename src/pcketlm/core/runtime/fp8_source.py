@@ -12,6 +12,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from pcketlm.native import (
+    fp8_e4m3_block_linear_f32,
+    native_fp16_loader_available,
+    native_fp8_linear_available,
+    native_read_tensor_bytes,
+)
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -1283,6 +1289,15 @@ def _read_tensor_rows(entry: TensorCatalogEntry, start_row: int, end_row: int) -
     cols = int(entry.shape[1])
     row_bytes = cols * torch.empty((), dtype=dtype).element_size()
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
+    if native_fp16_loader_available():
+        out = torch.empty((row_count, cols), dtype=dtype)
+        native_read_tensor_bytes(
+            entry.shard_path,
+            base_offset + entry.data_offset_start + int(start_row) * row_bytes,
+            row_count * row_bytes,
+            out,
+        )
+        return out
     with entry.shard_path.open("rb") as handle:
         handle.seek(base_offset + entry.data_offset_start + int(start_row) * row_bytes)
         raw = handle.read(row_count * row_bytes)
@@ -1296,6 +1311,15 @@ def _read_fp8_weight_rows(entry: TensorCatalogEntry, start_row: int, end_row: in
     cols = int(entry.shape[1])
     row_bytes = cols
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
+    if native_fp16_loader_available():
+        out = torch.empty((row_count, cols), dtype=torch.uint8)
+        native_read_tensor_bytes(
+            entry.shard_path,
+            base_offset + entry.data_offset_start + int(start_row) * row_bytes,
+            row_count * row_bytes,
+            out,
+        )
+        return out
     with entry.shard_path.open("rb") as handle:
         handle.seek(base_offset + entry.data_offset_start + int(start_row) * row_bytes)
         raw = handle.read(row_count * row_bytes)
@@ -1383,9 +1407,14 @@ def _run_fp8_linear_streamed(
         loaded_bytes += int(fp8_rows.nelement() * fp8_rows.element_size()) + int(
             scale_rows.nelement() * scale_rows.element_size()
         )
-        dequantized = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=dtype)
-        dequantized_bytes += int(dequantized.nelement() * dequantized.element_size())
-        output[:, start:end] = F.linear(flat_hidden, dequantized.float()).to(dtype=dtype)
+        if native_fp8_linear_available():
+            native_out = fp8_e4m3_block_linear_f32(fp8_rows, scale_rows, flat_hidden)
+            dequantized_bytes += int(fp8_rows.shape[0] * fp8_rows.shape[1] * torch.empty((), dtype=dtype).element_size())
+            output[:, start:end] = native_out.to(dtype=dtype)
+        else:
+            dequantized = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=dtype)
+            dequantized_bytes += int(dequantized.nelement() * dequantized.element_size())
+            output[:, start:end] = F.linear(flat_hidden, dequantized.float()).to(dtype=dtype)
 
     return output.reshape(*hidden.shape[:-1], out_rows).contiguous(), loaded_bytes, dequantized_bytes, blockers
 

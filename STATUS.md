@@ -676,3 +676,4 @@ Phase FP8 Single Token Stack: DeepSeek token 0 now runs from embedding through a
 Phase FP8 KV Carrying Decode: DeepSeek FP8 MLA now carries per-layer latent KV/rope caches across token steps; real two-token probes pass for layer 0 and layers 0-3 with cache lengths advancing to 2; full suite passes with 411 tests.
 Phase FP8 Prompt Decode Loop: bounded DeepSeek FP8 greedy decode loop now processes prompt tokens with carried KV and generates one next token over layers 0-3; full suite passes with 412 tests.
 Phase FP8 Streamed MLP: dense/expert/shared FP8 MLPs now stream weight rows instead of materializing full dequantized tensors; real DeepSeek dense, expert, and bounded decode proofs pass; full suite passes with 412 tests.
+Phase FP8 Native Streamed Linear: native FP8 linears and native row reads are wired into streamed MLP; real DeepSeek probes pass, with modest speed wins but attention still the next bottleneck.

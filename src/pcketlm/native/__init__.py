@@ -20,6 +20,7 @@ _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
 _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
+_FP8_LINEAR_DLL = _NATIVE_DIR / "fp8_linear.dll"
 _PCKETLM_FORWARD_DLL = _NATIVE_DIR / "pcketlm_forward.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
@@ -37,6 +38,8 @@ _FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
 _FP16_PACKED_GEMV_ERROR: Exception | None = None
 _ROW8_ARTIFACT_LIB: ctypes.CDLL | None = None
 _ROW8_ARTIFACT_ERROR: Exception | None = None
+_FP8_LINEAR_LIB: ctypes.CDLL | None = None
+_FP8_LINEAR_ERROR: Exception | None = None
 _PCKETLM_FORWARD_LIB: ctypes.CDLL | None = None
 _PCKETLM_FORWARD_ERROR: Exception | None = None
 _PACKED_GEMV_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
@@ -79,6 +82,10 @@ def _native_packed_gemv_disabled() -> bool:
 
 def _native_row8_artifact_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_ROW8_ARTIFACT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_linear_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _monolithic_disabled() -> bool:
@@ -201,6 +208,45 @@ def native_fp16_loader_available() -> bool:
 def native_fp16_loader_error() -> Exception | None:
     _load_fp16_loader_lib()
     return _FP16_LOADER_ERROR
+
+
+def _load_fp8_linear_lib() -> ctypes.CDLL | None:
+    global _FP8_LINEAR_LIB, _FP8_LINEAR_ERROR
+    if _native_fp8_linear_disabled():
+        return None
+    if _FP8_LINEAR_LIB is not None:
+        return _FP8_LINEAR_LIB
+    if not _FP8_LINEAR_DLL.exists():
+        _FP8_LINEAR_ERROR = FileNotFoundError(str(_FP8_LINEAR_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP8_LINEAR_DLL))
+        lib.fp8_e4m3_block_linear_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.fp8_e4m3_block_linear_f32.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP8_LINEAR_ERROR = exc
+        return None
+    _FP8_LINEAR_LIB = lib
+    _FP8_LINEAR_ERROR = None
+    return lib
+
+
+def native_fp8_linear_available() -> bool:
+    return _load_fp8_linear_lib() is not None
+
+
+def native_fp8_linear_error() -> Exception | None:
+    _load_fp8_linear_lib()
+    return _FP8_LINEAR_ERROR
 
 
 def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
@@ -1976,6 +2022,43 @@ def native_copy_tensor_bytes(source: bytes | bytearray | memoryview, out: torch.
     )
     if code != 0:
         raise OSError(f"native_copy_tensor_bytes failed with code {code}")
+
+
+def fp8_e4m3_block_linear_f32(fp8_weight: torch.Tensor, scale_inv: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp8_linear_lib()
+    if lib is None:
+        reason = "disabled" if _native_fp8_linear_disabled() else _FP8_LINEAR_ERROR
+        raise RuntimeError(f"Native FP8 linear is unavailable: {reason}")
+    if fp8_weight.ndim != 2:
+        raise ValueError("fp8_weight must have shape [out_rows, in_cols]")
+    if scale_inv.ndim != 2:
+        raise ValueError("scale_inv must have shape [scale_rows, scale_cols]")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    weight_cpu = fp8_weight.detach().cpu().contiguous().to(torch.uint8)
+    scale_cpu = scale_inv.detach().cpu().contiguous().to(torch.float32)
+    out_rows = int(weight_cpu.shape[0])
+    in_cols = int(weight_cpu.shape[1])
+    if int(hidden_cpu.shape[1]) != in_cols:
+        raise ValueError("hidden input size does not match FP8 weight columns")
+    expected_scale_rows = (out_rows + 127) // 128
+    expected_scale_cols = (in_cols + 127) // 128
+    if int(scale_cpu.shape[0]) != expected_scale_rows or int(scale_cpu.shape[1]) != expected_scale_cols:
+        raise ValueError("scale_inv shape does not match FP8 128x128 block layout")
+
+    out = torch.empty((int(hidden_cpu.shape[0]), out_rows), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_linear_f32(
+        ctypes.c_void_p(int(weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(out_rows),
+        ctypes.c_longlong(in_cols),
+        ctypes.c_longlong(expected_scale_cols),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_linear_f32 failed with code {code}")
+    return out
 
 
 def q4_dequant_to_fp16(

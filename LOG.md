@@ -5839,3 +5839,14 @@ Result: 297 passed in 21.83s
 - Real DeepSeek bounded decode proof after streaming still passes: prompt `[0, 1]`, layers `0-3`, generated `[76394]`, cache lengths reached `3`, no blockers, `ready=true`.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 28 passed.
 - Full tests: `python -m pytest tests\ -q` -> 412 passed.
+
+## Phase FP8 Native Streamed Linear / Evidence
+- Added `fp8_linear.dll` with native FP8 E4M3 block-scaled linear math for streamed FP8 row chunks.
+- Routed streamed dense/expert/shared MLP chunks through the native kernel with the existing PyTorch dequant path kept as fallback.
+- Switched streamed FP8 weight and scale row reads to the existing native byte reader when available, with Python file reads still available as fallback.
+- Synthetic FP8 runtime tests: `python -m pytest tests\test_runtime_fp8_source.py -q` -> 14 passed.
+- Native scalar check matched PyTorch FP8 reference exactly: `max_abs_diff=0.0`.
+- Real DeepSeek dense layer `0` proof passed with no blockers.
+- Real DeepSeek selected expert proof passed for layer `3`, expert `0`, with no blockers.
+- Real DeepSeek bounded decode still generated `[76394]` over layers `0-3`, cache lengths reached `3`, no blockers.
+- Process-level timing improved modestly: expert `3/0` from about `5.69s` to `5.20s`; dense layer `0` from about `8.90s` to `7.08s`.

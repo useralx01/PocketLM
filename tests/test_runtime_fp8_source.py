@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+import pcketlm.core.runtime.fp8_source as fp8_source
 from pcketlm.core.runtime.fp8_source import (
     dequantize_fp8_block_scaled,
     load_fp8_token_embedding,
@@ -156,6 +157,27 @@ def test_run_fp8_dense_mlp_materializes_dense_layer(tmp_path: Path, monkeypatch)
     assert result.ready is True
     assert result.output_tensor is not None
     assert result.output_shape == [1, 1, 4]
+
+
+def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    calls = {"count": 0}
+
+    def fake_native_linear(fp8_rows: torch.Tensor, scale_rows: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        weight = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=torch.float32)
+        return torch.nn.functional.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
+
+    monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
+    hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_dense_mlp(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert calls["count"] == 3
 
 
 def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:

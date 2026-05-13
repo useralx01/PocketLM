@@ -551,3 +551,9 @@
 - Replaced materialized FP8 MLP gate/up/down execution with streamed row chunks for dense layers, selected routed experts, and shared experts.
 - Real DeepSeek dense layer, selected expert, and bounded prompt decode proofs still pass with no blockers.
 - Full test suite: 412 passed.
+
+## Phase FP8 Native Streamed Linear
+- Added and built `src/pcketlm/native/fp8_linear.cpp`.
+- Wired streamed FP8 MLP linears through native FP8 E4M3 block-scaled math with fallback.
+- Moved streamed FP8 row reads onto the native byte reader when available.
+- Validated synthetic FP8 runtime tests and real DeepSeek dense, expert, and bounded decode probes.
