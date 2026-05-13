@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cmath>
+#include <algorithm>
 #include <omp.h>
 
 static inline float fp8_e4m3fn_to_float(uint8_t byte) {
@@ -21,6 +22,18 @@ static inline float fp8_e4m3fn_to_float(uint8_t byte) {
     return static_cast<float>(sign) * std::ldexp(1.0f + static_cast<float>(mant) / 8.0f, exp - 7);
 }
 
+static const float* fp8_e4m3fn_lut() {
+    static float table[256] = {0.0f};
+    static bool initialized = false;
+    if (!initialized) {
+        for (int i = 0; i < 256; ++i) {
+            table[i] = fp8_e4m3fn_to_float(static_cast<uint8_t>(i));
+        }
+        initialized = true;
+    }
+    return table;
+}
+
 extern "C" __declspec(dllexport) int fp8_e4m3_block_linear_f32(
     const uint8_t* fp8_weight,
     const float* scale_inv,
@@ -38,6 +51,7 @@ extern "C" __declspec(dllexport) int fp8_e4m3_block_linear_f32(
         return -2;
     }
 
+    const float* lut = fp8_e4m3fn_lut();
     #pragma omp parallel for collapse(2) schedule(static)
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t row = 0; row < out_rows; ++row) {
@@ -45,9 +59,15 @@ extern "C" __declspec(dllexport) int fp8_e4m3_block_linear_f32(
             const uint8_t* weight_row = fp8_weight + row * in_cols;
             const float* hidden_row = hidden + b * in_cols;
             float acc = 0.0f;
-            for (int64_t col = 0; col < in_cols; ++col) {
-                const float scale = scale_inv[scale_row * scale_cols + (col / 128)];
-                acc += hidden_row[col] * fp8_e4m3fn_to_float(weight_row[col]) * scale;
+            for (int64_t scale_col = 0; scale_col < scale_cols; ++scale_col) {
+                const int64_t start_col = scale_col * 128;
+                const int64_t end_col = std::min<int64_t>(in_cols, start_col + 128);
+                const float scale = scale_inv[scale_row * scale_cols + scale_col];
+                float block_acc = 0.0f;
+                for (int64_t col = start_col; col < end_col; ++col) {
+                    block_acc += hidden_row[col] * lut[weight_row[col]];
+                }
+                acc += block_acc * scale;
             }
             out[b * out_rows + row] = acc;
         }

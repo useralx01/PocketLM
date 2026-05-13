@@ -1452,7 +1452,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep attention materialized for now. MLA attention has different projection shapes and absorbed-cache math, so MLP row streaming is the lower-risk first speed/memory route.
 
 ## Phase FP8 Native Streamed Linear
-- Keep FP8 native linear opt-in behind `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1`; the Python dequant plus `torch.nn.functional.linear` path is the default.
+- Keep FP8 native linear enabled by default after the LUT rewrite; `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` remains the fallback switch.
 - The first native kernel takes already-streamed FP8 rows and scale rows instead of owning file paging. This keeps correctness scoped and lets the existing row planner decide chunk size.
 - Native row reads use the existing `native_read_tensor_bytes` helper when available, then fall back to Python file reads. Larger gains still require fused attention and multi-projection kernels.
 
@@ -1467,5 +1467,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the old single-token loop available through the disable flag for debugging and comparison.
 
 ## Phase FP8 Measured Defaults
-- Do not turn on a native path just because it exists. The scalar FP8 linear DLL and native lm_head top-k are both opt-in because measured DeepSeek runs were slower than the PyTorch chunked paths.
-- Keep `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1` and `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1` for experiments, not defaults.
+- Do not turn on a native path just because it exists. The original scalar FP8 linear DLL and native lm_head top-k were slower than the PyTorch chunked paths.
+- Keep `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1` for native lm_head experiments only; it is not a default.
+
+## Phase FP8 LUT Native Linear
+- The original scalar FP8 native kernel was too slow, but the LUT/block-loop version is a small real win on the bounded DeepSeek path. Promote the LUT version to default while keeping the disable switch.
+- Native lm_head top-k remains opt-in only; the LUT change does not alter that decision.

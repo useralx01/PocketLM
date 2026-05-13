@@ -577,3 +577,8 @@
 - Made native FP8 linear opt-in after DeepSeek timing showed PyTorch chunks are faster for the current bounded decode path.
 - Made native lm_head top-k opt-in after DeepSeek timing showed the existing PyTorch chunked tail is faster.
 - Verified bounded DeepSeek decode still generates `[76394]` with clean caches.
+
+## Phase FP8 LUT Native Linear
+- Rebuilt `fp8_linear.dll` with FP8 lookup-table decode and scale-block dot loops.
+- Promoted native FP8 linear back to default after bounded DeepSeek timing improved versus the PyTorch-chunk comparison run.
+- Verified real DeepSeek expert and focused FP8 runtime tests.

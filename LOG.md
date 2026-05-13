@@ -5873,3 +5873,9 @@ Result: 297 passed in 21.83s
 - Found the scalar native FP8 linear is not the best default. Disabling it improved the bounded layers `0-3` decode generated step to about `29s`; default now uses PyTorch vectorized chunks unless `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1`.
 - Tested native BF16 lm_head top-k per chunk and rejected it as default: native tail was about `24s`, while the existing PyTorch chunked tail was about `5-6s`; native lm_head top-k is now opt-in behind `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`.
 - Best observed bounded DeepSeek decode in this slice was about `62.4s`; later reruns varied around `79.6s` on the external disk, preserving generated token `[76394]` and clean cache lengths.
+
+## Phase FP8 LUT Native Linear / Evidence
+- Reworked `fp8_linear.dll` to use a 256-entry E4M3 lookup table and 128-column scale-block loops instead of decoding FP8 values with exponent math in the inner dot loop.
+- Real DeepSeek expert `3/0` passed with no blockers and matching output scale (`output_mean_abs` about `0.06078`).
+- Isolated timings were small wins after the LUT change: expert `3/0` about `7.06s` with native versus `7.18s` default PyTorch; dense layer `0` about `9.62s` with native versus `9.83s` default PyTorch.
+- Full bounded decode layers `0-3` generated `[76394]` with native LUT default candidate in about `70.4s`, compared with about `76.7s` on the PyTorch-chunk comparison run. Native FP8 linear is now the default again, with `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` as the fallback switch.

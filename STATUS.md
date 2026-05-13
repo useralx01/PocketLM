@@ -681,3 +681,4 @@ Phase FP8 Attention Streaming Gate: streamed attention is implemented but opt-in
 Phase FP8 Prompt Prefill: bounded DeepSeek decode now prefills multi-token prompts layer-wise, cutting the layers 0-3 proof to about 113s while preserving token `76394` and clean KV caches.
 Phase FP8 Timing Visibility: FP8 prefill/decode summaries now report elapsed seconds, and `runtime_fp8_cli --prefill` gives direct prompt-prefill probes.
 Phase FP8 Measured Defaults: slower native FP8 linear and native lm_head top-k paths are opt-in only; default bounded DeepSeek decode stays on the faster PyTorch chunked path.
+Phase FP8 LUT Native Linear: native FP8 linear now uses LUT/block-loop math and is default again; bounded DeepSeek layers 0-3 still generate `76394`, with the fallback switch preserved.

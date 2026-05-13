@@ -137,4 +137,4 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next DeepSeek runtime step: build a fused FP8 MLA attention projection path that combines q/kv/o work or reuses absorbed `kv_b`; simple independent streamed attention is available behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1` but is slower.
 - Next DeepSeek speed step: replace remaining Python-level FP8 attention work with fused kernels only where timing proves a win.
 - Next DeepSeek prompt speed step: extend layer-wise prefill to batch more real prompt tokens and use the new elapsed fields to separate prefill, decode, attention, MLP, and tail costs.
-- Next DeepSeek native speed step: replace scalar native FP8 linear with a vectorized/fused kernel before enabling it by default.
+- Next DeepSeek native speed step: go beyond the LUT FP8 linear by fusing gate/up/down MLP work or vectorizing the dot loop more deeply.

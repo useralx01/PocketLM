@@ -1774,7 +1774,7 @@ def _fp8_prompt_prefill_enabled() -> bool:
 
 
 def _native_fp8_linear_enabled() -> bool:
-    return os.environ.get("PCKETLM_ENABLE_NATIVE_FP8_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() not in {"1", "true", "yes", "on"}
 
 
 def _native_lm_head_topk_enabled() -> bool:
