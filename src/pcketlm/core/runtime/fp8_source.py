@@ -18,11 +18,13 @@ import torch.nn.functional as F
 from pcketlm.native import (
     fp8_e4m3_block_dual_linear_f32,
     fp8_e4m3_block_linear_f32,
+    fp8_e4m3_block_mlp_f32,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
     native_fp8_dual_linear_available,
     native_fp8_linear_available,
+    native_fp8_mlp_available,
     native_read_tensor_bytes,
 )
 from pcketlm.core.runtime.tensor_catalog import (
@@ -500,6 +502,8 @@ def fp8_source_status(model_id: str) -> dict:
             "layer_count_source": "catalog" if catalog_layer_count >= config_layer_count else "config",
             "top_k_experts": top_k,
             "native_fp8_linear": _native_fp8_linear_enabled() and native_fp8_linear_available(),
+            "native_fp8_mlp": _native_fp8_linear_enabled() and native_fp8_mlp_available(),
+            "native_fp8_mlp_full_max_bytes": _native_fp8_mlp_full_max_bytes(),
             "streamed_attention": _streamed_fp8_attention_enabled(),
             "native_lm_head_topk": _native_lm_head_topk_enabled(),
             "moe_expert_workers": _fp8_moe_expert_workers(),
@@ -1634,6 +1638,83 @@ def _read_scale_rows_for_weight_chunk(scale: TensorCatalogEntry, start_row: int,
     return _read_tensor_rows(scale, scale_start, scale_end).to(dtype=torch.float32)
 
 
+def _run_fp8_native_mlp_full(
+    model_id: str,
+    prefix: str,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor | None, int, int, list[str], bool]:
+    if not (_native_fp8_linear_enabled() and native_fp8_mlp_available()):
+        return None, 0, 0, [], False
+
+    gate = find_tensor_catalog_entry(model_id, f"{prefix}.gate_proj.weight")
+    up = find_tensor_catalog_entry(model_id, f"{prefix}.up_proj.weight")
+    down = find_tensor_catalog_entry(model_id, f"{prefix}.down_proj.weight")
+    blockers: list[str] = []
+    if gate is None or up is None or down is None:
+        return None, 0, 0, [], False
+    if not (is_fp8_dtype(gate.dtype) and is_fp8_dtype(up.dtype) and is_fp8_dtype(down.dtype)):
+        return None, 0, 0, [], False
+    if not gate.scale_tensor_name or not up.scale_tensor_name or not down.scale_tensor_name:
+        blockers.append(f"FP8 MLP {prefix} is missing one or more scale companions.")
+    gate_scale = find_tensor_catalog_entry(model_id, gate.scale_tensor_name) if gate.scale_tensor_name else None
+    up_scale = find_tensor_catalog_entry(model_id, up.scale_tensor_name) if up.scale_tensor_name else None
+    down_scale = find_tensor_catalog_entry(model_id, down.scale_tensor_name) if down.scale_tensor_name else None
+    if gate_scale is None or up_scale is None or down_scale is None:
+        blockers.append(f"FP8 MLP {prefix} scale companions are not all present in the catalog.")
+    if len(gate.shape) != 2 or len(up.shape) != 2 or len(down.shape) != 2:
+        blockers.append(f"FP8 MLP {prefix} weights must all be 2D.")
+    if not blockers and list(gate.shape) != list(up.shape):
+        blockers.append(f"FP8 MLP {prefix} gate/up shapes do not match.")
+    if not blockers and [int(down.shape[0]), int(down.shape[1])] != [int(gate.shape[1]), int(gate.shape[0])]:
+        blockers.append(f"FP8 MLP {prefix} down shape does not match gate/up shape.")
+
+    loaded_bytes = (
+        int(gate.data_nbytes)
+        + int(up.data_nbytes)
+        + int(down.data_nbytes)
+        + (0 if gate_scale is None else int(gate_scale.data_nbytes))
+        + (0 if up_scale is None else int(up_scale.data_nbytes))
+        + (0 if down_scale is None else int(down_scale.data_nbytes))
+    )
+    if loaded_bytes > _native_fp8_mlp_full_max_bytes():
+        return None, 0, 0, [], False
+    if blockers or gate_scale is None or up_scale is None or down_scale is None:
+        return None, 0, 0, blockers, True
+
+    try:
+        gate_rows = _read_fp8_weight_rows(gate, 0, int(gate.shape[0]))
+        up_rows = _read_fp8_weight_rows(up, 0, int(up.shape[0]))
+        down_rows = _read_fp8_weight_rows(down, 0, int(down.shape[0]))
+        gate_scale_rows = _read_scale_rows_for_weight_chunk(gate_scale, 0, int(gate.shape[0]))
+        up_scale_rows = _read_scale_rows_for_weight_chunk(up_scale, 0, int(up.shape[0]))
+        down_scale_rows = _read_scale_rows_for_weight_chunk(down_scale, 0, int(down.shape[0]))
+        native_out = fp8_e4m3_block_mlp_f32(
+            gate_rows,
+            gate_scale_rows,
+            up_rows,
+            up_scale_rows,
+            down_rows,
+            down_scale_rows,
+            hidden,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return None, 0, 0, [str(exc)], True
+
+    dequantized_bytes = int(
+        (int(gate.shape[0]) * int(gate.shape[1]) * 2 + int(down.shape[0]) * int(down.shape[1]))
+        * torch.empty((), dtype=dtype).element_size()
+    )
+    return (
+        native_out.to(dtype=dtype).reshape(*hidden.shape[:-1], int(down.shape[0])).contiguous(),
+        loaded_bytes,
+        dequantized_bytes,
+        [],
+        True,
+    )
+
+
 def _run_fp8_mlp_prefix(
     model_id: str,
     prefix: str,
@@ -1641,6 +1722,15 @@ def _run_fp8_mlp_prefix(
     *,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor | None, int, int, list[str]]:
+    native_output, native_loaded, native_dequant, native_blockers, native_attempted = _run_fp8_native_mlp_full(
+        model_id,
+        prefix,
+        hidden,
+        dtype=dtype,
+    )
+    if native_attempted and native_output is not None and not native_blockers:
+        return native_output, native_loaded, native_dequant, []
+
     gate_name = f"{prefix}.gate_proj.weight"
     up_name = f"{prefix}.up_proj.weight"
     down_name = f"{prefix}.down_proj.weight"
@@ -1929,6 +2019,16 @@ def _fp8_prompt_prefill_enabled() -> bool:
 
 def _native_fp8_linear_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_mlp_full_max_bytes() -> int:
+    raw = os.environ.get("PCKETLM_NATIVE_FP8_MLP_FULL_MAX_MB", "").strip()
+    if not raw:
+        return 192 * 1024 * 1024
+    try:
+        return max(0, int(float(raw) * 1024 * 1024))
+    except ValueError:
+        return 192 * 1024 * 1024
 
 
 def _native_lm_head_topk_enabled() -> bool:

@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <new>
 #include <omp.h>
 
 static inline float fp8_e4m3fn_to_float(uint8_t byte) {
@@ -128,5 +129,95 @@ extern "C" __declspec(dllexport) int fp8_e4m3_block_dual_linear_f32(
             out_b[b * out_rows + row] = acc_b;
         }
     }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int fp8_e4m3_block_mlp_f32(
+    const uint8_t* gate_weight,
+    const float* gate_scale_inv,
+    const uint8_t* up_weight,
+    const float* up_scale_inv,
+    const uint8_t* down_weight,
+    const float* down_scale_inv,
+    const float* hidden,
+    float* out,
+    int64_t batch,
+    int64_t intermediate_rows,
+    int64_t hidden_cols,
+    int64_t gate_scale_cols,
+    int64_t down_scale_cols
+) {
+    if (
+        gate_weight == nullptr || gate_scale_inv == nullptr ||
+        up_weight == nullptr || up_scale_inv == nullptr ||
+        down_weight == nullptr || down_scale_inv == nullptr ||
+        hidden == nullptr || out == nullptr
+    ) {
+        return -1;
+    }
+    if (
+        batch <= 0 || intermediate_rows <= 0 || hidden_cols <= 0 ||
+        gate_scale_cols <= 0 || down_scale_cols <= 0
+    ) {
+        return -2;
+    }
+
+    const float* lut = fp8_e4m3fn_lut();
+    float* activation = new (std::nothrow) float[static_cast<size_t>(batch * intermediate_rows)];
+    if (activation == nullptr) {
+        return -3;
+    }
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t row = 0; row < intermediate_rows; ++row) {
+            const int64_t scale_row = row / 128;
+            const uint8_t* gate_row = gate_weight + row * hidden_cols;
+            const uint8_t* up_row = up_weight + row * hidden_cols;
+            const float* hidden_row = hidden + b * hidden_cols;
+            float gate_acc = 0.0f;
+            float up_acc = 0.0f;
+            for (int64_t scale_col = 0; scale_col < gate_scale_cols; ++scale_col) {
+                const int64_t start_col = scale_col * 128;
+                const int64_t end_col = std::min<int64_t>(hidden_cols, start_col + 128);
+                const float gate_scale = gate_scale_inv[scale_row * gate_scale_cols + scale_col];
+                const float up_scale = up_scale_inv[scale_row * gate_scale_cols + scale_col];
+                float gate_block = 0.0f;
+                float up_block = 0.0f;
+                for (int64_t col = start_col; col < end_col; ++col) {
+                    const float h = hidden_row[col];
+                    gate_block += h * lut[gate_row[col]];
+                    up_block += h * lut[up_row[col]];
+                }
+                gate_acc += gate_block * gate_scale;
+                up_acc += up_block * up_scale;
+            }
+            const float silu = gate_acc / (1.0f + std::exp(-gate_acc));
+            activation[b * intermediate_rows + row] = silu * up_acc;
+        }
+    }
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t row = 0; row < hidden_cols; ++row) {
+            const int64_t scale_row = row / 128;
+            const uint8_t* down_row = down_weight + row * intermediate_rows;
+            const float* activation_row = activation + b * intermediate_rows;
+            float acc = 0.0f;
+            for (int64_t scale_col = 0; scale_col < down_scale_cols; ++scale_col) {
+                const int64_t start_col = scale_col * 128;
+                const int64_t end_col = std::min<int64_t>(intermediate_rows, start_col + 128);
+                const float scale = down_scale_inv[scale_row * down_scale_cols + scale_col];
+                float block_acc = 0.0f;
+                for (int64_t col = start_col; col < end_col; ++col) {
+                    block_acc += activation_row[col] * lut[down_row[col]];
+                }
+                acc += block_acc * scale;
+            }
+            out[b * hidden_cols + row] = acc;
+        }
+    }
+
+    delete[] activation;
     return 0;
 }

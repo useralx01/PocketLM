@@ -59,6 +59,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["layer_count"] == 1
     assert status["runtime_policy"]["layer_count_source"] == "catalog"
     assert status["runtime_policy"]["top_k_experts"] == 1
+    assert "native_fp8_mlp" in status["runtime_policy"]
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:
@@ -188,6 +189,7 @@ def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: 
         return torch.nn.functional.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
 
     monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_available", lambda: False)
     monkeypatch.setattr(fp8_source, "native_fp8_dual_linear_available", lambda: False)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
     monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_FP8_LINEAR", "1")
@@ -198,6 +200,46 @@ def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: 
     assert result.ready is True
     assert result.output_tensor is not None
     assert calls["count"] == 3
+
+
+def test_run_fp8_dense_mlp_uses_native_full_mlp_when_available(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    calls = {"mlp": 0, "single": 0}
+
+    def fake_native_mlp(
+        gate_fp8: torch.Tensor,
+        gate_scale: torch.Tensor,
+        up_fp8: torch.Tensor,
+        up_scale: torch.Tensor,
+        down_fp8: torch.Tensor,
+        down_scale: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        calls["mlp"] += 1
+        gate = dequantize_fp8_block_scaled(gate_fp8, gate_scale, dtype=torch.float32)
+        up = dequantize_fp8_block_scaled(up_fp8, up_scale, dtype=torch.float32)
+        down = dequantize_fp8_block_scaled(down_fp8, down_scale, dtype=torch.float32)
+        flat = hidden.reshape(-1, hidden.shape[-1]).float()
+        activation = torch.nn.functional.silu(torch.nn.functional.linear(flat, gate.float()))
+        activation = activation * torch.nn.functional.linear(flat, up.float())
+        return torch.nn.functional.linear(activation, down.float())
+
+    def fake_native_linear(*_args, **_kwargs):
+        calls["single"] += 1
+        raise AssertionError("streamed linear fallback should not run when native full MLP succeeds")
+
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_f32", fake_native_mlp)
+    monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
+    hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_dense_mlp(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert calls == {"mlp": 1, "single": 0}
 
 
 def test_run_fp8_dense_mlp_uses_native_dual_gate_up_when_available(tmp_path: Path, monkeypatch) -> None:
@@ -223,6 +265,7 @@ def test_run_fp8_dense_mlp_uses_native_dual_gate_up_when_available(tmp_path: Pat
         weight = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=torch.float32)
         return torch.nn.functional.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
 
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_available", lambda: False)
     monkeypatch.setattr(fp8_source, "native_fp8_dual_linear_available", lambda: True)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_dual_linear_f32", fake_dual_linear)
     monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)

@@ -1492,3 +1492,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase FP8 Plain Status
 - Ready acquisition folders should show physical bytes on disk and shard readiness in plain output, not metadata-derived progress. DeepSeek V3's FP8 index metadata can make a complete physical download look like `51.67%` if shown as a raw byte ratio.
+
+## Phase FP8 Full MLP Kernel
+- Keep the full native FP8 MLP path guarded by a payload byte cap. It is useful for selected experts and shared experts, but dense DeepSeek MLP tensors are too large to load fully as the default on this 16 GB machine.
+- Treat the current full MLP kernel as correctness-safe hot-loop cleanup, not a speed breakthrough. Real DeepSeek expert, MoE, and bounded decode timings were effectively tied with the streamed fallback.

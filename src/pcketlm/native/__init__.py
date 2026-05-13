@@ -247,6 +247,23 @@ def _load_fp8_linear_lib() -> ctypes.CDLL | None:
                 ctypes.c_longlong,
             ]
             lib.fp8_e4m3_block_dual_linear_f32.restype = ctypes.c_int
+        if hasattr(lib, "fp8_e4m3_block_mlp_f32"):
+            lib.fp8_e4m3_block_mlp_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_block_mlp_f32.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP8_LINEAR_ERROR = exc
         return None
@@ -267,6 +284,11 @@ def native_fp8_linear_error() -> Exception | None:
 def native_fp8_dual_linear_available() -> bool:
     lib = _load_fp8_linear_lib()
     return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_dual_linear_f32"))
+
+
+def native_fp8_mlp_available() -> bool:
+    lib = _load_fp8_linear_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_f32"))
 
 
 def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
@@ -2133,6 +2155,66 @@ def fp8_e4m3_block_dual_linear_f32(
     if code != 0:
         raise RuntimeError(f"fp8_e4m3_block_dual_linear_f32 failed with code {code}")
     return out_a, out_b
+
+
+def fp8_e4m3_block_mlp_f32(
+    gate_weight: torch.Tensor,
+    gate_scale_inv: torch.Tensor,
+    up_weight: torch.Tensor,
+    up_scale_inv: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_scale_inv: torch.Tensor,
+    hidden: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp8_linear_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_mlp_f32"):
+        reason = "disabled" if _native_fp8_linear_disabled() else _FP8_LINEAR_ERROR
+        raise RuntimeError(f"Native FP8 MLP is unavailable: {reason}")
+    if gate_weight.ndim != 2 or up_weight.ndim != 2 or down_weight.ndim != 2:
+        raise ValueError("FP8 MLP weights must be 2D")
+    gate_cpu = gate_weight.detach().cpu().contiguous().to(torch.uint8)
+    up_cpu = up_weight.detach().cpu().contiguous().to(torch.uint8)
+    down_cpu = down_weight.detach().cpu().contiguous().to(torch.uint8)
+    if tuple(gate_cpu.shape) != tuple(up_cpu.shape):
+        raise ValueError("FP8 MLP gate and up weights must have matching shapes")
+    intermediate_rows = int(gate_cpu.shape[0])
+    hidden_cols = int(gate_cpu.shape[1])
+    if tuple(down_cpu.shape) != (hidden_cols, intermediate_rows):
+        raise ValueError("FP8 MLP down weight must have shape [hidden, intermediate]")
+    gate_scale_cpu = gate_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    up_scale_cpu = up_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    down_scale_cpu = down_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    if tuple(gate_scale_cpu.shape) != tuple(up_scale_cpu.shape):
+        raise ValueError("FP8 MLP gate and up scales must have matching shapes")
+    expected_gate_scale = ((intermediate_rows + 127) // 128, (hidden_cols + 127) // 128)
+    expected_down_scale = ((hidden_cols + 127) // 128, (intermediate_rows + 127) // 128)
+    if tuple(gate_scale_cpu.shape) != expected_gate_scale:
+        raise ValueError("FP8 MLP gate scale shape does not match 128x128 block layout")
+    if tuple(down_scale_cpu.shape) != expected_down_scale:
+        raise ValueError("FP8 MLP down scale shape does not match 128x128 block layout")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_mlp_f32(
+        ctypes.c_void_p(int(gate_cpu.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(expected_gate_scale[1]),
+        ctypes.c_longlong(expected_down_scale[1]),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_mlp_f32 failed with code {code}")
+    return out
 
 
 def q4_dequant_to_fp16(

@@ -5927,3 +5927,11 @@ Result: 297 passed in 21.83s
 - Added `acquisition_cli --plain` for a short operator-facing status summary.
 - Real DeepSeek plain status reports: `ready`, `658.86 GiB on disk`, `163/163` shards, FP8 runtime ready, `62` layers, `45808` pairs, `633.83 GiB` FP8 weights, `0.15 GiB` scales, and no blockers.
 - Ready sources omit the metadata-derived progress percentage in plain mode because DeepSeek's index metadata overstates expected bytes for the FP8 physical download.
+
+## Phase FP8 Full MLP Kernel / Evidence
+- Added native `fp8_e4m3_block_mlp_f32()` for a full FP8 MLP prefix: gate/up projection, SiLU activation, and down projection in one native call.
+- The FP8 runtime uses it only when native FP8 is enabled and the full gate/up/down payload is under `PCKETLM_NATIVE_FP8_MLP_FULL_MAX_MB` (`192 MB` default), so dense DeepSeek layers still use the streamed fallback.
+- Focused tests passed: FP8 runtime tests `18 passed`; native helper smoke tests `21 passed`.
+- Real DeepSeek expert `3/0` passed with no blockers: native full MLP about `7.81s`, streamed fallback about `7.86s`.
+- Real DeepSeek MoE layer `3` passed with no blockers: native full MLP about `8.87s`, streamed fallback about `8.88s`.
+- Real bounded DeepSeek decode layers `0-3` generated `[76394]` with clean caches in about `79.92s`; disabling the full MLP path was about `79.94s`. This is safe and slightly positive, but not the major speed unlock.

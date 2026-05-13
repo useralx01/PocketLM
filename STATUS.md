@@ -690,3 +690,4 @@ Phase FP8 Chat Template: bounded FP8 chat now uses DeepSeek's local chat templat
 Phase FP8 Runtime Policy: DeepSeek FP8 source status now reports the practical paged runtime policy, paired FP8/scale readiness, and the config-vs-catalog layer count split.
 Phase FP8 Acquisition Status: acquisition status now surfaces DeepSeek's ready FP8 paged runtime policy directly, including paired FP8/scale counts and zero blockers.
 Phase FP8 Plain Status: `acquisition_cli --plain` now gives a short DeepSeek operator summary with ready/path/layers/pairs/bytes/blockers.
+Phase FP8 Full MLP Kernel: native full FP8 MLP is available for capped selected-expert payloads, but real DeepSeek timing is only a tiny tie/win, not the speed unlock.

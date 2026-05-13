@@ -619,3 +619,8 @@
 ## Phase FP8 Plain Status
 - Added concise `acquisition_cli --plain` output for operator use.
 - Verified real DeepSeek plain output shows ready/path/layers/pairs/bytes/blockers without scanning full JSON.
+
+## Phase FP8 Full MLP Kernel
+- Added a guarded native full FP8 MLP kernel for small selected-expert/shared-expert payloads.
+- Verified synthetic FP8 tests and real DeepSeek expert, MoE, and bounded decode probes.
+- Classified the result as safe but not a breakthrough; attention/native fusion remains the next speed target.
