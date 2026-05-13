@@ -1442,3 +1442,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Store DeepSeek MLA cache in the absorbed form used by the official efficient attention path: normalized KV latent plus rotary positional cache. This is much smaller than storing full per-head K/V tensors.
 - Keep KV state in Python tensors for this proof phase. It proves correctness of cache shape and carry semantics; speed still requires fused FP8 matmul and a resident/mapped cache policy.
 - Position handling now applies RoPE to the q/k rope slice for each decode token. The current implementation uses the base `rope_theta` path and is sufficient for short decode probes; long-context Yarn scaling remains a later fidelity step.
+
+## Phase FP8 Prompt Decode Loop
+- Keep the first decode loop greedy and token-id based. Text/tokenizer integration is not the blocker; the blocker is proving carried FP8 layer execution and then replacing Python materialized dequant with fused kernels.
+- The bounded real proof uses layers `0-3` because it crosses the dense-to-MoE boundary while avoiding another full-stack 10-minute run. Full-stack decode is mechanically available but too slow to use interactively until the FP8 matmul path is fused/paged.

@@ -13,6 +13,7 @@ from pcketlm.core.runtime import (
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
+    run_fp8_decode_loop,
     run_fp8_decode_tail_topk,
     run_fp8_dense_mlp,
     run_fp8_expert_mlp,
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --embedding <token-id>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --dense <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --token-forward <token-id> [--start-layer n] [--layers n] [--no-tail]")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --decode-loop <token-id,...> [--layers n] [--max-new n]")
         return 1
 
     model_id = args[0]
@@ -201,6 +203,23 @@ def main(argv: list[str] | None = None) -> int:
             payload["hidden_mean_abs"] = float(values.abs().mean().item())
             payload["hidden_max_abs"] = float(values.abs().max().item())
         print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--decode-loop":
+        if len(args) < 3:
+            print("--decode-loop requires comma-separated token ids")
+            return 1
+        token_ids = [int(value) for value in args[2].split(",") if value.strip()]
+        start_layer = _int_option(args, "--start-layer", 0)
+        layer_count = _int_option(args, "--layers", 1)
+        max_new = _int_option(args, "--max-new", 1)
+        result = run_fp8_decode_loop(
+            model_id,
+            token_ids,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            max_new_tokens=max_new,
+        )
+        print(json.dumps(result.to_dict(), indent=2))
         return 0 if result.ready else 2
 
     print(f"Unknown mode: {mode}")

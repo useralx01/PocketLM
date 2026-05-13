@@ -5823,3 +5823,10 @@ Result: 297 passed in 21.83s
 - Real DeepSeek dense-to-MoE two-token proof: token `0` then token `1`, layers `0-3`, all layer cache lengths advanced from `1` to `2`; layer `3` selected experts `[43, 174, 175, 213, 226, 235, 254, 255]` on the second token, no blockers.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 27 passed.
 - Full tests: `python -m pytest tests\ -q` -> 411 passed.
+
+## Phase FP8 Prompt Decode Loop / Evidence
+- Added `run_fp8_decode_loop()` as a small greedy prompt/decode wrapper around the KV-carrying token step. It processes prompt tokens with carried per-layer caches, scores the prompt tail, then feeds the chosen top token as the next generated token.
+- Added CLI mode `runtime_fp8_cli --decode-loop <token-id,...> [--layers n] [--max-new n]`.
+- Real DeepSeek bounded decode proof: prompt tokens `[0, 1]`, layers `0-3`, `max_new=1`, generated token `[76394]`, cache lengths reached `3` for layers `0-3`, no blockers, `ready=true`.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 28 passed.
+- Full tests: `python -m pytest tests\ -q` -> 412 passed.

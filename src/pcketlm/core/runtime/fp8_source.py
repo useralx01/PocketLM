@@ -403,6 +403,42 @@ class FP8TokenForwardResult:
         }
 
 
+@dataclass(slots=True)
+class FP8DecodeLoopResult:
+    """Small FP8 prompt/decode loop using carried per-layer KV state."""
+
+    model_id: str
+    prompt_token_ids: list[int]
+    generated_token_ids: list[int]
+    start_layer: int
+    layer_count: int
+    positions_completed: int
+    final_top_token_ids: list[int]
+    final_top_logits: list[float]
+    step_summaries: list[dict] = field(default_factory=list)
+    next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "prompt_token_ids": list(self.prompt_token_ids),
+            "generated_token_ids": list(self.generated_token_ids),
+            "start_layer": self.start_layer,
+            "layer_count": self.layer_count,
+            "positions_completed": self.positions_completed,
+            "final_top_token_ids": list(self.final_top_token_ids),
+            "final_top_logits": list(self.final_top_logits),
+            "step_summaries": [dict(item) for item in self.step_summaries],
+            "cache_sequence_lengths": {
+                str(key): int(value[0].shape[1]) for key, value in self.next_kv_caches.items()
+            },
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
 def fp8_source_status(model_id: str) -> dict:
     """Return FP8 source readiness from the persisted tensor catalog."""
     catalog = load_tensor_catalog(model_id)
@@ -1074,6 +1110,91 @@ def run_fp8_single_token_forward(
         next_kv_caches=next_kv_caches,
         blockers=blockers,
         ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
+    )
+
+
+def run_fp8_decode_loop(
+    model_id: str,
+    token_ids: list[int],
+    *,
+    start_layer: int = 0,
+    layer_count: int = 1,
+    max_new_tokens: int = 1,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8DecodeLoopResult:
+    """Run a small greedy decode loop using the FP8 KV-carrying token step."""
+    prompt = [int(value) for value in token_ids]
+    generated: list[int] = []
+    blockers: list[str] = []
+    summaries: list[dict] = []
+    caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    final_top_ids: list[int] = []
+    final_top_logits: list[float] = []
+    position = 0
+    current_tokens = list(prompt)
+    if not current_tokens:
+        blockers.append("At least one token id is required.")
+
+    while not blockers and position < len(prompt) + max(0, int(max_new_tokens)):
+        if position < len(prompt):
+            token_id = prompt[position]
+            include_tail = position == len(prompt) - 1 and int(max_new_tokens) > 0
+            phase = "prompt"
+        else:
+            if not final_top_ids:
+                blockers.append("Cannot continue generation because no previous tail token is available.")
+                break
+            token_id = int(final_top_ids[0])
+            generated.append(token_id)
+            current_tokens.append(token_id)
+            include_tail = len(generated) < int(max_new_tokens)
+            phase = "generate"
+        step = run_fp8_single_token_forward(
+            model_id,
+            token_id,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            include_tail=include_tail,
+            dtype=dtype,
+            position=position,
+            previous_kv_caches=caches,
+        )
+        summaries.append(
+            {
+                "position": int(position),
+                "phase": phase,
+                "token_id": int(token_id),
+                "ready": bool(step.ready),
+                "executed_layers": list(step.executed_layers),
+                "tail_top_token_ids": [] if step.tail is None else list(step.tail.top_token_ids),
+                "cache_sequence_lengths": {
+                    str(key): int(value[0].shape[1]) for key, value in step.next_kv_caches.items()
+                },
+                "blockers": list(step.blockers),
+            }
+        )
+        blockers.extend(step.blockers)
+        if not step.ready:
+            break
+        caches = dict(step.next_kv_caches)
+        if step.tail is not None:
+            final_top_ids = list(step.tail.top_token_ids)
+            final_top_logits = list(step.tail.top_logits)
+        position += 1
+
+    return FP8DecodeLoopResult(
+        model_id=model_id,
+        prompt_token_ids=prompt,
+        generated_token_ids=generated,
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        positions_completed=int(position),
+        final_top_token_ids=final_top_ids,
+        final_top_logits=final_top_logits,
+        step_summaries=summaries,
+        next_kv_caches=caches,
+        blockers=blockers,
+        ready=not blockers and position >= len(prompt),
     )
 
 

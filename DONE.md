@@ -541,3 +541,8 @@
 - Real DeepSeek two-token proof passed over layer `0`, with cache length moving from `1` to `2`.
 - Real DeepSeek two-token proof passed over layers `0-3`, including the dense-to-MoE transition and routed layer `3`, with every layer cache moving from `1` to `2`.
 - Full test suite: 411 passed.
+
+## Phase FP8 Prompt Decode Loop
+- Added a small greedy prompt/decode loop around the KV-carrying FP8 token step.
+- Real DeepSeek prompt `[0, 1]` over layers `0-3` generated next token `[76394]` with cache lengths reaching `3` and no blockers.
+- Full test suite: 412 passed.
