@@ -572,3 +572,8 @@
 - Added elapsed-time fields to FP8 prefill and decode-loop step summaries.
 - Exposed `runtime_fp8_cli --prefill`.
 - Verified real DeepSeek prefill CLI output includes cache length and timing.
+
+## Phase FP8 Measured Defaults
+- Made native FP8 linear opt-in after DeepSeek timing showed PyTorch chunks are faster for the current bounded decode path.
+- Made native lm_head top-k opt-in after DeepSeek timing showed the existing PyTorch chunked tail is faster.
+- Verified bounded DeepSeek decode still generates `[76394]` with clean caches.

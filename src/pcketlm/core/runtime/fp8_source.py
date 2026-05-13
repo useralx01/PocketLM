@@ -16,7 +16,9 @@ import torch.nn.functional as F
 
 from pcketlm.native import (
     fp8_e4m3_block_linear_f32,
+    lm_head_topk_u16,
     native_fp16_loader_available,
+    native_fp16_matmul_available,
     native_fp8_linear_available,
     native_read_tensor_bytes,
 )
@@ -1032,7 +1034,8 @@ def run_fp8_decode_tail_topk(
         blockers.append(f"lm_head.weight has unsupported dtype {lm_head_entry.dtype}.")
 
     if not blockers and norm_tensor is not None and lm_head_entry is not None:
-        normalized = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"])).float()
+        normalized_u16 = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"]))
+        normalized = normalized_u16.float()
         vocab_size = int(lm_head_entry.shape[0])
         hidden_size = int(lm_head_entry.shape[1])
         if normalized.shape[-1] != hidden_size:
@@ -1044,11 +1047,24 @@ def run_fp8_decode_tail_topk(
             rows_per_chunk = max(1, int(chunk_rows))
             for start in range(0, vocab_size, rows_per_chunk):
                 end = min(vocab_size, start + rows_per_chunk)
-                weight = _read_tensor_rows(lm_head_entry, start, end).float()
+                weight = _read_tensor_rows(lm_head_entry, start, end)
                 loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
-                chunk_logits = F.linear(normalized, weight).reshape(-1)
-                values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
-                indices = indices + start
+                if (
+                    _native_lm_head_topk_enabled()
+                    and lm_head_entry.dtype in {"BF16", "F16"}
+                    and native_fp16_matmul_available()
+                ):
+                    native_hidden = normalized_u16.to(dtype=_torch_dtype_for_scale(lm_head_entry.dtype))
+                    values, indices = lm_head_topk_u16(
+                        native_hidden,
+                        weight,
+                        top_k=min(keep_k, int(weight.shape[0])),
+                        token_offset=start,
+                    )
+                else:
+                    chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
+                    values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
+                    indices = indices + start
                 if top_values is None or top_indices is None:
                     top_values = values
                     top_indices = indices
@@ -1633,7 +1649,7 @@ def _run_fp8_linear_streamed(
         loaded_bytes += int(fp8_rows.nelement() * fp8_rows.element_size()) + int(
             scale_rows.nelement() * scale_rows.element_size()
         )
-        if native_fp8_linear_available():
+        if _native_fp8_linear_enabled() and native_fp8_linear_available():
             native_out = fp8_e4m3_block_linear_f32(fp8_rows, scale_rows, flat_hidden)
             dequantized_bytes += int(fp8_rows.shape[0] * fp8_rows.shape[1] * torch.empty((), dtype=dtype).element_size())
             output[:, start:end] = native_out.to(dtype=dtype)
@@ -1755,6 +1771,14 @@ def _streamed_fp8_attention_enabled() -> bool:
 
 def _fp8_prompt_prefill_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP8_PROMPT_PREFILL", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_linear_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_FP8_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_lm_head_topk_enabled() -> bool:
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _run_fp8_single_token_attention_materialized(

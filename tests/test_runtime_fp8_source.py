@@ -172,6 +172,7 @@ def test_run_fp8_dense_mlp_uses_native_streamed_linear_when_available(tmp_path: 
 
     monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_FP8_LINEAR", "1")
     hidden = torch.ones((1, 1, 4), dtype=torch.bfloat16)
 
     result = run_fp8_dense_mlp(model_id, 0, hidden, dtype=torch.float32)

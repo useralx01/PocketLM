@@ -5867,3 +5867,9 @@ Result: 297 passed in 21.83s
 - Added per-layer prefill timing to `run_fp8_prompt_prefill()` summaries and per-phase timing to `run_fp8_decode_loop()` summaries.
 - Added `runtime_fp8_cli --prefill <token-id,...>` for direct prompt-prefill probes.
 - Real DeepSeek `--prefill 0,1 --layers 1 --no-tail` passed with cache length `2`; layer `0` reported about `12.15s`, total CLI elapsed about `16.14s`.
+
+## Phase FP8 Measured Defaults / Evidence
+- Profiled DeepSeek prompt prefill layers `0-3`: dense layers were around `8.8-9.5s` each before default changes, first MoE layer around `11.8s`; deeper ad-hoc split showed MLP/MoE dominates attention.
+- Found the scalar native FP8 linear is not the best default. Disabling it improved the bounded layers `0-3` decode generated step to about `29s`; default now uses PyTorch vectorized chunks unless `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1`.
+- Tested native BF16 lm_head top-k per chunk and rejected it as default: native tail was about `24s`, while the existing PyTorch chunked tail was about `5-6s`; native lm_head top-k is now opt-in behind `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`.
+- Best observed bounded DeepSeek decode in this slice was about `62.4s`; later reruns varied around `79.6s` on the external disk, preserving generated token `[76394]` and clean cache lengths.

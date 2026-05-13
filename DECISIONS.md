@@ -1452,9 +1452,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep attention materialized for now. MLA attention has different projection shapes and absorbed-cache math, so MLP row streaming is the lower-risk first speed/memory route.
 
 ## Phase FP8 Native Streamed Linear
-- Keep FP8 native linear behind `PCKETLM_DISABLE_NATIVE_FP8_LINEAR`; the Python dequant plus `torch.nn.functional.linear` path remains the fallback.
+- Keep FP8 native linear opt-in behind `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1`; the Python dequant plus `torch.nn.functional.linear` path is the default.
 - The first native kernel takes already-streamed FP8 rows and scale rows instead of owning file paging. This keeps correctness scoped and lets the existing row planner decide chunk size.
-- Native row reads use the existing `native_read_tensor_bytes` helper when available, then fall back to Python file reads. This is a real but modest speed win; larger gains still require fused attention and multi-projection kernels.
+- Native row reads use the existing `native_read_tensor_bytes` helper when available, then fall back to Python file reads. Larger gains still require fused attention and multi-projection kernels.
 
 ## Phase FP8 Attention Streaming Gate
 - Do not default streamed attention yet. It reduces materialized attention projection residency, but the first streamed q/kv/o projection path is slower than materializing those smaller tensors for the current one-token MLA proof.
@@ -1465,3 +1465,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Default bounded decode should prefill multi-token prompts layer-wise unless `PCKETLM_DISABLE_FP8_PROMPT_PREFILL=1` is set. This avoids reloading the same prompt-layer weights once per prompt token.
 - Multi-token prefill uses materialized attention with a causal mask. Cached decode remains one appended token at a time.
 - Keep the old single-token loop available through the disable flag for debugging and comparison.
+
+## Phase FP8 Measured Defaults
+- Do not turn on a native path just because it exists. The scalar FP8 linear DLL and native lm_head top-k are both opt-in because measured DeepSeek runs were slower than the PyTorch chunked paths.
+- Keep `PCKETLM_ENABLE_NATIVE_FP8_LINEAR=1` and `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1` for experiments, not defaults.
