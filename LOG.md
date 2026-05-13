@@ -5892,3 +5892,9 @@ Result: 297 passed in 21.83s
 - Real DeepSeek MoE layer `3` passed with no blockers.
 - Isolated MoE timings were only tiny wins: about `5.74s` default, `5.63s` with 2 workers, `5.60s` with 4 workers.
 - Full bounded decode over layers `0-3` showed no meaningful difference with 4 workers versus default, so expert workers remain opt-in only.
+
+## Phase FP8 Text Chat Bridge / Evidence
+- Added `runtime_fp8_cli --chat <text>` for bounded text-to-token-to-FP8-decode probes using the tokenizer from the FP8 source catalog directory.
+- Real DeepSeek tokenizer loaded from `D:\PocketLM\sources\deepseek-v3\tokenizer.json`.
+- Real text probe passed: `--chat hi --layers 1 --max-new 1 --max-prompt-tokens 2` encoded prompt token `[6366]`, generated token `[39739]`, decoded generated text `ppo`, and had no tokenizer/runtime blockers.
+- This is a tokenizer/runtime bridge, not a quality claim; full-answer quality still needs full-stack or larger layer-count decode.

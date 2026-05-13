@@ -592,3 +592,8 @@
 - Added opt-in selected-expert worker execution.
 - Verified real DeepSeek MoE layer and bounded decode correctness.
 - Kept default at one worker because full-path timing did not improve.
+
+## Phase FP8 Text Chat Bridge
+- Added bounded `runtime_fp8_cli --chat`.
+- Encodes prompt text from the catalog model directory tokenizer, runs FP8 decode, and decodes generated token ids back to text.
+- Verified with real DeepSeek tokenizer and a one-layer text probe.

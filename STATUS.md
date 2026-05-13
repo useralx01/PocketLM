@@ -684,3 +684,4 @@ Phase FP8 Measured Defaults: slower native FP8 linear and native lm_head top-k p
 Phase FP8 LUT Native Linear: native FP8 linear now uses LUT/block-loop math and is default again; bounded DeepSeek layers 0-3 still generate `76394`, with the fallback switch preserved.
 Phase FP8 Dual Gate-Up Kernel: MLP gate/up now use a native dual projection path; bounded DeepSeek layers 0-3 generated `76394` in about 66.5s.
 Phase FP8 MoE Expert Workers: selected-expert parallel workers are available by env flag but stay off by default because full-path DeepSeek timing did not improve.
+Phase FP8 Text Chat Bridge: `runtime_fp8_cli --chat` can run bounded real-text DeepSeek FP8 probes through the external-source tokenizer.

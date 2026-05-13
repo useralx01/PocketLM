@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --token-forward <token-id> [--start-layer n] [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --prefill <token-id,...> [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --decode-loop <token-id,...> [--layers n] [--max-new n]")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --chat <text> [--layers n] [--max-new n] [--max-prompt-tokens n]")
         return 1
 
     model_id = args[0]
@@ -227,6 +228,39 @@ def main(argv: list[str] | None = None) -> int:
         payload["elapsed_seconds"] = float(time.perf_counter() - started)
         print(json.dumps(payload, indent=2))
         return 0 if result.ready else 2
+    if mode == "--chat":
+        if len(args) < 3:
+            print("--chat requires prompt text")
+            return 1
+        prompt = args[2]
+        start_layer = _int_option(args, "--start-layer", 0)
+        layer_count = _int_option(args, "--layers", 1)
+        max_new = _int_option(args, "--max-new", 1)
+        max_prompt_tokens = _int_option(args, "--max-prompt-tokens", 16)
+        token_ids, token_blockers = _encode_with_catalog_tokenizer(model_id, prompt)
+        used_token_ids = token_ids[-max(1, int(max_prompt_tokens)):] if token_ids else []
+        started = time.perf_counter()
+        result = run_fp8_decode_loop(
+            model_id,
+            used_token_ids,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            max_new_tokens=max_new,
+        )
+        generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, result.generated_token_ids)
+        payload = result.to_dict()
+        payload.update(
+            {
+                "prompt": prompt,
+                "prompt_token_ids": token_ids,
+                "used_prompt_token_ids": used_token_ids,
+                "generated_text": generated_text,
+                "tokenizer_blockers": token_blockers + decode_blockers,
+                "elapsed_seconds": float(time.perf_counter() - started),
+            }
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready and not token_blockers and not decode_blockers else 2
     if mode == "--prefill":
         if len(args) < 3:
             print("--prefill requires comma-separated token ids")
@@ -279,6 +313,42 @@ def _int_option(args: list[str], name: str, default: int) -> int:
     if index + 1 >= len(args):
         return int(default)
     return int(args[index + 1])
+
+
+def _encode_with_catalog_tokenizer(model_id: str, prompt: str) -> tuple[list[int], list[str]]:
+    from tokenizers import Tokenizer
+    from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+    catalog = load_tensor_catalog(model_id)
+    tokenizer_path = catalog.model_dir / "tokenizer.json"
+    if not tokenizer_path.exists():
+        return [], [f"Missing tokenizer at {tokenizer_path}."]
+    try:
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        encoded = tokenizer.encode(prompt)
+    except Exception as exc:
+        return [], [f"Tokenizer encode failed: {exc}."]
+    token_ids = [int(value) for value in encoded.ids]
+    if not token_ids:
+        return [], ["Prompt text encoded to zero tokens."]
+    return token_ids, []
+
+
+def _decode_with_catalog_tokenizer(model_id: str, token_ids: list[int]) -> tuple[str, list[str]]:
+    from tokenizers import Tokenizer
+    from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+    if not token_ids:
+        return "", []
+    catalog = load_tensor_catalog(model_id)
+    tokenizer_path = catalog.model_dir / "tokenizer.json"
+    if not tokenizer_path.exists():
+        return "", [f"Missing tokenizer at {tokenizer_path}."]
+    try:
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        return tokenizer.decode([int(value) for value in token_ids], skip_special_tokens=False), []
+    except Exception as exc:
+        return "", [f"Tokenizer decode failed: {exc}."]
 
 
 if __name__ == "__main__":
