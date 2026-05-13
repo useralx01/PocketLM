@@ -587,3 +587,8 @@
 - Added native dual FP8 linear for MLP gate/up projections.
 - Wired dense, shared, and selected expert MLP prefixes through the dual path.
 - Verified real DeepSeek dense and bounded decode probes.
+
+## Phase FP8 MoE Expert Workers
+- Added opt-in selected-expert worker execution.
+- Verified real DeepSeek MoE layer and bounded decode correctness.
+- Kept default at one worker because full-path timing did not improve.

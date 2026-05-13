@@ -5886,3 +5886,9 @@ Result: 297 passed in 21.83s
 - Synthetic FP8 runtime tests passed with explicit coverage for both single native and dual native paths.
 - Real DeepSeek dense layer `0` passed with no blockers. Isolated dense timing improved to about `6.76s` native dual versus `7.24s` native-disabled fallback; selected expert `3/0` was roughly tied.
 - Real bounded DeepSeek decode over layers `0-3` generated `[76394]` with clean caches in about `66.47s`.
+
+## Phase FP8 MoE Expert Workers / Evidence
+- Added opt-in selected-expert worker execution via `PCKETLM_FP8_MOE_EXPERT_WORKERS=<n>`.
+- Real DeepSeek MoE layer `3` passed with no blockers.
+- Isolated MoE timings were only tiny wins: about `5.74s` default, `5.63s` with 2 workers, `5.60s` with 4 workers.
+- Full bounded decode over layers `0-3` showed no meaningful difference with 4 workers versus default, so expert workers remain opt-in only.

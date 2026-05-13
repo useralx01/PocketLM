@@ -8,6 +8,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 
@@ -766,17 +767,47 @@ def run_fp8_moe(
         route_indices = router_result.indices_tensor
         route_weights = router_result.weights_tensor.float()
         selected = sorted({int(value) for value in route_indices.reshape(-1).tolist()})
+        expert_jobs: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]] = []
         for expert_index in selected:
             row_indices, top_indices = torch.where(route_indices == int(expert_index))
-            if row_indices.numel() == 0:
-                continue
-            expert_hidden = flat_hidden[row_indices].to(dtype=dtype)
-            expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers = _run_fp8_mlp_prefix(
-                model_id,
-                f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}",
-                expert_hidden,
-                dtype=dtype,
-            )
+            if row_indices.numel() != 0:
+                expert_jobs.append((int(expert_index), row_indices, top_indices, flat_hidden[row_indices].to(dtype=dtype)))
+
+        expert_results: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor | None, int, int, list[str]]] = []
+        workers = _fp8_moe_expert_workers()
+        if workers > 1 and len(expert_jobs) > 1:
+            with ThreadPoolExecutor(max_workers=min(workers, len(expert_jobs))) as executor:
+                futures = {
+                    executor.submit(
+                        _run_fp8_mlp_prefix,
+                        model_id,
+                        f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}",
+                        expert_hidden,
+                        dtype=dtype,
+                    ): (expert_index, row_indices, top_indices)
+                    for expert_index, row_indices, top_indices, expert_hidden in expert_jobs
+                }
+                for future in as_completed(futures):
+                    expert_index, row_indices, top_indices = futures[future]
+                    expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers = future.result()
+                    expert_results.append(
+                        (expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers)
+                    )
+        else:
+            for expert_index, row_indices, top_indices, expert_hidden in expert_jobs:
+                expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers = _run_fp8_mlp_prefix(
+                    model_id,
+                    f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}",
+                    expert_hidden,
+                    dtype=dtype,
+                )
+                expert_results.append(
+                    (expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers)
+                )
+
+        for expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers in sorted(
+            expert_results, key=lambda item: item[0]
+        ):
             routed_loaded_bytes += loaded_bytes
             dequantized_bytes += expert_dequant_bytes
             blockers.extend(expert_blockers)
@@ -1875,6 +1906,16 @@ def _native_fp8_linear_enabled() -> bool:
 
 def _native_lm_head_topk_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fp8_moe_expert_workers() -> int:
+    raw = os.environ.get("PCKETLM_FP8_MOE_EXPERT_WORKERS", "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
 
 
 def _run_fp8_single_token_attention_materialized(

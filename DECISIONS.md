@@ -1477,3 +1477,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Dual Gate-Up Kernel
 - Fuse only gate/up for now. It removes one hidden scan and one Python/native crossing without changing the down projection or MoE routing semantics.
 - Keep the single-linear fallback because expert paths and future kernels may need independent projection timing.
+
+## Phase FP8 MoE Expert Workers
+- Keep selected-expert worker parallelism opt-in with `PCKETLM_FP8_MOE_EXPERT_WORKERS`. It is correct, but current DeepSeek bounded decode did not show a default-worthy win.
+- The next MoE speed win should batch/fuse experts inside native math instead of just running the existing per-expert path concurrently.

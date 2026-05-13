@@ -138,3 +138,4 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next DeepSeek speed step: replace remaining Python-level FP8 attention work with fused kernels only where timing proves a win.
 - Next DeepSeek prompt speed step: extend layer-wise prefill to batch more real prompt tokens and use the new elapsed fields to separate prefill, decode, attention, MLP, and tail costs.
 - Next DeepSeek native speed step: go beyond dual gate/up by fusing the down projection or batching selected experts together.
+- Next MoE speed attempt should fuse selected experts in native code rather than rely on Python thread-level expert workers.
