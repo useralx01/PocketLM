@@ -534,3 +534,10 @@
 - Added bounded single-token forward from embedding through layer blocks plus optional streamed lm-head tail.
 - Real DeepSeek token `0` executed all layers `0-61` from `D:\PocketLM\sources\deepseek-v3`, streamed the lm-head, and produced top token ids `[5, 201, 30, 372, 7249]` with no blockers.
 - Full test suite: 411 passed.
+
+## Phase FP8 KV Carrying Decode
+- Added per-layer KV cache carrying for the FP8 MLA bridge.
+- Added rotary position handling for the single-token q/k rope slice.
+- Real DeepSeek two-token proof passed over layer `0`, with cache length moving from `1` to `2`.
+- Real DeepSeek two-token proof passed over layers `0-3`, including the dense-to-MoE transition and routed layer `3`, with every layer cache moving from `1` to `2`.
+- Full test suite: 411 passed.

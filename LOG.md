@@ -5815,3 +5815,11 @@ Result: 297 passed in 21.83s
 - Real DeepSeek full single-token stack proof: token `0`, layers `0-61`, all `62` layers executed, streamed tail top token ids `[5, 201, 30, 372, 7249]`, top logits `[20.328207, 19.397022, 18.519918, 18.450245, 18.250309]`, no blockers, `ready=true`. Wall time was `568.5s` with the current Python/materialized proof path.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 27 passed.
 - Full tests: `python -m pytest tests\ -q` -> 411 passed.
+
+## Phase FP8 KV Carrying Decode / Evidence
+- Added per-layer FP8 MLA KV cache carrying. Attention now returns the latent KV cache plus rotary-position cache, and block/token forward calls can feed prior caches into the next token.
+- Added rotary application for the q/k rope slice in the single-token attention bridge, using the model's `rope_theta` and token position. This keeps position `0` behavior compatible while enabling position `1+` decode probes.
+- Real DeepSeek one-layer two-token proof: token `0` then token `1`, layer `0`, cache lengths advanced from `{'0': 1}` to `{'0': 2}`, no blockers.
+- Real DeepSeek dense-to-MoE two-token proof: token `0` then token `1`, layers `0-3`, all layer cache lengths advanced from `1` to `2`; layer `3` selected experts `[43, 174, 175, 213, 226, 235, 254, 255]` on the second token, no blockers.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 27 passed.
+- Full tests: `python -m pytest tests\ -q` -> 411 passed.

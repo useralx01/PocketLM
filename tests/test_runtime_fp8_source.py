@@ -26,9 +26,9 @@ def test_tensor_catalog_records_fp8_weight_scale_pairs(tmp_path: Path, monkeypat
     catalog = build_tensor_catalog(model_id, model_dir)
 
     assert catalog.ready is True
-    assert catalog.fp8_weight_count == 11
-    assert catalog.fp8_scale_count == 11
-    assert catalog.fp8_pair_count == 11
+    assert catalog.fp8_weight_count == 16
+    assert catalog.fp8_scale_count == 16
+    assert catalog.fp8_pair_count == 16
     weight = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight")
     scale = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv")
     assert weight is not None
@@ -55,8 +55,8 @@ def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path,
     assert "model.layers.0.mlp.experts.1.down_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.shared_experts.gate_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.experts.0.gate_proj.weight" not in plan.tensor_names
-    assert plan.fp8_weight_count == 10
-    assert plan.scale_count == 10
+    assert plan.fp8_weight_count == 15
+    assert plan.scale_count == 15
     assert plan.total_nbytes == plan.fp8_weight_bytes + plan.scale_bytes + plan.non_fp8_bytes
 
 
@@ -182,16 +182,31 @@ def test_load_fp8_token_embedding_reads_one_row(tmp_path: Path, monkeypatch) -> 
     assert torch.allclose(result.output_tensor.float(), torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]))
 
 
-def test_run_fp8_single_token_forward_loads_embedding_without_tail(tmp_path: Path, monkeypatch) -> None:
+def test_run_fp8_single_token_forward_carries_kv_cache(tmp_path: Path, monkeypatch) -> None:
     model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
     build_tensor_catalog(model_id, model_dir)
 
-    result = run_fp8_single_token_forward(model_id, 1, layer_count=0, include_tail=False, dtype=torch.float32)
+    result = run_fp8_single_token_forward(model_id, 1, layer_count=1, include_tail=False, dtype=torch.float32)
 
     assert result.ready is True
-    assert result.executed_layers == []
+    assert result.executed_layers == [0]
     assert result.output_tensor is not None
     assert result.hidden_shape == [1, 1, 4]
+    assert result.step_summaries[0]["ffn_type"] == "dense"
+    assert result.step_summaries[0]["cache_sequence_length"] == 1
+
+    next_result = run_fp8_single_token_forward(
+        model_id,
+        2,
+        layer_count=1,
+        include_tail=False,
+        dtype=torch.float32,
+        position=1,
+        previous_kv_caches=result.next_kv_caches,
+    )
+
+    assert next_result.ready is True
+    assert next_result.step_summaries[0]["cache_sequence_length"] == 2
 
 
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
@@ -211,6 +226,10 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
                 "num_attention_heads": 1,
                 "num_key_value_heads": 1,
                 "intermediate_size": 4,
+                "qk_nope_head_dim": 1,
+                "qk_rope_head_dim": 2,
+                "v_head_dim": 1,
+                "kv_lora_rank": 1,
                 "n_routed_experts": 2,
                 "num_experts_per_tok": 1,
                 "rms_norm_eps": 1e-6,
@@ -266,6 +285,18 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
         "model.layers.0.mlp.shared_experts.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.input_layernorm.weight": ("BF16", [4], b"\x00\x00" * 4),
         "model.layers.0.post_attention_layernorm.weight": ("BF16", [4], _bf16_payload(torch.ones(4))),
+        "model.layers.0.self_attn.q_a_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(attention))),
+        "model.layers.0.self_attn.q_a_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.self_attn.q_b_proj.weight": ("F8_E4M3", [3, 2], bytes(_fp8_bytes(torch.ones((3, 2))))),
+        "model.layers.0.self_attn.q_b_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.self_attn.kv_a_proj_with_mqa.weight": ("F8_E4M3", [3, 4], bytes(_fp8_bytes(torch.ones((3, 4))))),
+        "model.layers.0.self_attn.kv_a_proj_with_mqa.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.self_attn.kv_b_proj.weight": ("F8_E4M3", [2, 1], bytes(_fp8_bytes(torch.ones((2, 1))))),
+        "model.layers.0.self_attn.kv_b_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.self_attn.o_proj.weight": ("F8_E4M3", [4, 1], bytes(_fp8_bytes(torch.ones((4, 1))))),
+        "model.layers.0.self_attn.o_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.self_attn.q_a_layernorm.weight": ("BF16", [2], _bf16_payload(torch.ones(2))),
+        "model.layers.0.self_attn.kv_a_layernorm.weight": ("BF16", [1], _bf16_payload(torch.ones(1))),
         "model.embed_tokens.weight": ("BF16", [3, 4], _bf16_payload(embedding)),
         "model.norm.weight": ("BF16", [4], _bf16_payload(torch.ones(4))),
         "lm_head.weight": ("BF16", [3, 4], _bf16_payload(lm_head)),

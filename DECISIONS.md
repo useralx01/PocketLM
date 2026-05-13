@@ -1437,3 +1437,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Treat layers below `first_k_dense_replace` as dense MLP layers, not MoE. DeepSeek V3 uses dense layers `0-2`, then MoE from layer `3` onward.
 - Keep single-token stack proof as a correctness bridge, not a speed claim. The full 62-layer token proof completed from the external FP8 source, but it took `568.5s` because the current implementation materializes dequantized FP8 weights through Python.
 - Full prompt/decode remains a separate phase. The next boundary is KV-cache carrying and multi-token causal attention; the current all-layer proof is for one token at position 0.
+
+## Phase FP8 KV Carrying Decode
+- Store DeepSeek MLA cache in the absorbed form used by the official efficient attention path: normalized KV latent plus rotary positional cache. This is much smaller than storing full per-head K/V tensors.
+- Keep KV state in Python tensors for this proof phase. It proves correctness of cache shape and carry semantics; speed still requires fused FP8 matmul and a resident/mapped cache policy.
+- Position handling now applies RoPE to the q/k rope slice for each decode token. The current implementation uses the base `rope_theta` path and is sufficient for short decode probes; long-context Yarn scaling remains a later fidelity step.

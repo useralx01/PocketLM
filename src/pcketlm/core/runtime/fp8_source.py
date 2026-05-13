@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 import json
+import math
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -261,6 +262,7 @@ class FP8AttentionResult:
     loaded_weight_bytes: int
     dequantized_weight_bytes: int
     output_tensor: torch.Tensor | None = None
+    kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -273,6 +275,7 @@ class FP8AttentionResult:
             "loaded_weight_bytes": self.loaded_weight_bytes,
             "dequantized_weight_bytes": self.dequantized_weight_bytes,
             "output_materialized": self.output_tensor is not None,
+            "cache_sequence_length": 0 if self.kv_cache is None else int(self.kv_cache[0].shape[1]),
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -290,6 +293,7 @@ class FP8BlockResult:
     moe: FP8MoEResult | None = None
     dense_mlp: FP8DenseMLPResult | None = None
     output_tensor: torch.Tensor | None = None
+    next_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -303,6 +307,7 @@ class FP8BlockResult:
             "moe": None if self.moe is None else self.moe.to_dict(),
             "dense_mlp": None if self.dense_mlp is None else self.dense_mlp.to_dict(),
             "output_materialized": self.output_tensor is not None,
+            "cache_sequence_length": 0 if self.next_kv_cache is None else int(self.next_kv_cache[0].shape[1]),
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -374,6 +379,7 @@ class FP8TokenForwardResult:
     tail: FP8DecodeTailResult | None = None
     step_summaries: list[dict] = field(default_factory=list)
     output_tensor: torch.Tensor | None = None
+    next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -389,6 +395,9 @@ class FP8TokenForwardResult:
             "tail": None if self.tail is None else self.tail.to_dict(),
             "step_summaries": [dict(item) for item in self.step_summaries],
             "output_materialized": self.output_tensor is not None,
+            "cache_sequence_lengths": {
+                str(key): int(value[0].shape[1]) for key, value in self.next_kv_caches.items()
+            },
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -745,6 +754,8 @@ def run_fp8_single_token_attention(
     hidden: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    start_pos: int = 0,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> FP8AttentionResult:
     """Run one-token DeepSeek MLA attention from FP8 source tensors.
 
@@ -795,17 +806,27 @@ def run_fp8_single_token_attention(
             q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
             kv = F.linear(working, kv_a.float())
             kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
+            q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
+            k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
             kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            if previous_kv_cache is not None:
+                previous_kv, previous_pe = previous_kv_cache
+                kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
+                pe_cache = torch.cat([previous_pe.to(k_pe.dtype), k_pe], dim=1)
+            else:
+                kv_cache = kv_latent
+                pe_cache = k_pe
             wkv_b = kv_b.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
             q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
             scores = (
-                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_latent)
-                + torch.einsum("bshr,btr->bsht", q_pe, k_pe)
+                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+                + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
             ) * float(deepseek_config["softmax_scale"])
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
-            attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_latent)
+            attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
             attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
             output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
+            next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
 
     dequantized_bytes = sum(
         0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size()
@@ -820,6 +841,7 @@ def run_fp8_single_token_attention(
         loaded_weight_bytes=int(loaded_bytes),
         dequantized_weight_bytes=int(dequantized_bytes),
         output_tensor=output,
+        kv_cache=locals().get("next_cache"),
         blockers=blockers,
         ready=not blockers and output is not None,
     )
@@ -831,6 +853,8 @@ def run_fp8_single_token_block(
     hidden: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    start_pos: int = 0,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> FP8BlockResult:
     """Run one DeepSeek block for a single token using FP8 attention and FP8 MoE."""
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
@@ -848,7 +872,14 @@ def run_fp8_single_token_block(
         blockers.append("Post-attention layer norm did not materialize.")
     if not blockers and input_norm[0] is not None and post_norm[0] is not None:
         normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0].float(), float(config["rms_norm_eps"]))
-        attention = run_fp8_single_token_attention(model_id, layer_index, normed, dtype=dtype)
+        attention = run_fp8_single_token_attention(
+            model_id,
+            layer_index,
+            normed,
+            dtype=dtype,
+            start_pos=int(start_pos),
+            previous_kv_cache=previous_kv_cache,
+        )
         blockers.extend(attention.blockers)
         if attention.output_tensor is not None:
             after_attention = hidden_3d.to(dtype=dtype) + attention.output_tensor
@@ -873,6 +904,7 @@ def run_fp8_single_token_block(
         moe=moe,
         dense_mlp=dense_mlp,
         output_tensor=output,
+        next_kv_cache=None if attention is None else attention.kv_cache,
         blockers=blockers,
         ready=not blockers and output is not None,
     )
@@ -982,6 +1014,8 @@ def run_fp8_single_token_forward(
     layer_count: int = 1,
     include_tail: bool = True,
     dtype: torch.dtype = torch.bfloat16,
+    position: int = 0,
+    previous_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> FP8TokenForwardResult:
     """Run a bounded single-token FP8 forward path from embedding through layers."""
     embedding = load_fp8_token_embedding(model_id, token_id)
@@ -989,13 +1023,21 @@ def run_fp8_single_token_forward(
     hidden = embedding.output_tensor
     executed_layers: list[int] = []
     step_summaries: list[dict] = []
+    next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     tail = None
     if hidden is None:
         blockers.append("Token embedding did not materialize.")
 
     if not blockers and hidden is not None:
         for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
-            step = run_fp8_single_token_block(model_id, layer_index, hidden.to(dtype=dtype), dtype=dtype)
+            step = run_fp8_single_token_block(
+                model_id,
+                layer_index,
+                hidden.to(dtype=dtype),
+                dtype=dtype,
+                start_pos=int(position),
+                previous_kv_cache=None if previous_kv_caches is None else previous_kv_caches.get(layer_index),
+            )
             step_summaries.append(
                 {
                     "layer_index": int(layer_index),
@@ -1003,6 +1045,7 @@ def run_fp8_single_token_forward(
                     "output_shape": list(step.output_shape),
                     "ffn_type": "dense" if step.dense_mlp is not None else "moe",
                     "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
+                    "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
                     "blockers": list(step.blockers),
                 }
             )
@@ -1010,6 +1053,8 @@ def run_fp8_single_token_forward(
             if not step.ready or step.output_tensor is None:
                 break
             hidden = step.output_tensor
+            if step.next_kv_cache is not None:
+                next_kv_caches[int(layer_index)] = step.next_kv_cache
             executed_layers.append(int(layer_index))
         if include_tail and not blockers and hidden is not None:
             tail = run_fp8_decode_tail_topk(model_id, hidden)
@@ -1026,6 +1071,7 @@ def run_fp8_single_token_forward(
         tail=tail,
         step_summaries=step_summaries,
         output_tensor=hidden,
+        next_kv_caches=next_kv_caches,
         blockers=blockers,
         ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
     )
@@ -1219,7 +1265,29 @@ def _load_deepseek_config(model_id: str) -> dict:
         "softmax_scale": float(softmax_scale),
         "first_k_dense_replace": int(payload.get("first_k_dense_replace", payload.get("n_dense_layers", 0)) or 0),
         "num_hidden_layers": int(payload.get("num_hidden_layers", catalog.num_hidden_layers or catalog.layer_count) or 0),
+        "rope_theta": float(payload.get("rope_theta", 10000.0) or 10000.0),
     }
+
+
+def _apply_rope_real(x: torch.Tensor, *, start_pos: int, config: dict) -> torch.Tensor:
+    if x.shape[-1] == 0:
+        return x
+    dim = int(x.shape[-1])
+    if dim % 2 != 0:
+        return x
+    device = x.device
+    positions = torch.arange(int(start_pos), int(start_pos) + int(x.shape[1]), dtype=torch.float32, device=device)
+    freqs = 1.0 / (
+        float(config["rope_theta"]) ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
+    )
+    angles = torch.outer(positions, freqs)
+    cos = angles.cos().view(1, x.shape[1], *([1] * (x.ndim - 3)), -1)
+    sin = angles.sin().view(1, x.shape[1], *([1] * (x.ndim - 3)), -1)
+    pair = x.float().reshape(*x.shape[:-1], dim // 2, 2)
+    x0 = pair[..., 0]
+    x1 = pair[..., 1]
+    rotated = torch.stack((x0 * cos - x1 * sin, x0 * sin + x1 * cos), dim=-1).flatten(-2)
+    return rotated.to(dtype=x.dtype)
 
 
 def _load_regular_tensor(model_id: str, tensor_name: str) -> tuple[torch.Tensor | None, list[str]]:
