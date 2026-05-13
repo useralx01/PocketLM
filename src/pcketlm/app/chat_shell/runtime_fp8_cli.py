@@ -12,6 +12,7 @@ from pcketlm.core.runtime import (
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
+    run_fp8_decode_tail_topk,
     run_fp8_expert_mlp,
     run_fp8_moe,
     run_fp8_router,
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --moe <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --attention <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --block <layer>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --tail")
         return 1
 
     model_id = args[0]
@@ -145,6 +147,12 @@ def main(argv: list[str] | None = None) -> int:
             payload["output_mean_abs"] = float(values.abs().mean().item())
             payload["output_max_abs"] = float(values.abs().max().item())
         print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--tail":
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, 1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_decode_tail_topk(model_id, hidden)
+        print(json.dumps(result.to_dict(), indent=2))
         return 0 if result.ready else 2
 
     print(f"Unknown mode: {mode}")

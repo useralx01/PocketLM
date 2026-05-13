@@ -6,6 +6,7 @@ import torch
 
 from pcketlm.core.runtime.fp8_source import (
     dequantize_fp8_block_scaled,
+    run_fp8_decode_tail_topk,
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
@@ -141,6 +142,19 @@ def test_run_fp8_moe_combines_routed_and_shared_experts(tmp_path: Path, monkeypa
     assert result.dequantized_weight_bytes > 0
 
 
+def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.bfloat16)
+
+    result = run_fp8_decode_tail_topk(model_id, hidden, top_k=2, chunk_rows=2)
+
+    assert result.ready is True
+    assert result.chunk_count == 2
+    assert result.top_token_ids[0] == 1
+    assert result.loaded_lm_head_bytes == 3 * 4 * 2
+
+
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     from pcketlm.core import storage
 
@@ -160,6 +174,7 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
                 "intermediate_size": 4,
                 "n_routed_experts": 2,
                 "num_experts_per_tok": 1,
+                "rms_norm_eps": 1e-6,
                 "n_group": 1,
                 "topk_group": 1,
                 "scoring_func": "sigmoid",
@@ -179,6 +194,7 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     shared_gate = torch.tensor([[0.25, 0.5, 0.75, 1.0], [1.0, -0.5, 0.25, -0.75]], dtype=torch.float32)
     shared_up = torch.tensor([[0.5, 0.5, -0.5, -0.5], [1.0, 0.25, 0.5, -0.25]], dtype=torch.float32)
     shared_down = torch.tensor([[0.25, -0.25], [0.5, 1.0], [-0.75, 0.5], [1.25, -1.0]], dtype=torch.float32)
+    lm_head = torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.5, 0.0, 0.0, 0.0]], dtype=torch.float32)
     tensors = {
         "model.layers.0.self_attn.q_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(attention))),
         "model.layers.0.self_attn.q_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 0.5)),
@@ -199,6 +215,8 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
         "model.layers.0.mlp.shared_experts.down_proj.weight": ("F8_E4M3", [4, 2], bytes(_fp8_bytes(shared_down))),
         "model.layers.0.mlp.shared_experts.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.input_layernorm.weight": ("BF16", [4], b"\x00\x00" * 4),
+        "model.norm.weight": ("BF16", [4], _bf16_payload(torch.ones(4))),
+        "lm_head.weight": ("BF16", [3, 4], _bf16_payload(lm_head)),
     }
     shard = model_dir / "model-00001-of-00001.safetensors"
     _write_safetensors_bytes(shard, tensors)
@@ -227,3 +245,7 @@ def _fp8_bytes(values: torch.Tensor) -> list[int]:
 
 def _f32_payload(values: torch.Tensor) -> bytes:
     return bytes(values.contiguous().to(dtype=torch.float32).view(torch.uint8).flatten().tolist())
+
+
+def _bf16_payload(values: torch.Tensor) -> bytes:
+    return bytes(values.contiguous().to(dtype=torch.bfloat16).view(torch.uint8).flatten().tolist())

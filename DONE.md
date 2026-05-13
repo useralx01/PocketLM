@@ -523,5 +523,7 @@
 - Added real DeepSeek router top-k execution from the source tensors: sigmoid scoring, correction-bias expert choice, grouped top-k, normalized route weights, and route scale.
 - Added selected FP8 MoE execution for routed experts plus the shared expert.
 - Added single-token FP8 MLA attention proof and a single-token block proof combining attention residual plus MoE FFN residual.
+- Added final-norm plus streamed `lm_head` top-k proof so DeepSeek can score a hidden state without loading the whole lm_head into RAM at once.
 - Real DeepSeek layer `3` block proof passed from `D:\PocketLM\sources\deepseek-v3`, producing a real `[1, 1, 7168]` output with no blockers.
-- Full test suite: 407 passed.
+- Real DeepSeek tail proof streamed `1,853,358,080` lm_head bytes in `64` chunks and produced top token ids with no blockers.
+- Full test suite: 408 passed.

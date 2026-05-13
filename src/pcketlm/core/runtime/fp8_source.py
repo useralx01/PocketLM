@@ -278,6 +278,34 @@ class FP8BlockResult:
         }
 
 
+@dataclass(slots=True)
+class FP8DecodeTailResult:
+    """Final norm plus streamed lm_head top-k proof for an FP8 DeepSeek hidden state."""
+
+    model_id: str
+    input_shape: list[int]
+    top_token_ids: list[int]
+    top_logits: list[float]
+    chunk_rows: int
+    chunk_count: int
+    loaded_lm_head_bytes: int
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "input_shape": list(self.input_shape),
+            "top_token_ids": list(self.top_token_ids),
+            "top_logits": list(self.top_logits),
+            "chunk_rows": self.chunk_rows,
+            "chunk_count": self.chunk_count,
+            "loaded_lm_head_bytes": self.loaded_lm_head_bytes,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
 def fp8_source_status(model_id: str) -> dict:
     """Return FP8 source readiness from the persisted tensor catalog."""
     catalog = load_tensor_catalog(model_id)
@@ -731,6 +759,72 @@ def run_fp8_single_token_block(
     )
 
 
+def run_fp8_decode_tail_topk(
+    model_id: str,
+    hidden: torch.Tensor,
+    *,
+    top_k: int = 5,
+    chunk_rows: int = 2048,
+) -> FP8DecodeTailResult:
+    """Run final norm and stream lm_head chunks to get top-k logits."""
+    norm_tensor, blockers = _load_regular_tensor(model_id, "model.norm.weight")
+    hidden_2d = hidden.reshape(-1, hidden.shape[-1])[-1:].to(dtype=torch.bfloat16)
+    config = _load_deepseek_config(model_id)
+    top_values: torch.Tensor | None = None
+    top_indices: torch.Tensor | None = None
+    chunk_count = 0
+    loaded_bytes = 0
+    if norm_tensor is None:
+        blockers.append("Final norm tensor did not materialize.")
+    lm_head_entry = find_tensor_catalog_entry(model_id, "lm_head.weight")
+    if lm_head_entry is None:
+        blockers.append("lm_head.weight is not present in the tensor catalog.")
+    if lm_head_entry is not None and lm_head_entry.dtype not in {"BF16", "F16", "F32"}:
+        blockers.append(f"lm_head.weight has unsupported dtype {lm_head_entry.dtype}.")
+
+    if not blockers and norm_tensor is not None and lm_head_entry is not None:
+        normalized = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"])).float()
+        vocab_size = int(lm_head_entry.shape[0])
+        hidden_size = int(lm_head_entry.shape[1])
+        if normalized.shape[-1] != hidden_size:
+            blockers.append(
+                f"Hidden size {normalized.shape[-1]} does not match lm_head hidden size {hidden_size}."
+            )
+        else:
+            keep_k = max(1, min(int(top_k), vocab_size))
+            rows_per_chunk = max(1, int(chunk_rows))
+            for start in range(0, vocab_size, rows_per_chunk):
+                end = min(vocab_size, start + rows_per_chunk)
+                weight = _read_tensor_rows(lm_head_entry, start, end).float()
+                loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
+                chunk_logits = F.linear(normalized, weight).reshape(-1)
+                values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
+                indices = indices + start
+                if top_values is None or top_indices is None:
+                    top_values = values
+                    top_indices = indices
+                else:
+                    merged_values = torch.cat([top_values, values])
+                    merged_indices = torch.cat([top_indices, indices])
+                    top_values, positions = torch.topk(merged_values, keep_k)
+                    top_indices = merged_indices[positions]
+                chunk_count += 1
+
+    token_ids = [] if top_indices is None else [int(value) for value in top_indices.tolist()]
+    logits = [] if top_values is None else [float(value) for value in top_values.tolist()]
+    return FP8DecodeTailResult(
+        model_id=model_id,
+        input_shape=[int(value) for value in hidden.shape],
+        top_token_ids=token_ids,
+        top_logits=logits,
+        chunk_rows=int(chunk_rows),
+        chunk_count=int(chunk_count),
+        loaded_lm_head_bytes=int(loaded_bytes),
+        blockers=blockers,
+        ready=not blockers and bool(token_ids),
+    )
+
+
 def load_fp8_weight_pair(model_id: str, weight_name: str, *, load_payload: bool = True) -> FP8TensorPair:
     """Load one FP8 weight as raw bytes plus its scale tensor."""
     weight = find_tensor_catalog_entry(model_id, weight_name)
@@ -797,11 +891,29 @@ def _torch_dtype_for_scale(dtype: str) -> torch.dtype:
     return torch.float32
 
 
+def _dtype_element_size(dtype: str) -> int:
+    return torch.empty((), dtype=_torch_dtype_for_scale(dtype)).element_size()
+
+
 def _read_tensor_bytes(entry: TensorCatalogEntry) -> bytes:
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
     with entry.shard_path.open("rb") as handle:
         handle.seek(base_offset + entry.data_offset_start)
         return handle.read(entry.data_nbytes)
+
+
+def _read_tensor_rows(entry: TensorCatalogEntry, start_row: int, end_row: int) -> torch.Tensor:
+    if len(entry.shape) != 2:
+        raise ValueError(f"Tensor {entry.tensor_name} is not a 2D row-readable tensor.")
+    dtype = _torch_dtype_for_scale(entry.dtype)
+    row_count = max(0, int(end_row) - int(start_row))
+    cols = int(entry.shape[1])
+    row_bytes = cols * torch.empty((), dtype=dtype).element_size()
+    base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
+    with entry.shard_path.open("rb") as handle:
+        handle.seek(base_offset + entry.data_offset_start + int(start_row) * row_bytes)
+        raw = handle.read(row_count * row_bytes)
+    return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(row_count, cols).clone()
 
 
 def _run_fp8_mlp_prefix(

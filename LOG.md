@@ -5798,5 +5798,7 @@ Result: 297 passed in 21.83s
 - Added single-token FP8 MLA attention proof for DeepSeek layer `3`. It loads/dequants q-a, q-b, kv-a, kv-b, and o-proj FP8 weights, applies q/kv RMSNorm, uses DeepSeek MLA absorbed attention math for one token, and returns an attention output without full-model residency.
 - Real DeepSeek attention proof: layer `3`, output `[1, 1, 7168]`, loaded FP8+scale bytes `187,151,072`, dequantized bytes `374,210,560`, `output_mean_abs=0.029374775`, `output_max_abs=0.828125`, `ready=true`.
 - Real DeepSeek block proof: layer `3`, FP8 attention plus FP8 MoE FFN/residual, output `[1, 1, 7168]`, selected experts `[104, 107, 109, 112, 125, 214, 242, 248]`, `output_mean_abs=0.997961879`, `output_max_abs=1.8671875`, `ready=true`.
-- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 23 passed.
-- Full tests: `python -m pytest tests\ -q` -> 407 passed.
+- Added final-norm plus streamed `lm_head` top-k proof. The tail reads BF16 lm-head rows in chunks and keeps only merged top-k logits, so it does not need to materialize the full `1.85 GB` lm_head in RAM at once.
+- Real DeepSeek tail proof: ones hidden vector, `chunk_rows=2048`, `chunk_count=64`, loaded lm_head bytes `1,853,358,080`, top token ids `[14126, 64437, 30740, 106705, 112833]`, top logits `[12.7646389, 11.8792324, 11.5150452, 11.4512529, 11.3375969]`, `ready=true`.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 24 passed.
+- Full tests: `python -m pytest tests\ -q` -> 408 passed.
