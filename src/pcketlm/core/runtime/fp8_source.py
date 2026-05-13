@@ -473,10 +473,37 @@ class FP8PromptPrefillResult:
 def fp8_source_status(model_id: str) -> dict:
     """Return FP8 source readiness from the persisted tensor catalog."""
     catalog = load_tensor_catalog(model_id)
+    config_payload = {}
+    config_path = catalog.model_dir / "config.json"
+    if config_path.exists():
+        config_payload = _load_json_payload(str(config_path), config_path.stat().st_mtime_ns)
+    config_layer_count = int(config_payload.get("num_hidden_layers", 0) or 0)
+    catalog_layer_count = int(catalog.layer_count or catalog.num_hidden_layers or 0)
+    layer_count = max(config_layer_count, catalog_layer_count)
+    first_dense = int(config_payload.get("first_k_dense_replace", config_payload.get("n_dense_layers", 0)) or 0)
+    top_k = int(config_payload.get("num_experts_per_tok", config_payload.get("n_activated_experts", 0)) or 0)
     return {
         "model_id": model_id,
         "ready": catalog.ready and catalog.fp8_weight_count > 0 and catalog.fp8_pair_count > 0,
         "catalog_ready": catalog.ready,
+        "model_dir": str(catalog.model_dir),
+        "runtime_policy": {
+            "weight_residency": "paged_fp8_source",
+            "scale_residency": "paged_fp32_source",
+            "dequant_residency": "per_chunk_transient",
+            "kv_cache_residency": "in_memory_per_active_layer",
+            "expert_policy": "selected_experts_only",
+            "first_dense_layers": first_dense,
+            "config_layer_count": config_layer_count,
+            "catalog_layer_count": catalog_layer_count,
+            "layer_count": layer_count,
+            "layer_count_source": "catalog" if catalog_layer_count >= config_layer_count else "config",
+            "top_k_experts": top_k,
+            "native_fp8_linear": _native_fp8_linear_enabled() and native_fp8_linear_available(),
+            "streamed_attention": _streamed_fp8_attention_enabled(),
+            "native_lm_head_topk": _native_lm_head_topk_enabled(),
+            "moe_expert_workers": _fp8_moe_expert_workers(),
+        },
         "fp8_weight_count": catalog.fp8_weight_count,
         "fp8_scale_count": catalog.fp8_scale_count,
         "fp8_pair_count": catalog.fp8_pair_count,

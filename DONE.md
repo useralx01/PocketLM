@@ -606,3 +606,8 @@
 - Made bounded `--chat` use the model's own local chat template by default.
 - Added raw-chat fallback and system-prompt support.
 - Verified with real DeepSeek tokenizer/config files.
+
+## Phase FP8 Runtime Policy
+- Added `fp8_source_status()` runtime policy fields for paged FP8/source-scale residency and selected-expert execution.
+- Reported config and catalog layer counts separately so DeepSeek's `61` config value does not hide the `62` catalog layer indices available to execution.
+- Verified real DeepSeek status and focused FP8 runtime tests.

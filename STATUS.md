@@ -687,3 +687,4 @@ Phase FP8 MoE Expert Workers: selected-expert parallel workers are available by 
 Phase FP8 Text Chat Bridge: `runtime_fp8_cli --chat` can run bounded real-text DeepSeek FP8 probes through the external-source tokenizer.
 Phase FP8 Layer Scaling: bounded DeepSeek decode now passes through layers 0-7 with clean KV caches, taking about 140s for the tiny probe.
 Phase FP8 Chat Template: bounded FP8 chat now uses DeepSeek's local chat template by default, with raw-chat fallback.
+Phase FP8 Runtime Policy: DeepSeek FP8 source status now reports the practical paged runtime policy, paired FP8/scale readiness, and the config-vs-catalog layer count split.

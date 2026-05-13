@@ -5911,3 +5911,9 @@ Result: 297 passed in 21.83s
 - Added `--system-prompt` support for chat-template probes.
 - Real DeepSeek chat-template probe passed: `--chat hi --layers 1 --max-new 1 --max-prompt-tokens 4` used prompt token ids `[0, 128803, 6366, 128804]`, generated `[55026]`, decoded ` Aires`, and had no tokenizer/runtime blockers.
 - This remains a bounded-layer runtime proof, not a final quality claim.
+
+## Phase FP8 Runtime Policy / Evidence
+- Exposed the DeepSeek FP8 source runtime policy through `runtime_fp8_cli --status`.
+- The status now reports explicit residency choices: FP8 weights and fp32 scales stay paged from source, dequantized chunks are transient, KV cache stays in memory per active layer, and execution uses selected experts only.
+- Real DeepSeek source status is ready from `D:\PocketLM\sources\deepseek-v3`: `45808` FP8 weights, `45808` scales, `45808` pairs, `680571043840` FP8 weight bytes, and `166161984` scale bytes.
+- DeepSeek config reports `61` hidden layers, while the tensor catalog reports `62` layer indices; runtime status now exposes both and uses the catalog count as the practical execution count.

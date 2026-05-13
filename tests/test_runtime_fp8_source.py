@@ -7,6 +7,7 @@ import torch
 import pcketlm.core.runtime.fp8_source as fp8_source
 from pcketlm.core.runtime.fp8_source import (
     dequantize_fp8_block_scaled,
+    fp8_source_status,
     load_fp8_token_embedding,
     run_fp8_decode_tail_topk,
     run_fp8_decode_loop,
@@ -42,6 +43,22 @@ def test_tensor_catalog_records_fp8_weight_scale_pairs(tmp_path: Path, monkeypat
     assert weight.physical_format == "fp8_block_scaled"
     assert scale.tensor_role == "scale_companion"
     assert scale.weight_tensor_name == weight.tensor_name
+
+
+def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    status = fp8_source_status(model_id)
+
+    assert status["ready"] is True
+    assert status["runtime_policy"]["weight_residency"] == "paged_fp8_source"
+    assert status["runtime_policy"]["expert_policy"] == "selected_experts_only"
+    assert status["runtime_policy"]["config_layer_count"] == 1
+    assert status["runtime_policy"]["catalog_layer_count"] == 1
+    assert status["runtime_policy"]["layer_count"] == 1
+    assert status["runtime_policy"]["layer_count_source"] == "catalog"
+    assert status["runtime_policy"]["top_k_experts"] == 1
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:

@@ -1481,3 +1481,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 MoE Expert Workers
 - Keep selected-expert worker parallelism opt-in with `PCKETLM_FP8_MOE_EXPERT_WORKERS`. It is correct, but current DeepSeek bounded decode did not show a default-worthy win.
 - The next MoE speed win should batch/fuse experts inside native math instead of just running the existing per-expert path concurrently.
+
+## Phase FP8 Runtime Policy
+- Treat the tensor catalog layer count as the execution-facing layer count when it disagrees with config metadata, while still reporting both numbers. DeepSeek V3 local config reports `61`, but the catalog has layer indices `0-61`.
+- Keep FP8 source execution paged by policy: source FP8 weights and fp32 scales are read on demand, dequantized chunks are transient, and only routed experts are touched for MoE layers.
