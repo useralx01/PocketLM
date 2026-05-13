@@ -1446,3 +1446,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Prompt Decode Loop
 - Keep the first decode loop greedy and token-id based. Text/tokenizer integration is not the blocker; the blocker is proving carried FP8 layer execution and then replacing Python materialized dequant with fused kernels.
 - The bounded real proof uses layers `0-3` because it crosses the dense-to-MoE boundary while avoiding another full-stack 10-minute run. Full-stack decode is mechanically available but too slow to use interactively until the FP8 matmul path is fused/paged.
+
+## Phase FP8 Streamed MLP
+- Stream MLP weights by output rows before attempting native kernels. This cuts peak dequantized memory for dense/expert/shared MLPs and keeps the path external-disk friendly while preserving exact FP8+scale math.
+- Keep attention materialized for now. MLA attention has different projection shapes and absorbed-cache math, so MLP row streaming is the lower-risk first speed/memory route.

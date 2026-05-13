@@ -546,3 +546,8 @@
 - Added a small greedy prompt/decode loop around the KV-carrying FP8 token step.
 - Real DeepSeek prompt `[0, 1]` over layers `0-3` generated next token `[76394]` with cache lengths reaching `3` and no blockers.
 - Full test suite: 412 passed.
+
+## Phase FP8 Streamed MLP
+- Replaced materialized FP8 MLP gate/up/down execution with streamed row chunks for dense layers, selected routed experts, and shared experts.
+- Real DeepSeek dense layer, selected expert, and bounded prompt decode proofs still pass with no blockers.
+- Full test suite: 412 passed.

@@ -5830,3 +5830,12 @@ Result: 297 passed in 21.83s
 - Real DeepSeek bounded decode proof: prompt tokens `[0, 1]`, layers `0-3`, `max_new=1`, generated token `[76394]`, cache lengths reached `3` for layers `0-3`, no blockers, `ready=true`.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 28 passed.
 - Full tests: `python -m pytest tests\ -q` -> 412 passed.
+
+## Phase FP8 Streamed MLP / Evidence
+- Replaced materialized FP8 MLP gate/up/down execution with a streamed-row linear helper. The helper reads FP8 weight rows and matching scale rows in block-aligned chunks, dequantizes only that chunk, runs the linear projection, and drops the chunk.
+- The streamed path is now used by dense MLP, selected routed experts, and shared experts. Attention still uses materialized FP8 weights for this phase.
+- Real DeepSeek dense layer proof after streaming: layer `0`, output `[1, 1, 7168]`, loaded FP8+scale bytes `396,458,496`, dequantized bytes `792,723,456`, `output_mean_abs=0.599461436`, `output_max_abs=11.5625`, no blockers, `ready=true`.
+- Real DeepSeek selected expert proof after streaming: layer `3`, expert `0`, output `[1, 7168]`, loaded FP8+scale bytes `44,050,944`, dequantized bytes `88,080,384`, `output_mean_abs=0.060715895`, `output_max_abs=0.373046875`, no blockers, `ready=true`.
+- Real DeepSeek bounded decode proof after streaming still passes: prompt `[0, 1]`, layers `0-3`, generated `[76394]`, cache lengths reached `3`, no blockers, `ready=true`.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 28 passed.
+- Full tests: `python -m pytest tests\ -q` -> 412 passed.

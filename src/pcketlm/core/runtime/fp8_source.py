@@ -1289,6 +1289,25 @@ def _read_tensor_rows(entry: TensorCatalogEntry, start_row: int, end_row: int) -
     return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(row_count, cols).clone()
 
 
+def _read_fp8_weight_rows(entry: TensorCatalogEntry, start_row: int, end_row: int) -> torch.Tensor:
+    if len(entry.shape) != 2:
+        raise ValueError(f"Tensor {entry.tensor_name} is not a 2D row-readable tensor.")
+    row_count = max(0, int(end_row) - int(start_row))
+    cols = int(entry.shape[1])
+    row_bytes = cols
+    base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
+    with entry.shard_path.open("rb") as handle:
+        handle.seek(base_offset + entry.data_offset_start + int(start_row) * row_bytes)
+        raw = handle.read(row_count * row_bytes)
+    return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(row_count, cols).contiguous()
+
+
+def _read_scale_rows_for_weight_chunk(scale: TensorCatalogEntry, start_row: int, end_row: int) -> torch.Tensor:
+    scale_start = int(start_row) // 128
+    scale_end = (int(end_row) + 127) // 128
+    return _read_tensor_rows(scale, scale_start, scale_end).to(dtype=torch.float32)
+
+
 def _run_fp8_mlp_prefix(
     model_id: str,
     prefix: str,
@@ -1296,33 +1315,79 @@ def _run_fp8_mlp_prefix(
     *,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor | None, int, int, list[str]]:
-    names = {
-        "gate": f"{prefix}.gate_proj.weight",
-        "up": f"{prefix}.up_proj.weight",
-        "down": f"{prefix}.down_proj.weight",
-    }
-    loaded = {role: load_dequantized_fp8_weight(model_id, name, dtype=dtype) for role, name in names.items()}
-    blockers = [blocker for item in loaded.values() for blocker in item.blockers]
-    output = None
-    if not blockers and all(item.tensor is not None for item in loaded.values()):
-        gate = loaded["gate"].tensor
-        up = loaded["up"].tensor
-        down = loaded["down"].tensor
-        if gate is None or up is None or down is None:
-            blockers.append(f"One or more FP8 MLP weights failed to materialize for {prefix}.")
-        else:
-            working = hidden.to(dtype=torch.float32)
-            gate_out = F.linear(working, gate.to(torch.float32))
-            up_out = F.linear(working, up.to(torch.float32))
-            expert_hidden = F.silu(gate_out) * up_out
-            output = F.linear(expert_hidden, down.to(torch.float32)).to(dtype=dtype).contiguous()
-
-    dequantized_bytes = sum(
-        0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size()
-        for item in loaded.values()
+    gate_name = f"{prefix}.gate_proj.weight"
+    up_name = f"{prefix}.up_proj.weight"
+    down_name = f"{prefix}.down_proj.weight"
+    gate_out, gate_loaded, gate_dequant, gate_blockers = _run_fp8_linear_streamed(
+        model_id, gate_name, hidden, dtype=dtype
     )
-    loaded_bytes = sum(item.loaded_nbytes for item in loaded.values())
+    up_out, up_loaded, up_dequant, up_blockers = _run_fp8_linear_streamed(
+        model_id, up_name, hidden, dtype=dtype
+    )
+    blockers = [*gate_blockers, *up_blockers]
+    output = None
+    down_loaded = 0
+    down_dequant = 0
+    if gate_out is None or up_out is None:
+        blockers.append(f"One or more FP8 MLP gate/up outputs failed for {prefix}.")
+    if not blockers and gate_out is not None and up_out is not None:
+        expert_hidden = F.silu(gate_out.float()) * up_out.float()
+        output, down_loaded, down_dequant, down_blockers = _run_fp8_linear_streamed(
+            model_id, down_name, expert_hidden, dtype=dtype
+        )
+        blockers.extend(down_blockers)
+
+    loaded_bytes = gate_loaded + up_loaded + down_loaded
+    dequantized_bytes = gate_dequant + up_dequant + down_dequant
     return output, int(loaded_bytes), int(dequantized_bytes), blockers
+
+
+def _run_fp8_linear_streamed(
+    model_id: str,
+    weight_name: str,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    chunk_rows: int = 2048,
+) -> tuple[torch.Tensor | None, int, int, list[str]]:
+    weight = find_tensor_catalog_entry(model_id, weight_name)
+    blockers: list[str] = []
+    if weight is None:
+        return None, 0, 0, [f"Tensor {weight_name} is not present in the tensor catalog."]
+    if not is_fp8_dtype(weight.dtype):
+        return None, 0, 0, [f"Tensor {weight_name} is {weight.dtype}, not FP8."]
+    if not weight.scale_tensor_name:
+        return None, 0, 0, [f"Tensor {weight_name} has no scale companion."]
+    scale = find_tensor_catalog_entry(model_id, weight.scale_tensor_name)
+    if scale is None:
+        return None, 0, 0, [f"Scale tensor {weight.scale_tensor_name} is not present in the tensor catalog."]
+    if len(weight.shape) != 2:
+        return None, 0, 0, [f"Tensor {weight_name} is not a 2D weight tensor."]
+
+    flat_hidden = hidden.reshape(-1, int(hidden.shape[-1])).float()
+    out_rows = int(weight.shape[0])
+    in_cols = int(weight.shape[1])
+    if flat_hidden.shape[-1] != in_cols:
+        return None, 0, 0, [f"Hidden size {flat_hidden.shape[-1]} does not match {weight_name} input size {in_cols}."]
+
+    rows_per_chunk = max(128, int(chunk_rows))
+    if rows_per_chunk % 128 != 0:
+        rows_per_chunk = ((rows_per_chunk + 127) // 128) * 128
+    output = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
+    loaded_bytes = 0
+    dequantized_bytes = 0
+    for start in range(0, out_rows, rows_per_chunk):
+        end = min(out_rows, start + rows_per_chunk)
+        fp8_rows = _read_fp8_weight_rows(weight, start, end)
+        scale_rows = _read_scale_rows_for_weight_chunk(scale, start, end)
+        loaded_bytes += int(fp8_rows.nelement() * fp8_rows.element_size()) + int(
+            scale_rows.nelement() * scale_rows.element_size()
+        )
+        dequantized = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=dtype)
+        dequantized_bytes += int(dequantized.nelement() * dequantized.element_size())
+        output[:, start:end] = F.linear(flat_hidden, dequantized.float()).to(dtype=dtype)
+
+    return output.reshape(*hidden.shape[:-1], out_rows).contiguous(), loaded_bytes, dequantized_bytes, blockers
 
 
 def _mask_deepseek_route_groups(
