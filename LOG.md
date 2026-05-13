@@ -5789,3 +5789,14 @@ Result: 297 passed in 21.83s
 - Real DeepSeek selected expert proof: layer `3`, expert `0`, ones hidden vector `[1, 7168]`, output `[1, 7168]`, loaded FP8+scale bytes `44,050,944`, dequantized bytes `88,080,384`, `output_mean_abs=0.060764011`, `output_max_abs=0.373046875`, `ready=true`.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 21 passed.
 - Full tests: `python -m pytest tests\ -q` -> 405 passed.
+
+## Phase FP8 Router MoE Block Proof / Evidence
+- Added DeepSeek-style FP8 router execution for layer MoE gates. The router now uses the real config from the source directory: sigmoid scores, optional `e_score_correction_bias` for expert selection only, grouped top-k routing, original scores for routing weights, normalization, and the `routed_scaling_factor`.
+- Added selected FP8 MoE execution that runs exactly the routed experts plus the shared expert. This keeps the path on the make-it-fit design: selected experts only, not all `256` experts.
+- Real DeepSeek router proof: layer `3`, ones hidden vector, selected experts `[46, 104, 109, 214, 217, 242, 248, 249]`, sigmoid, `n_groups=8`, `topk_groups=4`, `route_scale=2.5`, bias loaded, `ready=true`.
+- Real DeepSeek MoE proof: layer `3`, selected experts `[46, 104, 109, 214, 217, 242, 248, 249]`, output `[1, 7168]`, routed FP8+scale bytes `352,407,552`, shared FP8+scale bytes `44,050,944`, dequantized bytes `792,723,456`, `output_mean_abs=0.116496809`, `output_max_abs=0.65625`, `ready=true`.
+- Added single-token FP8 MLA attention proof for DeepSeek layer `3`. It loads/dequants q-a, q-b, kv-a, kv-b, and o-proj FP8 weights, applies q/kv RMSNorm, uses DeepSeek MLA absorbed attention math for one token, and returns an attention output without full-model residency.
+- Real DeepSeek attention proof: layer `3`, output `[1, 1, 7168]`, loaded FP8+scale bytes `187,151,072`, dequantized bytes `374,210,560`, `output_mean_abs=0.029374775`, `output_max_abs=0.828125`, `ready=true`.
+- Real DeepSeek block proof: layer `3`, FP8 attention plus FP8 MoE FFN/residual, output `[1, 1, 7168]`, selected experts `[104, 107, 109, 112, 125, 214, 242, 248]`, `output_mean_abs=0.997961879`, `output_max_abs=1.8671875`, `ready=true`.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 23 passed.
+- Full tests: `python -m pytest tests\ -q` -> 407 passed.

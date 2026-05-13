@@ -1425,3 +1425,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use PyTorch's `torch.float8_e4m3fn` as the first correct CPU reference for E4M3 decoding. This avoids hand-rolling the bit format and matches DeepSeek's published FP8 format.
 - Treat `weight_scale_inv` as a dequantization scale, not as a value to invert again. The effective weight is `fp8_value * expanded_weight_scale_inv` for each 128x128 block.
 - Keep the first numeric path as a materialized Python proof. It intentionally loads and dequantizes only one selected expert's gate/up/down tensors; a future speed phase should replace this with fused/paged matmul instead of materializing many BF16 weights.
+
+## Phase FP8 Router MoE Block Proof
+- Router policy follows the official DeepSeek inference order: score with softmax/sigmoid, add correction bias only to the scores used for expert/group selection, gather route weights from the original un-biased scores, normalize sigmoid top-k weights, then multiply by route scale.
+- Use the catalog model directory as the source of `config.json`. DeepSeek lives on `D:\PocketLM\sources`, so runtime FP8 helpers must not assume `models\<id>\original`.
+- Shared experts are always part of the active MoE working set. Routed experts are selected by router top-k; shared expert gate/up/down is added for every token.
+- The current FP8 block proof is single-token only. It proves DeepSeek MLA and MoE math wiring without cache/mask complexity. Full prompt/decode needs KV-cache carrying, token embedding row loading, final norm, lm_head streaming, and a fused FP8 matmul path before it can be called a usable full runtime.

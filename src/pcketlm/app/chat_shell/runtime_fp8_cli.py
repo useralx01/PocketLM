@@ -13,6 +13,10 @@ from pcketlm.core.runtime import (
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
     run_fp8_expert_mlp,
+    run_fp8_moe,
+    run_fp8_router,
+    run_fp8_single_token_attention,
+    run_fp8_single_token_block,
 )
 
 
@@ -24,6 +28,10 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --pair <tensor-name> [--no-payload]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --dequant-pair <tensor-name>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --expert <layer> <expert>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --router <layer>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --moe <layer>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --attention <layer>")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --block <layer>")
         return 1
 
     model_id = args[0]
@@ -73,6 +81,64 @@ def main(argv: list[str] | None = None) -> int:
         hidden_size = _hidden_size_from_status(model_id)
         hidden = torch.ones((1, hidden_size), dtype=torch.bfloat16)
         result = run_fp8_expert_mlp(model_id, layer_index, expert_index, hidden)
+        payload = result.to_dict()
+        if result.output_tensor is not None:
+            values = result.output_tensor.float()
+            payload["output_mean_abs"] = float(values.abs().mean().item())
+            payload["output_max_abs"] = float(values.abs().max().item())
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--router":
+        if len(args) < 3:
+            print("--router requires a layer index")
+            return 1
+        layer_index = int(args[2])
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_router(model_id, layer_index, hidden)
+        payload = result.to_dict()
+        if result.weights_tensor is not None:
+            payload["weights"] = [float(value) for value in result.weights_tensor.reshape(-1).float().tolist()]
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--moe":
+        if len(args) < 3:
+            print("--moe requires a layer index")
+            return 1
+        layer_index = int(args[2])
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_moe(model_id, layer_index, hidden)
+        payload = result.to_dict()
+        if result.output_tensor is not None:
+            values = result.output_tensor.float()
+            payload["output_mean_abs"] = float(values.abs().mean().item())
+            payload["output_max_abs"] = float(values.abs().max().item())
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--attention":
+        if len(args) < 3:
+            print("--attention requires a layer index")
+            return 1
+        layer_index = int(args[2])
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, 1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_single_token_attention(model_id, layer_index, hidden)
+        payload = result.to_dict()
+        if result.output_tensor is not None:
+            values = result.output_tensor.float()
+            payload["output_mean_abs"] = float(values.abs().mean().item())
+            payload["output_max_abs"] = float(values.abs().max().item())
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--block":
+        if len(args) < 3:
+            print("--block requires a layer index")
+            return 1
+        layer_index = int(args[2])
+        hidden_size = _hidden_size_from_status(model_id)
+        hidden = torch.ones((1, 1, hidden_size), dtype=torch.bfloat16)
+        result = run_fp8_single_token_block(model_id, layer_index, hidden)
         payload = result.to_dict()
         if result.output_tensor is not None:
             values = result.output_tensor.float()

@@ -10,6 +10,8 @@ from pcketlm.core.runtime.fp8_source import (
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
     run_fp8_expert_mlp,
+    run_fp8_moe,
+    run_fp8_router,
 )
 from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog, find_tensor_catalog_entry
 
@@ -20,9 +22,9 @@ def test_tensor_catalog_records_fp8_weight_scale_pairs(tmp_path: Path, monkeypat
     catalog = build_tensor_catalog(model_id, model_dir)
 
     assert catalog.ready is True
-    assert catalog.fp8_weight_count == 5
-    assert catalog.fp8_scale_count == 5
-    assert catalog.fp8_pair_count == 5
+    assert catalog.fp8_weight_count == 8
+    assert catalog.fp8_scale_count == 8
+    assert catalog.fp8_pair_count == 8
     weight = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight")
     scale = find_tensor_catalog_entry(model_id, "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv")
     assert weight is not None
@@ -47,9 +49,10 @@ def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path,
     assert "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv" in plan.tensor_names
     assert "model.layers.0.mlp.experts.1.up_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.experts.1.down_proj.weight" in plan.tensor_names
+    assert "model.layers.0.mlp.shared_experts.gate_proj.weight" in plan.tensor_names
     assert "model.layers.0.mlp.experts.0.gate_proj.weight" not in plan.tensor_names
-    assert plan.fp8_weight_count == 4
-    assert plan.scale_count == 4
+    assert plan.fp8_weight_count == 7
+    assert plan.scale_count == 7
     assert plan.total_nbytes == plan.fp8_weight_bytes + plan.scale_bytes + plan.non_fp8_bytes
 
 
@@ -107,6 +110,37 @@ def test_run_fp8_expert_mlp_materializes_one_selected_expert(tmp_path: Path, mon
     assert result.dequantized_weight_bytes > 0
 
 
+def test_run_fp8_router_uses_sigmoid_bias_for_selection(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.ones((1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_router(model_id, 0, hidden)
+
+    assert result.ready is True
+    assert result.selected_experts == [1]
+    assert result.bias_loaded is True
+    assert result.scoring_func == "sigmoid"
+    assert result.weights_tensor is not None
+    assert torch.allclose(result.weights_tensor.float(), torch.tensor([[2.5]], dtype=torch.float32))
+
+
+def test_run_fp8_moe_combines_routed_and_shared_experts(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.ones((1, 4), dtype=torch.bfloat16)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert result.output_tensor is not None
+    assert result.output_shape == [1, 4]
+    assert result.selected_experts == [1]
+    assert result.routed_weight_bytes > 0
+    assert result.shared_weight_bytes > 0
+    assert result.dequantized_weight_bytes > 0
+
+
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     from pcketlm.core import storage
 
@@ -126,6 +160,10 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
                 "intermediate_size": 4,
                 "n_routed_experts": 2,
                 "num_experts_per_tok": 1,
+                "n_group": 1,
+                "topk_group": 1,
+                "scoring_func": "sigmoid",
+                "routed_scaling_factor": 2.5,
                 "vocab_size": 8,
                 "quantization_config": {"fmt": "e4m3", "quant_method": "fp8"},
             }
@@ -134,12 +172,18 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     )
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
     attention = torch.tensor([[0.5, 1.0, 2.0, -1.0], [3.0, 4.0, -2.0, -0.5]], dtype=torch.float32)
+    router_gate = torch.tensor([[4.0, 4.0, 4.0, 4.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
     expert_gate = torch.tensor([[1.0, 0.5, -1.0, 2.0], [0.25, -0.5, 1.5, -2.0]], dtype=torch.float32)
     expert_up = torch.tensor([[0.5, -1.0, 1.0, 0.25], [1.5, 0.5, -0.25, 1.0]], dtype=torch.float32)
     expert_down = torch.tensor([[1.0, -0.5], [0.25, 1.5], [-1.0, 0.5], [2.0, -1.5]], dtype=torch.float32)
+    shared_gate = torch.tensor([[0.25, 0.5, 0.75, 1.0], [1.0, -0.5, 0.25, -0.75]], dtype=torch.float32)
+    shared_up = torch.tensor([[0.5, 0.5, -0.5, -0.5], [1.0, 0.25, 0.5, -0.25]], dtype=torch.float32)
+    shared_down = torch.tensor([[0.25, -0.25], [0.5, 1.0], [-0.75, 0.5], [1.25, -1.0]], dtype=torch.float32)
     tensors = {
         "model.layers.0.self_attn.q_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(attention))),
         "model.layers.0.self_attn.q_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 0.5)),
+        "model.layers.0.mlp.gate.weight": ("F32", [2, 4], _f32_payload(router_gate)),
+        "model.layers.0.mlp.gate.e_score_correction_bias": ("F32", [2], struct.pack("<ff", -20.0, 0.0)),
         "model.layers.0.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [2, 4], bytes([9, 10, 11, 12, 13, 14, 15, 16])),
         "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.mlp.experts.1.gate_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(expert_gate))),
@@ -148,6 +192,12 @@ def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
         "model.layers.0.mlp.experts.1.up_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.5)),
         "model.layers.0.mlp.experts.1.down_proj.weight": ("F8_E4M3", [4, 2], bytes(_fp8_bytes(expert_down))),
         "model.layers.0.mlp.experts.1.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 0.75)),
+        "model.layers.0.mlp.shared_experts.gate_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(shared_gate))),
+        "model.layers.0.mlp.shared_experts.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.mlp.shared_experts.up_proj.weight": ("F8_E4M3", [2, 4], bytes(_fp8_bytes(shared_up))),
+        "model.layers.0.mlp.shared_experts.up_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.0.mlp.shared_experts.down_proj.weight": ("F8_E4M3", [4, 2], bytes(_fp8_bytes(shared_down))),
+        "model.layers.0.mlp.shared_experts.down_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
         "model.layers.0.input_layernorm.weight": ("BF16", [4], b"\x00\x00" * 4),
     }
     shard = model_dir / "model-00001-of-00001.safetensors"
@@ -173,3 +223,7 @@ def _write_safetensors_bytes(path: Path, tensors: dict[str, tuple[str, list[int]
 
 def _fp8_bytes(values: torch.Tensor) -> list[int]:
     return values.to(torch.float8_e4m3fn).view(torch.uint8).flatten().tolist()
+
+
+def _f32_payload(values: torch.Tensor) -> bytes:
+    return bytes(values.contiguous().to(dtype=torch.float32).view(torch.uint8).flatten().tolist())

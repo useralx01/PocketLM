@@ -518,3 +518,10 @@
 - Real DeepSeek expert weight dequant proof passed on `model.layers.3.mlp.experts.0.gate_proj.weight`.
 - Real DeepSeek selected expert proof passed for layer `3`, expert `0`: loaded `44,050,944` FP8+scale bytes, dequantized `88,080,384` bytes, and produced a `[1, 7168]` output.
 - Full test suite: 405 passed.
+
+## Phase FP8 Router MoE Block Proof
+- Added real DeepSeek router top-k execution from the source tensors: sigmoid scoring, correction-bias expert choice, grouped top-k, normalized route weights, and route scale.
+- Added selected FP8 MoE execution for routed experts plus the shared expert.
+- Added single-token FP8 MLA attention proof and a single-token block proof combining attention residual plus MoE FFN residual.
+- Real DeepSeek layer `3` block proof passed from `D:\PocketLM\sources\deepseek-v3`, producing a real `[1, 1, 7168]` output with no blockers.
+- Full test suite: 407 passed.
