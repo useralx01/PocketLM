@@ -1485,3 +1485,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Runtime Policy
 - Treat the tensor catalog layer count as the execution-facing layer count when it disagrees with config metadata, while still reporting both numbers. DeepSeek V3 local config reports `61`, but the catalog has layer indices `0-61`.
 - Keep FP8 source execution paged by policy: source FP8 weights and fp32 scales are read on demand, dequantized chunks are transient, and only routed experts are touched for MoE layers.
+
+## Phase FP8 Acquisition Status
+- Acquisition can read FP8 runtime status lazily only for FP8-native plans. The import stays lazy to avoid a circular import through runtime load-attempt helpers.
+- Product guidance should prefer FP8 paged runtime for DeepSeek V3 when the tensor catalog is ready; Q4 re-quantization stays a warning path, not the recommended path.

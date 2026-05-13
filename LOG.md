@@ -5917,3 +5917,8 @@ Result: 297 passed in 21.83s
 - The status now reports explicit residency choices: FP8 weights and fp32 scales stay paged from source, dequantized chunks are transient, KV cache stays in memory per active layer, and execution uses selected experts only.
 - Real DeepSeek source status is ready from `D:\PocketLM\sources\deepseek-v3`: `45808` FP8 weights, `45808` scales, `45808` pairs, `680571043840` FP8 weight bytes, and `166161984` scale bytes.
 - DeepSeek config reports `61` hidden layers, while the tensor catalog reports `62` layer indices; runtime status now exposes both and uses the catalog count as the practical execution count.
+
+## Phase FP8 Acquisition Status / Evidence
+- Added `fp8_runtime_status` to acquisition snapshots for FP8-native sources.
+- Real DeepSeek acquisition status now reports `fp8_runtime_status.ready=true` with the paged FP8 runtime policy, `45808` FP8 weight/scale pairs, and zero blockers.
+- Product-facing next step now says to use the FP8 paged runtime path and warns that direct Q4 conversion is not recommended for the FP8 source.

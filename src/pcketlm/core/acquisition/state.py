@@ -69,6 +69,21 @@ def _build_compact_q4_conversion_state(model_dir: Path, compact_q4_plan: dict | 
     return load_q4_conversion_state(_infer_model_id(model_dir))
 
 
+def _build_fp8_runtime_status(model_dir: Path, compact_q4_plan: dict | None) -> dict | None:
+    if not compact_q4_plan or not compact_q4_plan.get("fp8_native"):
+        return None
+    try:
+        from pcketlm.core.runtime.fp8_source import fp8_source_status
+
+        return fp8_source_status(_infer_model_id(model_dir))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {
+            "ready": False,
+            "runtime_policy": None,
+            "blockers": ["FP8 runtime status could not be read from the tensor catalog."],
+        }
+
+
 @dataclass(slots=True)
 class AcquisitionSnapshot:
     """Product-facing acquisition summary for one source model."""
@@ -88,6 +103,7 @@ class AcquisitionSnapshot:
     recommended_next_step: str
     compact_q4_plan: dict | None = None
     compact_q4_conversion: dict | None = None
+    fp8_runtime_status: dict | None = None
 
     def to_dict(self) -> dict:
         """Serialize the acquisition snapshot."""
@@ -107,6 +123,7 @@ class AcquisitionSnapshot:
             "recommended_next_step": self.recommended_next_step,
             "compact_q4_plan": self.compact_q4_plan,
             "compact_q4_conversion": self.compact_q4_conversion,
+            "fp8_runtime_status": self.fp8_runtime_status,
         }
 
 
@@ -115,6 +132,7 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
     state = estimate_download_state(model_dir)
     compact_q4_plan = _build_compact_q4_plan(model_dir, state.status)
     compact_q4_conversion = _build_compact_q4_conversion_state(model_dir, compact_q4_plan)
+    fp8_runtime_status = _build_fp8_runtime_status(model_dir, compact_q4_plan)
     recommended_next_step = _build_next_step(state.status)
     if compact_q4_conversion and compact_q4_conversion.get("status") == "complete":
         recommended_next_step = "The compact Q4 artifact is complete. Next step is runtime readiness validation."
@@ -128,9 +146,14 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
                 f"The source is complete. Build the compact Q4 artifact first; estimated output is about {q4_gb} GB."
             )
     elif compact_q4_plan and compact_q4_plan.get("ready_for_fp8_runtime_planning"):
-        recommended_next_step = (
-            "The source is complete and FP8-native. Next step is FP8 paged runtime planning, not direct Q4 conversion."
-        )
+        if fp8_runtime_status and fp8_runtime_status.get("ready"):
+            recommended_next_step = (
+                "The source is complete and FP8-native. Use the FP8 paged runtime path; direct Q4 conversion is not recommended."
+            )
+        else:
+            recommended_next_step = (
+                "The source is complete and FP8-native. Next step is FP8 paged runtime planning, not direct Q4 conversion."
+            )
     return AcquisitionSnapshot(
         model_dir=model_dir,
         status=state.status,
@@ -151,4 +174,5 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
         recommended_next_step=recommended_next_step,
         compact_q4_plan=compact_q4_plan,
         compact_q4_conversion=compact_q4_conversion,
+        fp8_runtime_status=fp8_runtime_status,
     )

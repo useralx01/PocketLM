@@ -611,3 +611,7 @@
 - Added `fp8_source_status()` runtime policy fields for paged FP8/source-scale residency and selected-expert execution.
 - Reported config and catalog layer counts separately so DeepSeek's `61` config value does not hide the `62` catalog layer indices available to execution.
 - Verified real DeepSeek status and focused FP8 runtime tests.
+
+## Phase FP8 Acquisition Status
+- Added FP8 runtime readiness to the normal acquisition snapshot.
+- Verified real DeepSeek acquisition status shows the paged FP8 runtime path as ready.
