@@ -615,3 +615,7 @@
 ## Phase FP8 Acquisition Status
 - Added FP8 runtime readiness to the normal acquisition snapshot.
 - Verified real DeepSeek acquisition status shows the paged FP8 runtime path as ready.
+
+## Phase FP8 Plain Status
+- Added concise `acquisition_cli --plain` output for operator use.
+- Verified real DeepSeek plain output shows ready/path/layers/pairs/bytes/blockers without scanning full JSON.

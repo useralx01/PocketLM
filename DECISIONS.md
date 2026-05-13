@@ -1489,3 +1489,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Acquisition Status
 - Acquisition can read FP8 runtime status lazily only for FP8-native plans. The import stays lazy to avoid a circular import through runtime load-attempt helpers.
 - Product guidance should prefer FP8 paged runtime for DeepSeek V3 when the tensor catalog is ready; Q4 re-quantization stays a warning path, not the recommended path.
+
+## Phase FP8 Plain Status
+- Ready acquisition folders should show physical bytes on disk and shard readiness in plain output, not metadata-derived progress. DeepSeek V3's FP8 index metadata can make a complete physical download look like `51.67%` if shown as a raw byte ratio.

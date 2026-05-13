@@ -5922,3 +5922,8 @@ Result: 297 passed in 21.83s
 - Added `fp8_runtime_status` to acquisition snapshots for FP8-native sources.
 - Real DeepSeek acquisition status now reports `fp8_runtime_status.ready=true` with the paged FP8 runtime policy, `45808` FP8 weight/scale pairs, and zero blockers.
 - Product-facing next step now says to use the FP8 paged runtime path and warns that direct Q4 conversion is not recommended for the FP8 source.
+
+## Phase FP8 Plain Status / Evidence
+- Added `acquisition_cli --plain` for a short operator-facing status summary.
+- Real DeepSeek plain status reports: `ready`, `658.86 GiB on disk`, `163/163` shards, FP8 runtime ready, `62` layers, `45808` pairs, `633.83 GiB` FP8 weights, `0.15 GiB` scales, and no blockers.
+- Ready sources omit the metadata-derived progress percentage in plain mode because DeepSeek's index metadata overstates expected bytes for the FP8 physical download.
