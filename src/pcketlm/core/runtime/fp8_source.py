@@ -6,6 +6,7 @@ import struct
 import json
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -1197,6 +1198,7 @@ def run_fp8_prompt_prefill(
 
     if not blockers and hidden is not None:
         for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
+            layer_start = time.perf_counter()
             step = _run_fp8_prefill_block(model_id, layer_index, hidden.to(dtype=dtype), dtype=dtype)
             summaries.append(
                 {
@@ -1206,6 +1208,7 @@ def run_fp8_prompt_prefill(
                     "ffn_type": "dense" if step.dense_mlp is not None else "moe",
                     "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
                     "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
+                    "elapsed_seconds": float(time.perf_counter() - layer_start),
                     "blockers": list(step.blockers),
                 }
             )
@@ -1330,6 +1333,7 @@ def run_fp8_decode_loop(
         blockers.append("At least one token id is required.")
 
     if not blockers and len(prompt) > 1 and _fp8_prompt_prefill_enabled():
+        prefill_start = time.perf_counter()
         prefill = run_fp8_prompt_prefill(
             model_id,
             prompt,
@@ -1349,6 +1353,7 @@ def run_fp8_decode_loop(
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
                 },
+                "elapsed_seconds": float(time.perf_counter() - prefill_start),
                 "blockers": list(prefill.blockers),
             }
         )
@@ -1374,6 +1379,7 @@ def run_fp8_decode_loop(
             current_tokens.append(token_id)
             include_tail = len(generated) < int(max_new_tokens)
             phase = "generate"
+        step_start = time.perf_counter()
         step = run_fp8_single_token_forward(
             model_id,
             token_id,
@@ -1395,6 +1401,7 @@ def run_fp8_decode_loop(
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in step.next_kv_caches.items()
                 },
+                "elapsed_seconds": float(time.perf_counter() - step_start),
                 "blockers": list(step.blockers),
             }
         )

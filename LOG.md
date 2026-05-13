@@ -5862,3 +5862,8 @@ Result: 297 passed in 21.83s
 - Extended materialized FP8 MLA attention to handle multi-token prefill with a causal mask while keeping cached decode to one appended token at a time.
 - Real DeepSeek bounded decode proof: prompt `[0, 1]`, layers `0-3`, `max_new=1`, prompt prefill cache lengths reached `2`, generated `[76394]`, final cache lengths reached `3`, no blockers.
 - Timing improved from the prior `130-140s` range to about `113.12s` for the same bounded run.
+
+## Phase FP8 Timing Visibility / Evidence
+- Added per-layer prefill timing to `run_fp8_prompt_prefill()` summaries and per-phase timing to `run_fp8_decode_loop()` summaries.
+- Added `runtime_fp8_cli --prefill <token-id,...>` for direct prompt-prefill probes.
+- Real DeepSeek `--prefill 0,1 --layers 1 --no-tail` passed with cache length `2`; layer `0` reported about `12.15s`, total CLI elapsed about `16.14s`.

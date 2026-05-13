@@ -567,3 +567,8 @@
 - Added `run_fp8_prompt_prefill()` for layer-wise prompt execution.
 - Wired multi-token prompt prefill into `run_fp8_decode_loop()` by default.
 - Real DeepSeek bounded decode generated the same token `[76394]` with prompt caches length `2` and final caches length `3`.
+
+## Phase FP8 Timing Visibility
+- Added elapsed-time fields to FP8 prefill and decode-loop step summaries.
+- Exposed `runtime_fp8_cli --prefill`.
+- Verified real DeepSeek prefill CLI output includes cache length and timing.

@@ -679,3 +679,4 @@ Phase FP8 Streamed MLP: dense/expert/shared FP8 MLPs now stream weight rows inst
 Phase FP8 Native Streamed Linear: native FP8 linears and native row reads are wired into streamed MLP; real DeepSeek probes pass, with modest speed wins but attention still the next bottleneck.
 Phase FP8 Attention Streaming Gate: streamed attention is implemented but opt-in only because it is slower than materialized attention on current DeepSeek probes; default path stays speed-first.
 Phase FP8 Prompt Prefill: bounded DeepSeek decode now prefills multi-token prompts layer-wise, cutting the layers 0-3 proof to about 113s while preserving token `76394` and clean KV caches.
+Phase FP8 Timing Visibility: FP8 prefill/decode summaries now report elapsed seconds, and `runtime_fp8_cli --prefill` gives direct prompt-prefill probes.

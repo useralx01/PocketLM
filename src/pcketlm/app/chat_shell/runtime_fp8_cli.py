@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 import torch
 
@@ -18,6 +19,7 @@ from pcketlm.core.runtime import (
     run_fp8_dense_mlp,
     run_fp8_expert_mlp,
     run_fp8_moe,
+    run_fp8_prompt_prefill,
     run_fp8_router,
     run_fp8_single_token_attention,
     run_fp8_single_token_block,
@@ -41,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --embedding <token-id>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --dense <layer>")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --token-forward <token-id> [--start-layer n] [--layers n] [--no-tail]")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --prefill <token-id,...> [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --decode-loop <token-id,...> [--layers n] [--max-new n]")
         return 1
 
@@ -212,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         start_layer = _int_option(args, "--start-layer", 0)
         layer_count = _int_option(args, "--layers", 1)
         max_new = _int_option(args, "--max-new", 1)
+        started = time.perf_counter()
         result = run_fp8_decode_loop(
             model_id,
             token_ids,
@@ -219,7 +223,42 @@ def main(argv: list[str] | None = None) -> int:
             layer_count=layer_count,
             max_new_tokens=max_new,
         )
-        print(json.dumps(result.to_dict(), indent=2))
+        payload = result.to_dict()
+        payload["elapsed_seconds"] = float(time.perf_counter() - started)
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
+    if mode == "--prefill":
+        if len(args) < 3:
+            print("--prefill requires comma-separated token ids")
+            return 1
+        token_ids = [int(value) for value in args[2].split(",") if value.strip()]
+        start_layer = _int_option(args, "--start-layer", 0)
+        layer_count = _int_option(args, "--layers", 1)
+        started = time.perf_counter()
+        result = run_fp8_prompt_prefill(
+            model_id,
+            token_ids,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            include_tail="--no-tail" not in args,
+        )
+        payload = {
+            "model_id": result.model_id,
+            "prompt_token_ids": list(result.prompt_token_ids),
+            "start_layer": result.start_layer,
+            "layer_count": result.layer_count,
+            "executed_layers": list(result.executed_layers),
+            "hidden_shape": list(result.hidden_shape),
+            "tail_top_token_ids": [] if result.tail is None else list(result.tail.top_token_ids),
+            "cache_sequence_lengths": {
+                str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()
+            },
+            "step_summaries": [dict(item) for item in result.step_summaries],
+            "elapsed_seconds": float(time.perf_counter() - started),
+            "blockers": list(result.blockers),
+            "ready": bool(result.ready),
+        }
+        print(json.dumps(payload, indent=2))
         return 0 if result.ready else 2
 
     print(f"Unknown mode: {mode}")
