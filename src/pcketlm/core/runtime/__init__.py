@@ -46,6 +46,13 @@ from pcketlm.core.runtime.tensor_loader import (
     verify_loaded_tensor,
     TensorVerificationResult,
 )
+from pcketlm.core.runtime.fp8_source import (
+    FP8LayerWorkingSet,
+    FP8TensorPair,
+    fp8_source_status,
+    load_fp8_weight_pair,
+    plan_fp8_layer_working_set,
+)
 from pcketlm.core.runtime.layer_bridge import (
     DEFAULT_LM_HEAD_CHUNK_ROWS,
     DecodeBenchmarkCaseResult,
@@ -137,6 +144,8 @@ __all__ = [
     "LoadedTensorSlice",
     "ExecutionUnitVerificationResult",
     "TensorVerificationResult",
+    "FP8LayerWorkingSet",
+    "FP8TensorPair",
     "DecodeBenchmarkCaseResult",
     "DecodeBenchmarkResult",
     "DecodeTailResult",
@@ -200,6 +209,9 @@ __all__ = [
     "run_layer_bridge_stack",
     "load_execution_unit",
     "load_tensor_by_name",
+    "load_fp8_weight_pair",
+    "fp8_source_status",
+    "plan_fp8_layer_working_set",
     "run_repeated_decode_loop",
     "verify_execution_unit",
     "verify_loaded_tensor",

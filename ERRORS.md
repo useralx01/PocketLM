@@ -339,3 +339,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: the current BF16 path still reads/materializes too many large expert tensors. Kimi K2 and DeepSeek-V3 are much larger MoE checkpoints, so full BF16 download would magnify the same bottleneck instead of proving product speed.
 - Fix: do not start full BF16 Kimi/DeepSeek download yet. The next fix must be a compact huge-MoE artifact/executor path or native selected-expert streaming that cuts bytes loaded before the first giant checkpoint attempt.
 
+## Phase FP8 Aware Planner / full pytest environment block
+- Symptom: full `python -m pytest tests\ -q` failed with 24 native test failures after all FP8 planner tests passed.
+- Root cause: Windows Application Control blocked the existing `src\pcketlm\native\fp16_kv_cache.dll` with `[WinError 4551]`. `Unblock-File` did not clear the policy block.
+- Fix state: no native source or DLL rebuild was performed in the planner-only phase. A later full-suite rerun in the FP8 runtime phase passed with `402` tests, so the local policy block is no longer active in this shell.
+

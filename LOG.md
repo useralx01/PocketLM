@@ -5737,3 +5737,46 @@ Result: 297 passed in 21.83s
 - Direct CLI proof after moving the planner into core: `python tools\quantize_to_q4.py --model-dir models\qwen3-30b-a3b\original --output-dir models\qwen3-30b-a3b\artifacts\q4 --dry-run` -> ready, `15,311,831,552` estimated Q4 bytes.
 - Focused tests: `python -m pytest tests\test_q4_quantizer.py tests\test_acquisition_state.py -q` -> 13 passed.
 - Full tests: `python -m pytest tests\ -q` -> 395 passed.
+
+## Phase FP8 Aware Planner / Setup
+- Branch: `phase-fp8-aware-planner`.
+- Goal: make header-only planning truthful for FP8-native DeepSeek V3 before any runtime or conversion work.
+
+## Phase FP8 Aware Planner / DeepSeek V3 estimates
+- DeepSeek V3 source: `D:\PocketLM\sources\deepseek-v3`.
+- Header-only dry-run: `source_tensor_count=91991`, `source_shard_count=163`, `missing_shards=[]`, `fp8_native=true`, `ready_for_conversion=false`, `ready_for_fp8_runtime_planning=true`.
+- Total payload bytes: `688,574,839,360` (`641.29 GiB`).
+- FP8 weight bytes: `680,571,043,840` (`633.83 GiB`), `45,808` FP8 tensors.
+- FP32 scale companion bytes: `166,161,984` (`0.15 GiB`), `45,808` detected scale companions using `_scale_inv`.
+- Non-FP8/non-scale bytes: `7,837,633,536` (`7.30 GiB`).
+- Dtype payload bytes: `BF16=7,837,573,120`, `F8_E4M3=680,571,043,840`, `F32=166,222,400`.
+- Estimated loaded-as-FP8 runtime bytes: `688,574,839,360` (`641.29 GiB`).
+- Estimated dequantized-to-BF16 runtime bytes: `1,368,979,721,216` (`1274.96 GiB`), rejected baseline.
+- Estimated lossy Q4-from-FP8 artifact bytes: `342,598,238,336` (`319.07 GiB`), flagged as lossy and not recommended first.
+- Estimated FP8 repacked artifact bytes: `688,574,839,360` (`641.29 GiB`).
+- Top-k routing from config: `8`.
+- Max active layer FP8+scale/non-FP8 working set: `4,499,593,440` bytes (`4.19 GiB`), layer `61`, with `352,407,552` active expert bytes and `4,147,185,888` non-expert/shared bytes.
+- Estimated paged per-token working set: `8,206,323,936` bytes (`7.64 GiB`) including persistent non-layer tensors plus max active layer.
+- Recommended path: `FP8 native paged`; reason: full FP8 residency does not fit, but one active layer/expert working set can fit with paging.
+
+## Phase FP8 Aware Planner / Existing model sanity
+- Mixtral local BF16 source: pass. `fp8_native=false`, `ready_for_conversion=true`, `93,405,585,408` source bytes -> `23,369,489,920` Q4 bytes, matching the prior compact-readiness estimate.
+- Qwen3-1.7B local BF16 source: pass. `fp8_native=false`, `ready_for_conversion=true`, `4,063,479,808` source bytes -> `1,017,872,384` Q4 bytes.
+- Qwen3-30B-A3B original source: not present locally anymore, so this phase could not re-run that row; prior logged row remains `61,064,245,248` source bytes -> `15,311,831,552` Q4 bytes.
+- Qwen 14B original source: not present locally anymore, so this phase could not re-run that row.
+- Focused tests: `python -m pytest tests\test_fp8_planner.py tests\test_acquisition_state.py tests\test_q4_quantizer.py::test_q4_dry_run_plan_reads_headers_without_writing_artifact tests\test_q4_quantizer.py::test_q4_dry_run_plan_splits_expert_and_non_expert_bytes -q` -> 8 passed.
+- Full tests: `python -m pytest tests\ -q` -> 375 passed, 24 failed due existing Windows Application Control block on `src\pcketlm\native\fp16_kv_cache.dll`; planner tests passed and no FP8 planner failures were present.
+
+## Phase FP8 Native Paged Runtime / Setup
+- Branch: `phase-fp8-aware-planner`.
+- Goal: turn the DeepSeek FP8 planner result into a real paged-runtime foundation: catalog FP8 weight/scale pairs, expose selected-expert working sets, and prove raw FP8+scale pair loading without full-model residency.
+
+## Phase FP8 Native Paged Runtime / Evidence
+- Runtime tensor catalog now records FP8 pair metadata: `tensor_role`, `scale_tensor_name`, `weight_tensor_name`, and `physical_format=fp8_block_scaled`.
+- Added `runtime_fp8_cli` for FP8 source status, layer selected-expert working-set planning, and one FP8 weight/scale pair probe.
+- DeepSeek V3 catalog build from `D:\PocketLM\sources\deepseek-v3`: `ready=true`, `tensor_count=91,991`, `layer_count=62`, `num_experts=256`, `num_experts_per_tok=8`, `fp8_weight_count=45,808`, `fp8_scale_count=45,808`, `fp8_pair_count=45,808`, `fp8_weight_bytes=680,571,043,840`, `fp8_scale_bytes=166,161,984`, `blockers=[]`.
+- DeepSeek V3 selected layer proof: layer `3`, selected experts `0-7`, `70` tensors, `32` FP8 weights, `32` scale companions, `587,313,376` bytes total, `583,467,008` FP8 bytes, `142,560` scale bytes, `3,703,808` non-FP8 bytes, `ready=true`.
+- DeepSeek V3 FP8 payload proof: loaded `model.layers.3.mlp.experts.0.gate_proj.weight` as raw FP8 bytes plus `model.layers.3.mlp.experts.0.gate_proj.weight_scale_inv` as scale tensor. Weight shape `[2048, 7168]`, weight bytes `14,680,064`, scale shape `[16, 56]`, scale bytes `3,584`, `payload_loaded=true`, `scale_loaded=true`, `ready=true`.
+- DeepSeek V3 execution grouping proof: `unit_count=15,353`, phases `prefill`, `layer-entry`, `layer-attention`, `layer-mlp`, `layer-router`, `layer-expert`, `misc`, `decode-head`; `layer-03-expert-000` is a selected expert unit with `6` tensors and `44,050,944` bytes.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 18 passed.
+- Full tests: `python -m pytest tests\ -q` -> 402 passed.

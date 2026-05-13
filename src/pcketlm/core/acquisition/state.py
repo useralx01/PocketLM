@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pcketlm.core.model_import.download_state import estimate_download_state
+from pcketlm.core.model_import.q4_conversion_job import load_q4_conversion_state
 from pcketlm.core.model_import.q4_plan import plan_model_dir_to_q4
 
 
@@ -58,6 +59,16 @@ def _build_compact_q4_plan(model_dir: Path, status: str) -> dict | None:
         return None
 
 
+def _infer_model_id(model_dir: Path) -> str:
+    return model_dir.parent.name if model_dir.name == "original" else model_dir.name
+
+
+def _build_compact_q4_conversion_state(model_dir: Path, compact_q4_plan: dict | None) -> dict | None:
+    if not compact_q4_plan:
+        return None
+    return load_q4_conversion_state(_infer_model_id(model_dir))
+
+
 @dataclass(slots=True)
 class AcquisitionSnapshot:
     """Product-facing acquisition summary for one source model."""
@@ -76,6 +87,7 @@ class AcquisitionSnapshot:
     plain_english_summary: str
     recommended_next_step: str
     compact_q4_plan: dict | None = None
+    compact_q4_conversion: dict | None = None
 
     def to_dict(self) -> dict:
         """Serialize the acquisition snapshot."""
@@ -94,6 +106,7 @@ class AcquisitionSnapshot:
             "plain_english_summary": self.plain_english_summary,
             "recommended_next_step": self.recommended_next_step,
             "compact_q4_plan": self.compact_q4_plan,
+            "compact_q4_conversion": self.compact_q4_conversion,
         }
 
 
@@ -101,11 +114,22 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
     """Build a richer user-facing acquisition snapshot for a source model folder."""
     state = estimate_download_state(model_dir)
     compact_q4_plan = _build_compact_q4_plan(model_dir, state.status)
+    compact_q4_conversion = _build_compact_q4_conversion_state(model_dir, compact_q4_plan)
     recommended_next_step = _build_next_step(state.status)
+    if compact_q4_conversion and compact_q4_conversion.get("status") == "complete":
+        recommended_next_step = "The compact Q4 artifact is complete. Next step is runtime readiness validation."
+    elif compact_q4_conversion and compact_q4_conversion.get("status") in {"running", "paused"}:
+        progress = compact_q4_conversion.get("progress_pct")
+        recommended_next_step = f"Compact Q4 conversion is in progress at about {progress}%."
     if compact_q4_plan and compact_q4_plan.get("ready_for_conversion"):
         q4_gb = _to_gb(int(compact_q4_plan.get("estimated_total_q4_bytes", 0))) or 0.0
+        if not compact_q4_conversion:
+            recommended_next_step = (
+                f"The source is complete. Build the compact Q4 artifact first; estimated output is about {q4_gb} GB."
+            )
+    elif compact_q4_plan and compact_q4_plan.get("ready_for_fp8_runtime_planning"):
         recommended_next_step = (
-            f"The source is complete. Build the compact Q4 artifact first; estimated output is about {q4_gb} GB."
+            "The source is complete and FP8-native. Next step is FP8 paged runtime planning, not direct Q4 conversion."
         )
     return AcquisitionSnapshot(
         model_dir=model_dir,
@@ -126,4 +150,5 @@ def build_acquisition_snapshot(model_dir: Path) -> AcquisitionSnapshot:
         ),
         recommended_next_step=recommended_next_step,
         compact_q4_plan=compact_q4_plan,
+        compact_q4_conversion=compact_q4_conversion,
     )

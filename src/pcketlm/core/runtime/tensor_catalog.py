@@ -11,6 +11,22 @@ from pathlib import Path
 from pcketlm.core.runtime.source import describe_runtime_source
 from pcketlm.core.storage.paths import streaming_model_root
 
+FP8_DTYPES = {"F8_E4M3", "F8_E4M3FN", "F8_E5M2"}
+SCALE_SUFFIXES = (".scale_inv", "_scale_inv", ".scale", "_scale")
+DTYPE_ALIASES = {
+    "BFLOAT16": "BF16",
+    "FLOAT16": "F16",
+    "FP16": "F16",
+    "FLOAT32": "F32",
+    "FP32": "F32",
+    "FP8_E4M3": "F8_E4M3",
+    "FP8_E4M3FN": "F8_E4M3FN",
+    "FLOAT8_E4M3": "F8_E4M3",
+    "FLOAT8_E4M3FN": "F8_E4M3FN",
+    "FP8_E5M2": "F8_E5M2",
+    "FLOAT8_E5M2": "F8_E5M2",
+}
+
 
 @dataclass(slots=True)
 class TensorCatalogEntry:
@@ -27,6 +43,10 @@ class TensorCatalogEntry:
     layer_index: int | None
     component_group: str
     expert_index: int | None = None
+    tensor_role: str = "weight"
+    scale_tensor_name: str | None = None
+    weight_tensor_name: str | None = None
+    physical_format: str = "safetensors"
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +61,10 @@ class TensorCatalogEntry:
             "layer_index": self.layer_index,
             "expert_index": self.expert_index,
             "component_group": self.component_group,
+            "tensor_role": self.tensor_role,
+            "scale_tensor_name": self.scale_tensor_name,
+            "weight_tensor_name": self.weight_tensor_name,
+            "physical_format": self.physical_format,
         }
 
     @classmethod
@@ -57,6 +81,10 @@ class TensorCatalogEntry:
             layer_index=payload.get("layer_index"),
             expert_index=payload.get("expert_index"),
             component_group=str(payload.get("component_group", "other")),
+            tensor_role=str(payload.get("tensor_role", "weight")),
+            scale_tensor_name=payload.get("scale_tensor_name"),
+            weight_tensor_name=payload.get("weight_tensor_name"),
+            physical_format=str(payload.get("physical_format", "safetensors")),
         )
 
 
@@ -82,6 +110,12 @@ class TensorCatalog:
     model_type: str | None = None
     dtype_counts: dict[str, int] = field(default_factory=dict)
     component_group_counts: dict[str, int] = field(default_factory=dict)
+    tensor_role_counts: dict[str, int] = field(default_factory=dict)
+    fp8_weight_count: int = 0
+    fp8_scale_count: int = 0
+    fp8_pair_count: int = 0
+    fp8_weight_bytes: int = 0
+    fp8_scale_bytes: int = 0
     tensors: list[TensorCatalogEntry] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
@@ -106,6 +140,12 @@ class TensorCatalog:
             "model_type": self.model_type,
             "dtype_counts": dict(self.dtype_counts),
             "component_group_counts": dict(self.component_group_counts),
+            "tensor_role_counts": dict(self.tensor_role_counts),
+            "fp8_weight_count": self.fp8_weight_count,
+            "fp8_scale_count": self.fp8_scale_count,
+            "fp8_pair_count": self.fp8_pair_count,
+            "fp8_weight_bytes": self.fp8_weight_bytes,
+            "fp8_scale_bytes": self.fp8_scale_bytes,
             "tensors": [entry.to_dict() for entry in self.tensors],
             "blockers": list(self.blockers),
             "ready": self.ready,
@@ -134,6 +174,14 @@ class TensorCatalog:
             component_group_counts={
                 str(key): int(value) for key, value in (payload.get("component_group_counts") or {}).items()
             },
+            tensor_role_counts={
+                str(key): int(value) for key, value in (payload.get("tensor_role_counts") or {}).items()
+            },
+            fp8_weight_count=int(payload.get("fp8_weight_count", 0)),
+            fp8_scale_count=int(payload.get("fp8_scale_count", 0)),
+            fp8_pair_count=int(payload.get("fp8_pair_count", 0)),
+            fp8_weight_bytes=int(payload.get("fp8_weight_bytes", 0)),
+            fp8_scale_bytes=int(payload.get("fp8_scale_bytes", 0)),
             tensors=[TensorCatalogEntry.from_dict(item) for item in payload.get("tensors", [])],
             blockers=list(payload.get("blockers", [])),
             ready=bool(payload.get("ready", False)),
@@ -153,9 +201,33 @@ def _optional_int(value: object) -> int | None:
     return None if value is None else int(value)
 
 
+def canonical_dtype(dtype: str) -> str:
+    """Normalize safetensors dtype spelling for runtime planning."""
+    normalized = str(dtype).strip()
+    upper = normalized.upper()
+    return DTYPE_ALIASES.get(normalized, DTYPE_ALIASES.get(upper, upper))
+
+
+def is_fp8_dtype(dtype: str) -> bool:
+    """Return whether a catalog dtype is an FP8 physical weight dtype."""
+    return canonical_dtype(dtype) in FP8_DTYPES
+
+
+def scale_partner_name(tensor_name: str, all_tensor_names: set[str]) -> str | None:
+    """Return the weight tensor paired with a scale tensor, if present."""
+    for suffix in SCALE_SUFFIXES:
+        if tensor_name.endswith(suffix):
+            partner = tensor_name[: -len(suffix)]
+            if partner in all_tensor_names:
+                return partner
+    return None
+
+
 def _model_config_values(model_dir: Path) -> dict[str, int | None]:
     payload = _read_json(model_dir / "config.json")
-    num_experts = _optional_int(payload.get("num_experts", payload.get("num_local_experts")))
+    num_experts = _optional_int(
+        payload.get("num_experts", payload.get("num_local_experts", payload.get("n_routed_experts")))
+    )
     moe_intermediate_size = _optional_int(payload.get("moe_intermediate_size"))
     if moe_intermediate_size is None and num_experts:
         moe_intermediate_size = _optional_int(payload.get("intermediate_size"))
@@ -256,7 +328,18 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
     tensors: list[TensorCatalogEntry] = []
     dtype_counts: dict[str, int] = {}
     component_group_counts: dict[str, int] = {}
+    tensor_role_counts: dict[str, int] = {}
+    scale_partners: dict[str, str] = {}
+    fp8_weight_count = 0
+    fp8_scale_count = 0
+    fp8_weight_bytes = 0
+    fp8_scale_bytes = 0
     seen_layers: set[int] = set()
+    all_tensor_names = set(weight_map)
+    for tensor_name in all_tensor_names:
+        partner = scale_partner_name(tensor_name, all_tensor_names)
+        if partner is not None:
+            scale_partners[tensor_name] = partner
 
     for shard_path in source.shard_paths:
         header = _read_safetensors_header(shard_path)
@@ -277,9 +360,28 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
             if layer_index is not None:
                 seen_layers.add(layer_index)
             component_group = _component_group_for_tensor(tensor_name)
-            dtype = str(tensor_meta.get("dtype", "unknown"))
+            dtype = canonical_dtype(str(tensor_meta.get("dtype", "unknown")))
             dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
             component_group_counts[component_group] = component_group_counts.get(component_group, 0) + 1
+            scale_for_weight = None
+            tensor_role = "weight"
+            weight_partner = None
+            if tensor_name in scale_partners:
+                tensor_role = "scale_companion"
+                weight_partner = scale_partners[tensor_name]
+            else:
+                for scale_name, partner_name in scale_partners.items():
+                    if partner_name == tensor_name:
+                        scale_for_weight = scale_name
+                        break
+            tensor_role_counts[tensor_role] = tensor_role_counts.get(tensor_role, 0) + 1
+            data_nbytes = int(offsets[1]) - int(offsets[0])
+            if is_fp8_dtype(dtype) and tensor_role == "weight":
+                fp8_weight_count += 1
+                fp8_weight_bytes += data_nbytes
+            if tensor_role == "scale_companion":
+                fp8_scale_count += 1
+                fp8_scale_bytes += data_nbytes
             tensors.append(
                 TensorCatalogEntry(
                     tensor_name=tensor_name,
@@ -289,10 +391,14 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
                     shape=[int(value) for value in tensor_meta.get("shape", [])],
                     data_offset_start=int(offsets[0]),
                     data_offset_end=int(offsets[1]),
-                    data_nbytes=int(offsets[1]) - int(offsets[0]),
+                    data_nbytes=data_nbytes,
                     layer_index=layer_index,
                     expert_index=expert_index,
                     component_group=component_group,
+                    tensor_role=tensor_role,
+                    scale_tensor_name=scale_for_weight,
+                    weight_tensor_name=weight_partner,
+                    physical_format="fp8_block_scaled" if is_fp8_dtype(dtype) and scale_for_weight else "safetensors",
                 )
             )
 
@@ -307,6 +413,12 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
         **config_values,
         dtype_counts=dtype_counts,
         component_group_counts=component_group_counts,
+        tensor_role_counts=tensor_role_counts,
+        fp8_weight_count=fp8_weight_count,
+        fp8_scale_count=fp8_scale_count,
+        fp8_pair_count=len(scale_partners),
+        fp8_weight_bytes=fp8_weight_bytes,
+        fp8_scale_bytes=fp8_scale_bytes,
         tensors=tensors,
         blockers=blockers,
         ready=bool(tensors) and not blockers,

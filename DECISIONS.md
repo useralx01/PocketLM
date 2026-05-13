@@ -1407,3 +1407,16 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Expert accounting: the planner separates expert and non-expert Q4 bytes using MoE tensor names. This is intentionally lightweight rather than architecture-specific, because Kimi/DeepSeek names may differ but still tend to include expert path segments in the safetensors index.
 - Core placement: the header-only planner lives in `pcketlm.core.model_import.q4_plan` so both the CLI tool and acquisition snapshot can use the same logic. `tools\quantize_to_q4.py` remains the conversion entrypoint and reuses that core planner for `--dry-run`.
 - Acquisition behavior: a complete safetensors source now reports `compact_q4_plan` and recommends compact Q4 artifact creation before runtime validation. Missing/partial downloads still keep the old "continue download" recommendation.
+
+## Phase FP8 Aware Planner
+- FP8 dtype canonical mapping: safetensors `F8_E4M3`, `F8_E4M3FN`, `F8_E5M2` and common `FP8_*`/`FLOAT8_*` aliases are treated as FP8 physical weight bytes, not as BF16/fp16/fp32 tensors.
+- Scale companion detection: DeepSeek V3 uses names like `weight_scale_inv`, so scale detection checks `.scale_inv`, `_scale_inv`, `.scale`, and `_scale`, and only marks a scale when the stripped partner tensor exists in the safetensors index.
+- FP8 source policy: `ready_for_conversion` is false for FP8-native sources because direct Q4 conversion from FP8 is lossy and not the first path. The planner still reports a lossy Q4 estimate for comparison.
+- Recommendation policy: if full FP8+scale residency fits RAM, recommend FP8 native. If full residency does not fit but the active layer/expert working set fits, recommend FP8 native paged. If even that is too large, recommend streamed FP8 with paged residency.
+- Acquisition policy: FP8-native complete sources should recommend FP8 paged runtime planning, not compact Q4 conversion.
+
+## Phase FP8 Native Paged Runtime
+- Keep FP8 weights as physical bytes in the first runtime slice. The loader returns raw `uint8` FP8 payload plus the paired FP32 scale tensor; numeric FP8 dequant/execution is the next kernel phase.
+- Treat FP8 weights and scale companions as one catalog relationship. The runtime catalog stores `scale_tensor_name` on the weight and `weight_tensor_name` on the scale so selected-expert planning cannot silently drop scales.
+- Selected-expert planning includes full layer non-expert tensors plus only the requested expert indices. This gives the future router a concrete paged working set instead of loading all `256` experts.
+- Use external model dirs directly for DeepSeek source cataloging. `runtime_tensor_catalog_cli` and `runtime_tensor_execution_plan_cli` accept `--model-dir` so the full source can remain on `D:\PocketLM\sources` instead of being copied to the repo models folder.

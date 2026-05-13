@@ -496,3 +496,18 @@
 - Verified on local real MoE models: Mixtral plans to about `23.37 GB` Q4 from `93.41 GB` source; Qwen3-30B-A3B plans to about `15.31 GB` Q4 from `61.06 GB` source.
 - Added regression coverage for dry-run planning, expert/non-expert byte accounting, and missing-shard blocking.
 - Full test suite: 395 passed.
+
+## Phase FP8 Aware Planner
+- Header-only planning now detects FP8-native safetensors weights and matching FP32 scale companions without reading tensor payloads.
+- DeepSeek V3 is classified as FP8-native: `680,571,043,840` FP8 weight bytes, `166,161,984` scale bytes, `7,837,633,536` non-FP8/non-scale bytes.
+- The old fake-tiny Q4 estimate is fixed. DeepSeek lossy Q4-from-FP8 is now estimated at `342,598,238,336` bytes, not about `2 GB`, and is flagged as not recommended first.
+- Acquisition now recommends FP8 paged runtime planning for complete FP8-native sources instead of direct Q4 conversion.
+- Focused planner/acquisition tests pass with 8 tests. Full suite is blocked by existing Windows App Control on `fp16_kv_cache.dll`, not by the FP8 planner.
+
+## Phase FP8 Native Paged Runtime
+- Added FP8-aware tensor catalog metadata for runtime use: FP8 weight roles, scale companion roles, and pair links.
+- Added FP8 source helpers and CLI for source status, selected-expert layer working sets, and raw FP8 weight+scale pair loading.
+- Proved DeepSeek V3 can be cataloged directly from `D:\PocketLM\sources\deepseek-v3`: `45,808` FP8 weights and `45,808` scale companions, `256` experts, top-k `8`, no blockers.
+- Proved one selected-expert layer working set without loading the full model: layer `3`, experts `0-7`, `587,313,376` bytes total.
+- Proved one real FP8 expert weight payload can be loaded as raw bytes with its FP32 scale companion: `14,680,064` FP8 bytes plus `3,584` scale bytes.
+- Full test suite: 402 passed.

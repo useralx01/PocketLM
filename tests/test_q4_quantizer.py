@@ -14,6 +14,7 @@ from pcketlm.core.runtime.tensor_loader import (
     tensor_load_stats_snapshot,
 )
 from pcketlm.core.runtime.tensor_residency import clear_tensor_residency_cache, q4_packed_cache_stats
+from pcketlm.core.model_import.q4_conversion_job import run_q4_conversion_job
 from tools.quantize_to_q4 import (
     dequantize_q4_tensor,
     pack_int4,
@@ -156,6 +157,37 @@ def test_q4_dry_run_plan_blocks_missing_shards(tmp_path: Path) -> None:
     assert plan["q4_tensor_count"] == 0
 
 
+def test_q4_conversion_job_writes_state_and_resumes_by_shard(tmp_path: Path, monkeypatch) -> None:
+    import pcketlm.core.model_import.q4_conversion_job as job_module
+
+    monkeypatch.setattr(job_module, "state_root", lambda: tmp_path / "state")
+    model_dir = _write_two_shard_quantizer_fixture(tmp_path)
+    output_dir = tmp_path / "q4"
+
+    first = run_q4_conversion_job(
+        model_dir,
+        output_dir,
+        model_id="resume-test",
+        max_new_shards=1,
+    )
+
+    assert first["status"] == "paused"
+    assert first["completed_shard_count"] == 1
+    assert first["progress_pct"] == 50.0
+    assert (tmp_path / "state" / "q4_conversions" / "resume-test.json").exists()
+    assert (output_dir / "q4_manifest.partial.json").exists()
+    assert not (output_dir / "q4_manifest.json").exists()
+
+    second = run_q4_conversion_job(model_dir, output_dir, model_id="resume-test")
+    manifest = json.loads((output_dir / "q4_manifest.json").read_text(encoding="utf-8"))
+
+    assert second["status"] == "complete"
+    assert second["completed_shard_count"] == 2
+    assert second["progress_pct"] == 100.0
+    assert not (output_dir / "q4_manifest.partial.json").exists()
+    assert sorted(manifest["tensors"]) == ["layer.0.weight", "layer.1.weight"]
+
+
 def test_q4_loader_dequantizes_to_runtime_tensor(tmp_path: Path, monkeypatch) -> None:
     from pcketlm.core import storage
 
@@ -261,6 +293,30 @@ def _write_quantizer_fixture(tmp_path: Path, tensor: torch.Tensor) -> Path:
     save_file({"weight": tensor}, str(shard))
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": shard.stat().st_size}, "weight_map": {"weight": shard.name}}),
+        encoding="utf-8",
+    )
+    return model_dir
+
+
+def _write_two_shard_quantizer_fixture(tmp_path: Path) -> Path:
+    model_dir = tmp_path / "source-two-shard"
+    model_dir.mkdir(parents=True)
+    shard_1 = model_dir / "model-00001-of-00002.safetensors"
+    shard_2 = model_dir / "model-00002-of-00002.safetensors"
+    tensors_1 = {"layer.0.weight": torch.arange(8192, dtype=torch.float16).reshape(64, 128)}
+    tensors_2 = {"layer.1.weight": torch.arange(8192, dtype=torch.float16).reshape(64, 128)}
+    save_file(tensors_1, str(shard_1))
+    save_file(tensors_2, str(shard_2))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard_1.stat().st_size + shard_2.stat().st_size},
+                "weight_map": {
+                    "layer.0.weight": shard_1.name,
+                    "layer.1.weight": shard_2.name,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     return model_dir

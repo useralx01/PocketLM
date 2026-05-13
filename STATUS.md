@@ -668,3 +668,5 @@ Phase Monolithic Narrow Or Study: tiny dense fp16 monolithic decode now performs
 Phase Native BF16 No-Copy: monolithic dense decode now borrows tensor storage, supports BF16 tiny dense decode, and passes 380 tests; production Qwen 14B registration glue remains next.
 Phase Native BF16 Qwen14 Registration: Qwen 14B dense catalog tensors can now be loaded and registered into a no-copy BF16 monolithic session; full suite 381 passed.
 Phase Huge MoE Compact Readiness: acquisition now exposes a compact Q4 plan for complete safetensors sources, using header-only estimates with no payload loads; local Mixtral and Qwen3-30B-A3B planning rows are clean, and full suite passes with 395 tests.
+Phase FP8 Aware Planner: DeepSeek V3 is correctly detected as FP8-native with 633.83 GiB FP8 weights, 0.15 GiB scales, and FP8 native paged recommended; focused planner tests pass, while full pytest is blocked by Windows App Control on the existing native KV DLL.
+Phase FP8 Native Paged Runtime: runtime catalog, selected-expert working-set planning, and raw FP8+scale pair loading now work on real DeepSeek V3 from D:\PocketLM; full suite passes with 402 tests.
