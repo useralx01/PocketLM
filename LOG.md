@@ -5780,3 +5780,12 @@ Result: 297 passed in 21.83s
 - DeepSeek V3 execution grouping proof: `unit_count=15,353`, phases `prefill`, `layer-entry`, `layer-attention`, `layer-mlp`, `layer-router`, `layer-expert`, `misc`, `decode-head`; `layer-03-expert-000` is a selected expert unit with `6` tensors and `44,050,944` bytes.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 18 passed.
 - Full tests: `python -m pytest tests\ -q` -> 402 passed.
+
+## Phase FP8 Numeric Expert Proof / Evidence
+- Added Python FP8 E4M3 block dequant for DeepSeek-style `F8_E4M3` weights plus `weight_scale_inv` tensors. The implementation uses `torch.float8_e4m3fn`, expands 128x128 block scales, and multiplies FP8 values by the dequantization scale.
+- Added `load_dequantized_fp8_weight()` and `run_fp8_expert_mlp()` for the first numeric selected-expert proof. This is not a full runtime path yet; it materializes one selected expert's gate/up/down weights for a correctness and wiring proof.
+- Synthetic FP8 test: raw FP8 bytes round-trip through `torch.float8_e4m3fn` and scale expansion exactly against the PyTorch reference expression.
+- Real DeepSeek dequant proof: `model.layers.3.mlp.experts.0.gate_proj.weight` dequantized from `14,680,064` FP8 bytes plus `3,584` scale bytes to BF16. Result stats: `mean_abs=0.0032472913`, `max_abs=0.09375`, `ready=true`.
+- Real DeepSeek selected expert proof: layer `3`, expert `0`, ones hidden vector `[1, 7168]`, output `[1, 7168]`, loaded FP8+scale bytes `44,050,944`, dequantized bytes `88,080,384`, `output_mean_abs=0.060764011`, `output_max_abs=0.373046875`, `ready=true`.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_fp8_planner.py tests\test_runtime_tensor_catalog.py tests\test_runtime_tensor_execution_plan.py tests\test_acquisition_state.py -q` -> 21 passed.
+- Full tests: `python -m pytest tests\ -q` -> 405 passed.

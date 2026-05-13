@@ -1420,3 +1420,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Treat FP8 weights and scale companions as one catalog relationship. The runtime catalog stores `scale_tensor_name` on the weight and `weight_tensor_name` on the scale so selected-expert planning cannot silently drop scales.
 - Selected-expert planning includes full layer non-expert tensors plus only the requested expert indices. This gives the future router a concrete paged working set instead of loading all `256` experts.
 - Use external model dirs directly for DeepSeek source cataloging. `runtime_tensor_catalog_cli` and `runtime_tensor_execution_plan_cli` accept `--model-dir` so the full source can remain on `D:\PocketLM\sources` instead of being copied to the repo models folder.
+
+## Phase FP8 Numeric Expert Proof
+- Use PyTorch's `torch.float8_e4m3fn` as the first correct CPU reference for E4M3 decoding. This avoids hand-rolling the bit format and matches DeepSeek's published FP8 format.
+- Treat `weight_scale_inv` as a dequantization scale, not as a value to invert again. The effective weight is `fp8_value * expanded_weight_scale_inv` for each 128x128 block.
+- Keep the first numeric path as a materialized Python proof. It intentionally loads and dequantizes only one selected expert's gate/up/down tensors; a future speed phase should replace this with fused/paged matmul instead of materializing many BF16 weights.

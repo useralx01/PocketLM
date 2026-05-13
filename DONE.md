@@ -511,3 +511,10 @@
 - Proved one selected-expert layer working set without loading the full model: layer `3`, experts `0-7`, `587,313,376` bytes total.
 - Proved one real FP8 expert weight payload can be loaded as raw bytes with its FP32 scale companion: `14,680,064` FP8 bytes plus `3,584` scale bytes.
 - Full test suite: 402 passed.
+
+## Phase FP8 Numeric Expert Proof
+- Added FP8 E4M3 block dequant using `torch.float8_e4m3fn` and DeepSeek `weight_scale_inv` block scales.
+- Added one-weight dequant and one selected-expert MLP helpers.
+- Real DeepSeek expert weight dequant proof passed on `model.layers.3.mlp.experts.0.gate_proj.weight`.
+- Real DeepSeek selected expert proof passed for layer `3`, expert `0`: loaded `44,050,944` FP8+scale bytes, dequantized `88,080,384` bytes, and produced a `[1, 7168]` output.
+- Full test suite: 405 passed.

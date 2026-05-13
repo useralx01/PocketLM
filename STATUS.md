@@ -670,3 +670,4 @@ Phase Native BF16 Qwen14 Registration: Qwen 14B dense catalog tensors can now be
 Phase Huge MoE Compact Readiness: acquisition now exposes a compact Q4 plan for complete safetensors sources, using header-only estimates with no payload loads; local Mixtral and Qwen3-30B-A3B planning rows are clean, and full suite passes with 395 tests.
 Phase FP8 Aware Planner: DeepSeek V3 is correctly detected as FP8-native with 633.83 GiB FP8 weights, 0.15 GiB scales, and FP8 native paged recommended; focused planner tests pass, while full pytest is blocked by Windows App Control on the existing native KV DLL.
 Phase FP8 Native Paged Runtime: runtime catalog, selected-expert working-set planning, and raw FP8+scale pair loading now work on real DeepSeek V3 from D:\PocketLM; full suite passes with 402 tests.
+Phase FP8 Numeric Expert Proof: one real DeepSeek FP8 expert can now be dequantized and executed through a Python selected-expert MLP proof; full suite passes with 405 tests.

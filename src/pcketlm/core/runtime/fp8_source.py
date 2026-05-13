@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
@@ -88,6 +89,64 @@ class FP8LayerWorkingSet:
         }
 
 
+@dataclass(slots=True)
+class FP8DequantizedTensor:
+    """One FP8 weight dequantized with its block scale tensor."""
+
+    model_id: str
+    weight_name: str
+    scale_name: str | None
+    shape: list[int]
+    dtype: str
+    loaded_nbytes: int
+    tensor: torch.Tensor | None = None
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "weight_name": self.weight_name,
+            "scale_name": self.scale_name,
+            "shape": list(self.shape),
+            "dtype": self.dtype,
+            "loaded_nbytes": self.loaded_nbytes,
+            "tensor_materialized": self.tensor is not None,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
+class FP8ExpertMLPResult:
+    """One selected expert MLP run using dequantized FP8 weights."""
+
+    model_id: str
+    layer_index: int
+    expert_index: int
+    hidden_shape: list[int]
+    output_shape: list[int]
+    loaded_weight_bytes: int
+    dequantized_weight_bytes: int
+    output_tensor: torch.Tensor | None = None
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "layer_index": self.layer_index,
+            "expert_index": self.expert_index,
+            "hidden_shape": list(self.hidden_shape),
+            "output_shape": list(self.output_shape),
+            "loaded_weight_bytes": self.loaded_weight_bytes,
+            "dequantized_weight_bytes": self.dequantized_weight_bytes,
+            "output_materialized": self.output_tensor is not None,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
 def fp8_source_status(model_id: str) -> dict:
     """Return FP8 source readiness from the persisted tensor catalog."""
     catalog = load_tensor_catalog(model_id)
@@ -163,6 +222,131 @@ def plan_fp8_layer_working_set(
         tensor_names=[entry.tensor_name for entry in sorted(chosen, key=lambda item: item.tensor_name)],
         blockers=blockers,
         ready=bool(chosen) and not blockers,
+    )
+
+
+def dequantize_fp8_block_scaled(
+    fp8_bytes: torch.Tensor,
+    scale_inv: torch.Tensor,
+    *,
+    block_size: int = 128,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Dequantize FP8 E4M3 weights with DeepSeek-style 128x128 block scales."""
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise RuntimeError("This PyTorch build does not expose torch.float8_e4m3fn.")
+    if fp8_bytes.dtype != torch.uint8:
+        raise TypeError("fp8_bytes must be a uint8 tensor containing raw E4M3 bytes.")
+    if fp8_bytes.ndim != 2:
+        raise ValueError("FP8 block dequant currently supports 2D weight tensors only.")
+    if scale_inv.ndim != 2:
+        raise ValueError("scale_inv must be a 2D block-scale tensor.")
+
+    rows, cols = int(fp8_bytes.shape[0]), int(fp8_bytes.shape[1])
+    expected_rows = (rows + block_size - 1) // block_size
+    expected_cols = (cols + block_size - 1) // block_size
+    if int(scale_inv.shape[0]) != expected_rows or int(scale_inv.shape[1]) != expected_cols:
+        raise ValueError(
+            "scale_inv shape "
+            f"{list(scale_inv.shape)} does not match FP8 weight shape {list(fp8_bytes.shape)} "
+            f"with block_size={block_size}; expected {[expected_rows, expected_cols]}."
+        )
+
+    fp8_values = fp8_bytes.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
+    expanded_scale = (
+        scale_inv.to(torch.float32)
+        .repeat_interleave(block_size, dim=0)
+        .repeat_interleave(block_size, dim=1)[:rows, :cols]
+    )
+    return (fp8_values * expanded_scale).to(dtype=dtype).contiguous()
+
+
+def dequantize_fp8_weight_pair(
+    pair: FP8TensorPair,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    block_size: int = 128,
+) -> FP8DequantizedTensor:
+    """Dequantize a loaded FP8 weight pair to a normal torch tensor."""
+    blockers = list(pair.blockers)
+    tensor = None
+    if pair.fp8_bytes is None or pair.scale_tensor is None:
+        blockers.append("FP8 payload and scale tensor must be loaded before dequantization.")
+    if not blockers and pair.fp8_bytes is not None and pair.scale_tensor is not None:
+        try:
+            tensor = dequantize_fp8_block_scaled(pair.fp8_bytes, pair.scale_tensor, block_size=block_size, dtype=dtype)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            blockers.append(str(exc))
+
+    return FP8DequantizedTensor(
+        model_id=pair.model_id,
+        weight_name=pair.weight_name,
+        scale_name=pair.scale_name,
+        shape=list(pair.weight_shape),
+        dtype=str(dtype).replace("torch.", ""),
+        loaded_nbytes=pair.weight_nbytes + pair.scale_nbytes,
+        tensor=tensor,
+        blockers=blockers,
+        ready=not blockers and tensor is not None,
+    )
+
+
+def load_dequantized_fp8_weight(
+    model_id: str,
+    weight_name: str,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    block_size: int = 128,
+) -> FP8DequantizedTensor:
+    """Load one FP8 weight pair and dequantize it to a normal torch tensor."""
+    pair = load_fp8_weight_pair(model_id, weight_name)
+    return dequantize_fp8_weight_pair(pair, dtype=dtype, block_size=block_size)
+
+
+def run_fp8_expert_mlp(
+    model_id: str,
+    layer_index: int,
+    expert_index: int,
+    hidden: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8ExpertMLPResult:
+    """Run one selected expert MLP using dequantized FP8 gate/up/down weights."""
+    prefix = f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}"
+    names = {
+        "gate": f"{prefix}.gate_proj.weight",
+        "up": f"{prefix}.up_proj.weight",
+        "down": f"{prefix}.down_proj.weight",
+    }
+    loaded = {role: load_dequantized_fp8_weight(model_id, name, dtype=dtype) for role, name in names.items()}
+    blockers = [blocker for item in loaded.values() for blocker in item.blockers]
+    output = None
+    if not blockers and all(item.tensor is not None for item in loaded.values()):
+        gate = loaded["gate"].tensor
+        up = loaded["up"].tensor
+        down = loaded["down"].tensor
+        if gate is None or up is None or down is None:
+            blockers.append("One or more expert weights failed to materialize.")
+        else:
+            working = hidden.to(dtype=torch.float32)
+            gate_out = F.linear(working, gate.to(torch.float32))
+            up_out = F.linear(working, up.to(torch.float32))
+            expert_hidden = F.silu(gate_out) * up_out
+            output = F.linear(expert_hidden, down.to(torch.float32)).to(dtype=dtype).contiguous()
+
+    dequantized_bytes = sum(0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size() for item in loaded.values())
+    loaded_bytes = sum(item.loaded_nbytes for item in loaded.values())
+    return FP8ExpertMLPResult(
+        model_id=model_id,
+        layer_index=int(layer_index),
+        expert_index=int(expert_index),
+        hidden_shape=[int(value) for value in hidden.shape],
+        output_shape=[] if output is None else [int(value) for value in output.shape],
+        loaded_weight_bytes=int(loaded_bytes),
+        dequantized_weight_bytes=int(dequantized_bytes),
+        output_tensor=output,
+        blockers=blockers,
+        ready=not blockers and output is not None,
     )
 
 
