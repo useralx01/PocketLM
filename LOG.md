@@ -5905,3 +5905,9 @@ Result: 297 passed in 21.83s
 - Result: prompt prefill executed layers `0-7`, generated step executed layers `0-7`, every layer cache reached length `3`, and `ready=true`.
 - Timing: about `139.57s` total, with about `85.51s` prompt prefill and `54.06s` generated-token execution.
 - Generated token changed to `[0]` for the deeper partial model; this is expected partial-stack behavior and not a final quality claim.
+
+## Phase FP8 Chat Template / Evidence
+- Updated `runtime_fp8_cli --chat` to use the model's local Transformers chat template by default, with `--raw-chat` as the raw tokenizer fallback.
+- Added `--system-prompt` support for chat-template probes.
+- Real DeepSeek chat-template probe passed: `--chat hi --layers 1 --max-new 1 --max-prompt-tokens 4` used prompt token ids `[0, 128803, 6366, 128804]`, generated `[55026]`, decoded ` Aires`, and had no tokenizer/runtime blockers.
+- This remains a bounded-layer runtime proof, not a final quality claim.

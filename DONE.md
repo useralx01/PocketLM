@@ -601,3 +601,8 @@
 ## Phase FP8 Layer Scaling
 - Verified bounded DeepSeek decode through layers `0-7`.
 - KV caches reached length `3` for all eight layers with no blockers.
+
+## Phase FP8 Chat Template
+- Made bounded `--chat` use the model's own local chat template by default.
+- Added raw-chat fallback and system-prompt support.
+- Verified with real DeepSeek tokenizer/config files.

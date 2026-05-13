@@ -141,3 +141,4 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next MoE speed attempt should fuse selected experts in native code rather than rely on Python thread-level expert workers.
 - Next chat path step: move from bounded layer-count text probes to product-facing full-stack attempts once the FP8 layer path is faster enough.
 - Next layer scaling step: test `0-15` only after the next speed win, because `0-7` already takes about 140s.
+- Next product step: expose the bounded FP8 chat-template mode in the app once speed is less painful.

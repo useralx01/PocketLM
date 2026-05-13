@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --token-forward <token-id> [--start-layer n] [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --prefill <token-id,...> [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --decode-loop <token-id,...> [--layers n] [--max-new n]")
-        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --chat <text> [--layers n] [--max-new n] [--max-prompt-tokens n]")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --chat <text> [--layers n] [--max-new n] [--max-prompt-tokens n] [--system-prompt text] [--raw-chat]")
         return 1
 
     model_id = args[0]
@@ -237,7 +237,18 @@ def main(argv: list[str] | None = None) -> int:
         layer_count = _int_option(args, "--layers", 1)
         max_new = _int_option(args, "--max-new", 1)
         max_prompt_tokens = _int_option(args, "--max-prompt-tokens", 16)
-        token_ids, token_blockers = _encode_with_catalog_tokenizer(model_id, prompt)
+        system_prompt = _str_option(args, "--system-prompt", "")
+        if "--raw-chat" in args:
+            prepared_prompt = prompt
+            token_ids, token_blockers = _encode_with_catalog_tokenizer(model_id, prompt)
+            chat_template_used = False
+        else:
+            prepared_prompt, token_ids, token_blockers = _prepare_chat_with_catalog_tokenizer(
+                model_id,
+                prompt,
+                system_prompt=system_prompt,
+            )
+            chat_template_used = not token_blockers
         used_token_ids = token_ids[-max(1, int(max_prompt_tokens)):] if token_ids else []
         started = time.perf_counter()
         result = run_fp8_decode_loop(
@@ -252,9 +263,11 @@ def main(argv: list[str] | None = None) -> int:
         payload.update(
             {
                 "prompt": prompt,
+                "prepared_prompt": prepared_prompt,
                 "prompt_token_ids": token_ids,
                 "used_prompt_token_ids": used_token_ids,
                 "generated_text": generated_text,
+                "chat_template_used": chat_template_used,
                 "tokenizer_blockers": token_blockers + decode_blockers,
                 "elapsed_seconds": float(time.perf_counter() - started),
             }
@@ -313,6 +326,46 @@ def _int_option(args: list[str], name: str, default: int) -> int:
     if index + 1 >= len(args):
         return int(default)
     return int(args[index + 1])
+
+
+def _str_option(args: list[str], name: str, default: str) -> str:
+    if name not in args:
+        return default
+    index = args.index(name)
+    if index + 1 >= len(args):
+        return default
+    return str(args[index + 1])
+
+
+def _prepare_chat_with_catalog_tokenizer(
+    model_id: str,
+    prompt: str,
+    *,
+    system_prompt: str = "",
+) -> tuple[str, list[int], list[str]]:
+    from transformers import AutoTokenizer
+    from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+    catalog = load_tensor_catalog(model_id)
+    if not catalog.model_dir.exists():
+        return prompt, [], [f"Model directory does not exist: {catalog.model_dir}."]
+    messages = []
+    if system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(catalog.model_dir),
+            local_files_only=True,
+            trust_remote_code=False,
+        )
+        prepared = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        token_ids = [int(value) for value in tokenizer.encode(prepared, add_special_tokens=False)]
+    except Exception as exc:
+        return prompt, [], [f"Chat tokenizer prepare failed: {exc}."]
+    if not token_ids:
+        return prepared, [], ["Chat prompt encoded to zero tokens."]
+    return prepared, token_ids, []
 
 
 def _encode_with_catalog_tokenizer(model_id: str, prompt: str) -> tuple[list[int], list[str]]:

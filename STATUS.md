@@ -686,3 +686,4 @@ Phase FP8 Dual Gate-Up Kernel: MLP gate/up now use a native dual projection path
 Phase FP8 MoE Expert Workers: selected-expert parallel workers are available by env flag but stay off by default because full-path DeepSeek timing did not improve.
 Phase FP8 Text Chat Bridge: `runtime_fp8_cli --chat` can run bounded real-text DeepSeek FP8 probes through the external-source tokenizer.
 Phase FP8 Layer Scaling: bounded DeepSeek decode now passes through layers 0-7 with clean KV caches, taking about 140s for the tiny probe.
+Phase FP8 Chat Template: bounded FP8 chat now uses DeepSeek's local chat template by default, with raw-chat fallback.
