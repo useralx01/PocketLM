@@ -597,3 +597,7 @@
 - Added bounded `runtime_fp8_cli --chat`.
 - Encodes prompt text from the catalog model directory tokenizer, runs FP8 decode, and decodes generated token ids back to text.
 - Verified with real DeepSeek tokenizer and a one-layer text probe.
+
+## Phase FP8 Layer Scaling
+- Verified bounded DeepSeek decode through layers `0-7`.
+- KV caches reached length `3` for all eight layers with no blockers.

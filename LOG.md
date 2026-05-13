@@ -5898,3 +5898,10 @@ Result: 297 passed in 21.83s
 - Real DeepSeek tokenizer loaded from `D:\PocketLM\sources\deepseek-v3\tokenizer.json`.
 - Real text probe passed: `--chat hi --layers 1 --max-new 1 --max-prompt-tokens 2` encoded prompt token `[6366]`, generated token `[39739]`, decoded generated text `ppo`, and had no tokenizer/runtime blockers.
 - This is a tokenizer/runtime bridge, not a quality claim; full-answer quality still needs full-stack or larger layer-count decode.
+
+## Phase FP8 Layer Scaling / Evidence
+- Real DeepSeek bounded decode scaled from layers `0-3` to layers `0-7` with no blockers.
+- Command: `runtime_fp8_cli deepseek-v3 --decode-loop 0,1 --layers 8 --max-new 1`.
+- Result: prompt prefill executed layers `0-7`, generated step executed layers `0-7`, every layer cache reached length `3`, and `ready=true`.
+- Timing: about `139.57s` total, with about `85.51s` prompt prefill and `54.06s` generated-token execution.
+- Generated token changed to `[0]` for the deeper partial model; this is expected partial-stack behavior and not a final quality claim.
