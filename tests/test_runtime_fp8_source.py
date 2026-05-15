@@ -166,6 +166,9 @@ def test_run_fp8_moe_combines_routed_and_shared_experts(tmp_path: Path, monkeypa
     assert result.routed_weight_bytes > 0
     assert result.shared_weight_bytes > 0
     assert result.dequantized_weight_bytes > 0
+    assert result.routed_elapsed_seconds >= 0.0
+    assert result.shared_elapsed_seconds >= 0.0
+    assert result.total_elapsed_seconds >= 0.0
 
 
 def test_run_fp8_dense_mlp_materializes_dense_layer(tmp_path: Path, monkeypatch) -> None:

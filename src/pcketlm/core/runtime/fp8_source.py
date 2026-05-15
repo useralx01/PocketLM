@@ -251,6 +251,10 @@ class FP8MoEResult:
     dequantized_weight_bytes: int
     router: FP8RouterResult | None = None
     output_tensor: torch.Tensor | None = None
+    router_elapsed_seconds: float = 0.0
+    routed_elapsed_seconds: float = 0.0
+    shared_elapsed_seconds: float = 0.0
+    total_elapsed_seconds: float = 0.0
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -266,6 +270,10 @@ class FP8MoEResult:
             "dequantized_weight_bytes": self.dequantized_weight_bytes,
             "router": None if self.router is None else self.router.to_dict(),
             "output_materialized": self.output_tensor is not None,
+            "router_elapsed_seconds": float(self.router_elapsed_seconds),
+            "routed_elapsed_seconds": float(self.routed_elapsed_seconds),
+            "shared_elapsed_seconds": float(self.shared_elapsed_seconds),
+            "total_elapsed_seconds": float(self.total_elapsed_seconds),
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -875,7 +883,13 @@ def run_fp8_moe(
     router: FP8RouterResult | None = None,
 ) -> FP8MoEResult:
     """Run DeepSeek-style selected routed experts plus shared experts for one MoE layer."""
+    total_start = time.perf_counter()
+    router_elapsed = 0.0
+    routed_elapsed = 0.0
+    shared_elapsed = 0.0
+    router_start = time.perf_counter()
     router_result = router or run_fp8_router(model_id, layer_index, hidden)
+    router_elapsed = 0.0 if router is not None else time.perf_counter() - router_start
     blockers = list(router_result.blockers)
     output = None
     routed_loaded_bytes = 0
@@ -899,6 +913,7 @@ def run_fp8_moe(
 
         expert_results: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor | None, int, int, list[str]]] = []
         workers = _fp8_moe_expert_workers()
+        routed_start = time.perf_counter()
         if workers > 1 and len(expert_jobs) > 1:
             with ThreadPoolExecutor(max_workers=min(workers, len(expert_jobs))) as executor:
                 futures = {
@@ -928,6 +943,7 @@ def run_fp8_moe(
                 expert_results.append(
                     (expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers)
                 )
+        routed_elapsed = time.perf_counter() - routed_start
 
         for expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers in sorted(
             expert_results, key=lambda item: item[0]
@@ -939,12 +955,14 @@ def run_fp8_moe(
                 route = route_weights[row_indices, top_indices].view(-1, 1).to(dtype=dtype)
                 flat_output[row_indices] += expert_output * route
 
+        shared_start = time.perf_counter()
         shared_output, loaded_bytes, shared_dequant_bytes, shared_blockers = _run_fp8_mlp_prefix(
             model_id,
             f"model.layers.{int(layer_index)}.mlp.shared_experts",
             flat_hidden.to(dtype=dtype),
             dtype=dtype,
         )
+        shared_elapsed = time.perf_counter() - shared_start
         shared_loaded_bytes += loaded_bytes
         dequantized_bytes += shared_dequant_bytes
         blockers.extend(shared_blockers)
@@ -964,6 +982,10 @@ def run_fp8_moe(
         dequantized_weight_bytes=int(dequantized_bytes),
         router=router_result,
         output_tensor=output,
+        router_elapsed_seconds=float(router_elapsed),
+        routed_elapsed_seconds=float(routed_elapsed),
+        shared_elapsed_seconds=float(shared_elapsed),
+        total_elapsed_seconds=float(time.perf_counter() - total_start),
         blockers=blockers,
         ready=not blockers and output is not None,
     )
@@ -1404,6 +1426,8 @@ def run_fp8_prompt_prefill(
                     "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
                     "attention_elapsed_seconds": float(step.attention_elapsed_seconds),
                     "ffn_elapsed_seconds": float(step.ffn_elapsed_seconds),
+                    "moe_routed_elapsed_seconds": 0.0 if step.moe is None else float(step.moe.routed_elapsed_seconds),
+                    "moe_shared_elapsed_seconds": 0.0 if step.moe is None else float(step.moe.shared_elapsed_seconds),
                     "total_elapsed_seconds": float(step.total_elapsed_seconds),
                     "elapsed_seconds": float(time.perf_counter() - layer_start),
                     "blockers": list(step.blockers),
@@ -1482,6 +1506,8 @@ def run_fp8_single_token_forward(
                     "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
                     "attention_elapsed_seconds": float(step.attention_elapsed_seconds),
                     "ffn_elapsed_seconds": float(step.ffn_elapsed_seconds),
+                    "moe_routed_elapsed_seconds": 0.0 if step.moe is None else float(step.moe.routed_elapsed_seconds),
+                    "moe_shared_elapsed_seconds": 0.0 if step.moe is None else float(step.moe.shared_elapsed_seconds),
                     "total_elapsed_seconds": float(step.total_elapsed_seconds),
                     "blockers": list(step.blockers),
                 }
@@ -1518,6 +1544,29 @@ def run_fp8_single_token_forward(
 
 
 def run_fp8_decode_loop(
+    model_id: str,
+    token_ids: list[int],
+    *,
+    start_layer: int = 0,
+    layer_count: int = 1,
+    max_new_tokens: int = 1,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8DecodeLoopResult:
+    """Run a small greedy decode loop with request-scoped safetensors handles."""
+    from pcketlm.core.runtime.tensor_loader import scoped_tensor_handle_cache
+
+    with scoped_tensor_handle_cache():
+        return _run_fp8_decode_loop_impl(
+            model_id,
+            token_ids,
+            start_layer=start_layer,
+            layer_count=layer_count,
+            max_new_tokens=max_new_tokens,
+            dtype=dtype,
+        )
+
+
+def _run_fp8_decode_loop_impl(
     model_id: str,
     token_ids: list[int],
     *,

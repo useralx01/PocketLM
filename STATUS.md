@@ -695,3 +695,4 @@ Phase FP8 Final Token Skip: bounded DeepSeek one-token output now skips the unne
 Phase FP8 Layer Scaling 32: bounded DeepSeek now passes layers 0-31 with clean caches in about 337s; per-layer timings show broad MoE/attention cost remains.
 Phase FP8 Full Stack Proof: bounded DeepSeek now passes the full catalog stack, layers 0-61, from the external FP8 source with no blockers in about 664s; this is correctness-complete but still far too slow for interactive chat.
 Phase FP8 Tail Timing: FP8 summaries now expose attention/FFN/tail timing; lm_head tail uses 8192-row chunks and native top-k by default, but the main DeepSeek speed blocker remains per-layer attention and MoE cost.
+Phase FP8 MoE Timing: MoE summaries now split router, routed expert, and shared expert time; real DeepSeek shows routed expert payload time is the next MoE speed target, while worker threads remain opt-in.

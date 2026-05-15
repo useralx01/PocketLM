@@ -1517,3 +1517,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use `8192` lm_head rows per chunk by default. It reduces chunk overhead while keeping each BF16 lm_head chunk modest enough for the current 16 GB machine.
 - Native lm_head top-k is default again after the wider chunk change. Keep `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` as the fallback if a machine or DLL path regresses.
 - The full-chat blocker is still the layer stack, not only the tail: the 4-layer proof still spends most time inside attention/FFN, and the 62-layer proof is dominated by repeating that cost across all layers.
+
+## Phase FP8 MoE Timing
+- Keep MoE routed/shared timing visible in layer summaries. The routed expert path is the meaningful MoE target; shared expert time is small on the current real DeepSeek probe.
+- Keep `PCKETLM_FP8_MOE_EXPERT_WORKERS` opt-in. Four workers did not reduce routed expert time enough to justify default oversubscription risk.
+- Treat external-disk payload layout as a real speed factor. Cold routed expert time is much worse than warm routed expert time, so an FP8 packed/reordered artifact is likely more valuable than another small Python scheduling tweak.

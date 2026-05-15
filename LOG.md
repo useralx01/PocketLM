@@ -5965,3 +5965,11 @@ Result: 297 passed in 21.83s
 - Widened the default `lm_head` tail chunk from `2048` rows to `8192` rows and exposed `PCKETLM_FP8_LM_HEAD_CHUNK_ROWS` for overrides.
 - Promoted native lm_head top-k to default with `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` as the fallback switch. After the wider chunk change, native top-k was a small real DeepSeek tail win instead of the earlier rejected path.
 - Direct real DeepSeek tail smoke now reports `chunk_rows=8192`, `chunk_count=16`, native top-k enabled, ready true, and about `2.06s` on a warm file-cache run.
+
+## Phase FP8 MoE Timing / Evidence
+- Added MoE timing fields for router, routed experts, shared expert, and total MoE time. Layer summaries now expose routed/shared MoE timing directly.
+- Wrapped `run_fp8_decode_loop()` in request-scoped safetensors handles so regular safetensors tensors can reuse handles during one FP8 decode call.
+- Real DeepSeek `--moe 3` stayed ready with the same selected experts and output scale. A cold-ish run showed about `4.31s` router, `3.11s` routed experts, and `0.07s` shared expert; a warm rerun dropped to about `1.18s` router, `0.48s` routed experts, and `0.07s` shared expert.
+- Real DeepSeek bounded decode layers `0-3`, prompt `[0,1]`, `max_new=1` stayed ready and generated `[76394]`. The MoE layer showed about `4.23s` routed expert time and about `0.37s` shared expert time inside about `5.30s` FFN time.
+- Rechecked `PCKETLM_FP8_MOE_EXPERT_WORKERS=4`; the full 4-layer probe remained correct and was only a small/noisy wall-time improvement, with routed expert time still around `4.17s`, so it remains opt-in.
+- Conclusion: the next true MoE speed cut is not the shared expert and not Python thread-level workers. It needs lower-latency routed expert payload access, a repacked FP8 artifact layout, or a native selected-expert path that reduces external-disk reads and per-expert payload handling.

@@ -643,3 +643,8 @@
 - Added block-level attention/FFN timing and prompt/decode tail timing to FP8 summaries.
 - Defaulted the FP8 lm_head tail to wider `8192` row chunks.
 - Promoted native lm_head top-k to default with a disable switch after the wider chunks made it a small real DeepSeek win.
+
+## Phase FP8 MoE Timing
+- Added router/routed/shared MoE timing fields.
+- Wrapped FP8 decode-loop calls in request-scoped safetensors handles.
+- Verified real DeepSeek MoE and bounded 4-layer decode still pass; routed expert payload time is the next MoE bottleneck.
