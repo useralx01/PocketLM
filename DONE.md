@@ -633,3 +633,8 @@
 ## Phase FP8 Layer Scaling 32
 - Added per-layer decode-loop timing summaries.
 - Verified real DeepSeek layers `0-15` and `0-31` run with clean caches and no blockers.
+
+## Phase FP8 Full Stack Proof
+- Verified real DeepSeek layers `0-61` run from the external FP8 source with clean caches and no blockers.
+- Generated one bounded token from prompt `[0, 1]` through the full available stack.
+- Classified the current path as correctness-complete but not interactive because the full proof took about `664s`.

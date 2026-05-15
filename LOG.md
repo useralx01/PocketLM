@@ -5948,3 +5948,12 @@ Result: 297 passed in 21.83s
 - Real DeepSeek bounded decode layers `0-15`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `172.02s`.
 - Real DeepSeek bounded decode layers `0-31`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `337.49s`.
 - Layer timings show dense layers `0-2` around `7s` each and MoE layers mostly around `9-11s` each for the 2-token prompt prefill. The remaining bottleneck is broad per-layer FP8 attention/MoE execution, not a single failing layer.
+
+## Phase FP8 Full Stack Proof / Evidence
+- Real DeepSeek bounded decode now passes the full available FP8 layer stack from the external source.
+- Command: `python -m pcketlm.app.chat_shell.runtime_fp8_cli deepseek-v3 --decode-loop 0,1 --layers 62 --max-new 1`.
+- Result: `ready=true`, zero blockers, prompt tokens `[0, 1]`, generated token ids `[0]`.
+- Prompt prefill executed layers `0-61`; every layer cache reached sequence length `2`.
+- Final top token ids were `[0, 261, 223, 65, 18]` with logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+- Timing: prompt prefill elapsed about `664.12s`; final generated-token cache-forward was skipped as intended, total runtime about `664.12s` with shell wall time about `668.1s`.
+- This is a correctness win: the full DeepSeek FP8 stack is runnable from disk with selected experts and no Q4 re-quantization. It is also a speed loss for normal chat right now: one bounded output token takes about `11 minutes`, so the next work must reduce per-layer MoE/attention cost rather than prove more layer counts.

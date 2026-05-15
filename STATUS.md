@@ -693,3 +693,4 @@ Phase FP8 Plain Status: `acquisition_cli --plain` now gives a short DeepSeek ope
 Phase FP8 Full MLP Kernel: native full FP8 MLP is available for capped selected-expert payloads, but real DeepSeek timing is only a tiny tie/win, not the speed unlock.
 Phase FP8 Final Token Skip: bounded DeepSeek one-token output now skips the unnecessary final cache-forward, cutting layers 0-3 to about 41s and layers 0-7 to about 92s.
 Phase FP8 Layer Scaling 32: bounded DeepSeek now passes layers 0-31 with clean caches in about 337s; per-layer timings show broad MoE/attention cost remains.
+Phase FP8 Full Stack Proof: bounded DeepSeek now passes the full catalog stack, layers 0-61, from the external FP8 source with no blockers in about 664s; this is correctness-complete but still far too slow for interactive chat.

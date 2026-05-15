@@ -1505,3 +1505,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Layer Scaling 32
 - Keep per-layer timing summaries in decode-loop output. Long DeepSeek probes need this visibility because wall time is now spread across many working layers.
 - Do not call the runtime interactive yet. The 32-layer proof is correct, but around `337s` for one bounded token means full 62-layer chat is still too slow for normal use.
+
+## Phase FP8 Full Stack Proof
+- Treat full DeepSeek FP8 source execution as correctness-proven for a bounded one-token probe: all catalog layers `0-61` execute with clean carried caches and no blockers.
+- Do not present this as usable chat yet. The full proof takes about `664s` for one bounded output token on this machine.
+- The next speed work must attack broad per-layer cost: batched selected-expert MoE execution and fused MLA attention/projection work are higher value than more cache toggles or more layer-scaling proof.
+- Keep Q4 conversion as not recommended for DeepSeek FP8 source quality unless the user explicitly chooses the lossy path; the honest path remains native FP8 plus paging/fusion.
