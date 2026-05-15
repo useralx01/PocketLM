@@ -624,3 +624,8 @@
 - Added a guarded native full FP8 MLP kernel for small selected-expert/shared-expert payloads.
 - Verified synthetic FP8 tests and real DeepSeek expert, MoE, and bounded decode probes.
 - Classified the result as safe but not a breakthrough; attention/native fusion remains the next speed target.
+
+## Phase FP8 Final Token Skip
+- Removed the unnecessary final generated-token forward from bounded FP8 decode when no next token is requested.
+- Added an opt-in final-cache preparation switch for diagnostics.
+- Verified real DeepSeek 4-layer and 8-layer probes are much faster with the same generated tokens and no blockers.

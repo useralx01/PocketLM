@@ -7,6 +7,7 @@ import json
 import math
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -27,6 +28,10 @@ from pcketlm.native import (
     native_fp8_mlp_available,
     native_read_tensor_bytes,
 )
+
+_FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTensor]" = OrderedDict()
+_FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
+_FP8_ATTENTION_WEIGHT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -432,6 +437,7 @@ class FP8DecodeLoopResult:
     final_top_logits: list[float]
     step_summaries: list[dict] = field(default_factory=list)
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    attention_weight_cache: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -449,6 +455,7 @@ class FP8DecodeLoopResult:
             "cache_sequence_lengths": {
                 str(key): int(value[0].shape[1]) for key, value in self.next_kv_caches.items()
             },
+            "attention_weight_cache": dict(self.attention_weight_cache),
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -504,6 +511,7 @@ def fp8_source_status(model_id: str) -> dict:
             "native_fp8_linear": _native_fp8_linear_enabled() and native_fp8_linear_available(),
             "native_fp8_mlp": _native_fp8_linear_enabled() and native_fp8_mlp_available(),
             "native_fp8_mlp_full_max_bytes": _native_fp8_mlp_full_max_bytes(),
+            "attention_weight_cache_max_bytes": _fp8_attention_weight_cache_max_bytes(),
             "streamed_attention": _streamed_fp8_attention_enabled(),
             "native_lm_head_topk": _native_lm_head_topk_enabled(),
             "moe_expert_workers": _fp8_moe_expert_workers(),
@@ -655,6 +663,81 @@ def load_dequantized_fp8_weight(
     """Load one FP8 weight pair and dequantize it to a normal torch tensor."""
     pair = load_fp8_weight_pair(model_id, weight_name)
     return dequantize_fp8_weight_pair(pair, dtype=dtype, block_size=block_size)
+
+
+def clear_fp8_attention_weight_cache() -> None:
+    """Clear cached dequantized FP8 attention weights."""
+    global _FP8_ATTENTION_WEIGHT_CACHE_BYTES
+    _FP8_ATTENTION_WEIGHT_CACHE.clear()
+    _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
+    for key in _FP8_ATTENTION_WEIGHT_CACHE_STATS:
+        _FP8_ATTENTION_WEIGHT_CACHE_STATS[key] = 0
+
+
+def fp8_attention_weight_cache_snapshot() -> dict:
+    """Return FP8 attention cache telemetry."""
+    return {
+        "entries": len(_FP8_ATTENTION_WEIGHT_CACHE),
+        "bytes": int(_FP8_ATTENTION_WEIGHT_CACHE_BYTES),
+        "max_bytes": int(_fp8_attention_weight_cache_max_bytes()),
+        **{key: int(value) for key, value in _FP8_ATTENTION_WEIGHT_CACHE_STATS.items()},
+    }
+
+
+def _load_dequantized_fp8_attention_weight(
+    model_id: str,
+    weight_name: str,
+    *,
+    dtype: torch.dtype,
+) -> FP8DequantizedTensor:
+    max_bytes = _fp8_attention_weight_cache_max_bytes()
+    if max_bytes <= 0:
+        return load_dequantized_fp8_weight(model_id, weight_name, dtype=dtype)
+    key = (str(model_id), str(weight_name), str(dtype).replace("torch.", ""))
+    cached = _FP8_ATTENTION_WEIGHT_CACHE.get(key)
+    if cached is not None and cached.tensor is not None:
+        _FP8_ATTENTION_WEIGHT_CACHE.move_to_end(key)
+        _FP8_ATTENTION_WEIGHT_CACHE_STATS["hits"] += 1
+        return FP8DequantizedTensor(
+            model_id=cached.model_id,
+            weight_name=cached.weight_name,
+            scale_name=cached.scale_name,
+            shape=list(cached.shape),
+            dtype=cached.dtype,
+            loaded_nbytes=0,
+            tensor=cached.tensor,
+            blockers=[],
+            ready=True,
+        )
+
+    _FP8_ATTENTION_WEIGHT_CACHE_STATS["misses"] += 1
+    loaded = load_dequantized_fp8_weight(model_id, weight_name, dtype=dtype)
+    if loaded.tensor is None or loaded.blockers:
+        return loaded
+    tensor_bytes = int(loaded.tensor.nelement() * loaded.tensor.element_size())
+    if tensor_bytes > max_bytes:
+        return loaded
+    global _FP8_ATTENTION_WEIGHT_CACHE_BYTES
+    while _FP8_ATTENTION_WEIGHT_CACHE and _FP8_ATTENTION_WEIGHT_CACHE_BYTES + tensor_bytes > max_bytes:
+        _old_key, old_value = _FP8_ATTENTION_WEIGHT_CACHE.popitem(last=False)
+        if old_value.tensor is not None:
+            _FP8_ATTENTION_WEIGHT_CACHE_BYTES -= int(old_value.tensor.nelement() * old_value.tensor.element_size())
+        _FP8_ATTENTION_WEIGHT_CACHE_STATS["evictions"] += 1
+    cached_value = FP8DequantizedTensor(
+        model_id=loaded.model_id,
+        weight_name=loaded.weight_name,
+        scale_name=loaded.scale_name,
+        shape=list(loaded.shape),
+        dtype=loaded.dtype,
+        loaded_nbytes=loaded.loaded_nbytes,
+        tensor=loaded.tensor.detach().contiguous(),
+        blockers=[],
+        ready=True,
+    )
+    _FP8_ATTENTION_WEIGHT_CACHE[key] = cached_value
+    _FP8_ATTENTION_WEIGHT_CACHE_BYTES += tensor_bytes
+    _FP8_ATTENTION_WEIGHT_CACHE_STATS["stores"] += 1
+    return loaded
 
 
 def run_fp8_expert_mlp(
@@ -1459,6 +1542,25 @@ def run_fp8_decode_loop(
             current_tokens.append(token_id)
             include_tail = len(generated) < int(max_new_tokens)
             phase = "generate"
+            if not include_tail and not _fp8_prepare_final_cache_enabled():
+                position += 1
+                summaries.append(
+                    {
+                        "position": int(position - 1),
+                        "phase": "generate_final_token",
+                        "token_id": int(token_id),
+                        "ready": True,
+                        "executed_layers": [],
+                        "tail_top_token_ids": [],
+                        "cache_sequence_lengths": {
+                            str(key): int(value[0].shape[1]) for key, value in caches.items()
+                        },
+                        "elapsed_seconds": 0.0,
+                        "skipped_final_cache_forward": True,
+                        "blockers": [],
+                    }
+                )
+                continue
         step_start = time.perf_counter()
         step = run_fp8_single_token_forward(
             model_id,
@@ -1505,6 +1607,7 @@ def run_fp8_decode_loop(
         final_top_logits=final_top_logits,
         step_summaries=summaries,
         next_kv_caches=caches,
+        attention_weight_cache=fp8_attention_weight_cache_snapshot(),
         blockers=blockers,
         ready=not blockers and position >= len(prompt),
     )
@@ -2017,6 +2120,10 @@ def _fp8_prompt_prefill_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP8_PROMPT_PREFILL", "").strip().lower() not in {"1", "true", "yes", "on"}
 
 
+def _fp8_prepare_final_cache_enabled() -> bool:
+    return os.environ.get("PCKETLM_FP8_PREPARE_FINAL_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _native_fp8_linear_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() not in {"1", "true", "yes", "on"}
 
@@ -2029,6 +2136,16 @@ def _native_fp8_mlp_full_max_bytes() -> int:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
         return 192 * 1024 * 1024
+
+
+def _fp8_attention_weight_cache_max_bytes() -> int:
+    raw = os.environ.get("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(float(raw) * 1024 * 1024))
+    except ValueError:
+        return 0
 
 
 def _native_lm_head_topk_enabled() -> bool:
@@ -2070,7 +2187,10 @@ def _run_fp8_single_token_attention_materialized(
         "kv_b": f"{prefix}.kv_b_proj.weight",
         "o": f"{prefix}.o_proj.weight",
     }
-    loaded = {role: load_dequantized_fp8_weight(model_id, name, dtype=dtype) for role, name in weight_names.items()}
+    loaded = {
+        role: _load_dequantized_fp8_attention_weight(model_id, name, dtype=dtype)
+        for role, name in weight_names.items()
+    }
     blockers.extend(blocker for item in loaded.values() for blocker in item.blockers)
     q_norm = _load_regular_tensor(model_id, f"{prefix}.q_a_layernorm.weight")
     kv_norm = _load_regular_tensor(model_id, f"{prefix}.kv_a_layernorm.weight")

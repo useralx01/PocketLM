@@ -1496,3 +1496,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 ## Phase FP8 Full MLP Kernel
 - Keep the full native FP8 MLP path guarded by a payload byte cap. It is useful for selected experts and shared experts, but dense DeepSeek MLP tensors are too large to load fully as the default on this 16 GB machine.
 - Treat the current full MLP kernel as correctness-safe hot-loop cleanup, not a speed breakthrough. Real DeepSeek expert, MoE, and bounded decode timings were effectively tied with the streamed fallback.
+
+## Phase FP8 Final Token Skip
+- For normal generation, do not forward the final generated token when no next token is requested. The token has already been selected by the previous tail. This preserves output correctness and removes a large wasted final step.
+- Keep `PCKETLM_FP8_PREPARE_FINAL_CACHE=1` as the diagnostic escape hatch when the operator explicitly wants the final token committed into KV cache for a follow-up measurement.
+- Keep FP8 attention weight caching opt-in. It can produce hits, but warm DeepSeek measurements showed OS/file cache effects dominate and the Python tensor cache can add memory pressure.

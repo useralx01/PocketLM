@@ -5935,3 +5935,10 @@ Result: 297 passed in 21.83s
 - Real DeepSeek expert `3/0` passed with no blockers: native full MLP about `7.81s`, streamed fallback about `7.86s`.
 - Real DeepSeek MoE layer `3` passed with no blockers: native full MLP about `8.87s`, streamed fallback about `8.88s`.
 - Real bounded DeepSeek decode layers `0-3` generated `[76394]` with clean caches in about `79.92s`; disabling the full MLP path was about `79.94s`. This is safe and slightly positive, but not the major speed unlock.
+
+## Phase FP8 Final Token Skip / Evidence
+- Fixed the decode loop so it does not run a full final-token forward when no next token is requested. The prompt tail already chooses the final generated token.
+- Added `PCKETLM_FP8_PREPARE_FINAL_CACHE=1` for diagnostics that explicitly want the old behavior and final-token KV cache preparation.
+- Added FP8 attention-weight cache telemetry and left the cache opt-in (`PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB`) because warm real DeepSeek timing did not justify a default memory cache.
+- Real DeepSeek bounded decode layers `0-3`, prompt `[0,1]`, `max_new=1`: generated `[76394]` with clean caches in about `41.17s`, down from the previous roughly `78-80s` path that also forwarded the final token.
+- Real DeepSeek bounded decode layers `0-7`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `91.64s`, down from the previous about `139.57s` proof.

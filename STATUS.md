@@ -691,3 +691,4 @@ Phase FP8 Runtime Policy: DeepSeek FP8 source status now reports the practical p
 Phase FP8 Acquisition Status: acquisition status now surfaces DeepSeek's ready FP8 paged runtime policy directly, including paired FP8/scale counts and zero blockers.
 Phase FP8 Plain Status: `acquisition_cli --plain` now gives a short DeepSeek operator summary with ready/path/layers/pairs/bytes/blockers.
 Phase FP8 Full MLP Kernel: native full FP8 MLP is available for capped selected-expert payloads, but real DeepSeek timing is only a tiny tie/win, not the speed unlock.
+Phase FP8 Final Token Skip: bounded DeepSeek one-token output now skips the unnecessary final cache-forward, cutting layers 0-3 to about 41s and layers 0-7 to about 92s.
