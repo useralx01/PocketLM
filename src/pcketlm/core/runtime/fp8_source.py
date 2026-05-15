@@ -1513,6 +1513,7 @@ def run_fp8_decode_loop(
                 "ready": bool(prefill.ready),
                 "executed_layers": list(prefill.executed_layers),
                 "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
+                "layer_summaries": [dict(item) for item in prefill.step_summaries],
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
                 },
@@ -1580,6 +1581,7 @@ def run_fp8_decode_loop(
                 "ready": bool(step.ready),
                 "executed_layers": list(step.executed_layers),
                 "tail_top_token_ids": [] if step.tail is None else list(step.tail.top_token_ids),
+                "layer_summaries": [dict(item) for item in step.step_summaries],
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in step.next_kv_caches.items()
                 },

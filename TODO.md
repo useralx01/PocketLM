@@ -141,6 +141,6 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next MoE speed attempt should fuse selected experts in native code rather than rely on Python thread-level expert workers.
 - Full FP8 MLP fusion is now available but did not materially improve DeepSeek. Next speed work should prioritize fused MLA attention and/or a truly batched selected-expert kernel that reduces repeated file reads, not another per-expert MLP wrapper.
 - Next chat path step: move from bounded layer-count text probes to product-facing full-stack attempts once the FP8 layer path is faster enough.
-- Next layer scaling step: test `0-15` after the final-token skip; `0-7` is now about `91.64s` for one output token.
+- Next layer scaling step: run the full `0-61` bounded proof after the next speed cut or when a long diagnostic run is acceptable; `0-31` now takes about `337.49s`.
 - Next product step: expose the bounded FP8 chat-template mode in the app once speed is less painful.
 - Next DeepSeek product step: wire the concise FP8 status summary into the desktop/web model view once that UI is the active work surface.

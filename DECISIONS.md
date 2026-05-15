@@ -1501,3 +1501,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - For normal generation, do not forward the final generated token when no next token is requested. The token has already been selected by the previous tail. This preserves output correctness and removes a large wasted final step.
 - Keep `PCKETLM_FP8_PREPARE_FINAL_CACHE=1` as the diagnostic escape hatch when the operator explicitly wants the final token committed into KV cache for a follow-up measurement.
 - Keep FP8 attention weight caching opt-in. It can produce hits, but warm DeepSeek measurements showed OS/file cache effects dominate and the Python tensor cache can add memory pressure.
+
+## Phase FP8 Layer Scaling 32
+- Keep per-layer timing summaries in decode-loop output. Long DeepSeek probes need this visibility because wall time is now spread across many working layers.
+- Do not call the runtime interactive yet. The 32-layer proof is correct, but around `337s` for one bounded token means full 62-layer chat is still too slow for normal use.

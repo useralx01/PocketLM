@@ -629,3 +629,7 @@
 - Removed the unnecessary final generated-token forward from bounded FP8 decode when no next token is requested.
 - Added an opt-in final-cache preparation switch for diagnostics.
 - Verified real DeepSeek 4-layer and 8-layer probes are much faster with the same generated tokens and no blockers.
+
+## Phase FP8 Layer Scaling 32
+- Added per-layer decode-loop timing summaries.
+- Verified real DeepSeek layers `0-15` and `0-31` run with clean caches and no blockers.

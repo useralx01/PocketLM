@@ -344,6 +344,7 @@ def test_run_fp8_decode_loop_generates_from_prompt_tail(tmp_path: Path, monkeypa
     assert result.positions_completed == 3
     assert result.step_summaries[-1]["cache_sequence_lengths"] == {}
     assert result.step_summaries[-1]["skipped_final_cache_forward"] is True
+    assert "layer_summaries" in result.step_summaries[0]
     assert "attention_weight_cache" in result.to_dict()
 
 

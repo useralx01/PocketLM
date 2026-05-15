@@ -5942,3 +5942,9 @@ Result: 297 passed in 21.83s
 - Added FP8 attention-weight cache telemetry and left the cache opt-in (`PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB`) because warm real DeepSeek timing did not justify a default memory cache.
 - Real DeepSeek bounded decode layers `0-3`, prompt `[0,1]`, `max_new=1`: generated `[76394]` with clean caches in about `41.17s`, down from the previous roughly `78-80s` path that also forwarded the final token.
 - Real DeepSeek bounded decode layers `0-7`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `91.64s`, down from the previous about `139.57s` proof.
+
+## Phase FP8 Layer Scaling 32 / Evidence
+- Added nested `layer_summaries` to FP8 decode-loop status so long DeepSeek probes report per-layer timings.
+- Real DeepSeek bounded decode layers `0-15`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `172.02s`.
+- Real DeepSeek bounded decode layers `0-31`, prompt `[0,1]`, `max_new=1`: generated `[0]` with clean caches in about `337.49s`.
+- Layer timings show dense layers `0-2` around `7s` each and MoE layers mostly around `9-11s` each for the 2-token prompt prefill. The remaining bottleneck is broad per-layer FP8 attention/MoE execution, not a single failing layer.
