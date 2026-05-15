@@ -5982,3 +5982,8 @@ Result: 297 passed in 21.83s
 - Real DeepSeek routed expert packs dominate the artifact: `15,104` routed expert units, `665,345,458,176` bytes total, `44,050,944` bytes per routed expert pack.
 - Real DeepSeek other key pack rows: attention `62` packs / `11,603,620,416` bytes, shared expert `59` packs / `2,599,005,696` bytes, router `59` packs / `216,591,360` bytes, lm_head `1,853,358,080` bytes.
 - This confirms the next implementation target: build the lossless FP8 pack writer/reader so routed experts can be read as local contiguous expert units instead of scattered source tensors.
+
+## Phase FP8 Lossless Pack / Setup
+- Branch: phase-fp8-lossless-pack from current FP8 planner/runtime branch commit c0cd47c.
+- D drive check: 1203.99 GiB free, enough for the roughly 700 GiB full DeepSeek FP8 pack output.
+

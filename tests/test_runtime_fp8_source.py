@@ -419,6 +419,37 @@ def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatc
     assert second.loaded_weight_bytes == 0
 
 
+def test_run_fp8_decode_loop_uses_pack_when_available(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+
+    packed = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+
+    assert packed.ready is True
+    assert packed.fp8_pack["available"] is True
+    assert packed.fp8_pack["pack_files_open"] > 0
+    assert packed.fp8_pack["sequential_reads"] > 0
+    assert packed.fp8_pack["scattered_reads"] == 0
+
+    clear_fp8_pack_readers()
+    monkeypatch.setenv("PCKETLM_DISABLE_FP8_PACK", "1")
+    scattered = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+
+    assert scattered.ready is True
+    assert scattered.fp8_pack["available"] is False
+    assert scattered.fp8_pack["scattered_reads"] > 0
+
+
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     from pcketlm.core import storage
 
