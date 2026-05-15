@@ -136,6 +136,15 @@ def pack_model_dir_to_fp8(
                 _finalize_pack(output_dir, next_pack_index, pack_file)
                 manifest["pack_files"].append(_pack_file_record(output_dir, next_pack_index))
                 _write_manifest(manifest_path, manifest)
+                _write_state(
+                    state_path,
+                    {
+                        **_state_base(model_id, model_dir, output_dir, plan, manifest, len(tasks), started),
+                        "status": "running",
+                        "manifest_path": str(manifest_path),
+                        "updated_at": _now(),
+                    },
+                )
                 finalized_any = True
                 next_pack_index += 1
                 pack_file = _open_tmp_pack(output_dir, next_pack_index)
