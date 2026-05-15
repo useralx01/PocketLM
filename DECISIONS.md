@@ -1511,3 +1511,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Do not present this as usable chat yet. The full proof takes about `664s` for one bounded output token on this machine.
 - The next speed work must attack broad per-layer cost: batched selected-expert MoE execution and fused MLA attention/projection work are higher value than more cache toggles or more layer-scaling proof.
 - Keep Q4 conversion as not recommended for DeepSeek FP8 source quality unless the user explicitly chooses the lossy path; the honest path remains native FP8 plus paging/fusion.
+
+## Phase FP8 Tail Timing
+- Keep timing fields in normal FP8 summaries. They are low overhead and stop long DeepSeek probes from hiding whether time went to attention, FFN/MoE, or the tail.
+- Use `8192` lm_head rows per chunk by default. It reduces chunk overhead while keeping each BF16 lm_head chunk modest enough for the current 16 GB machine.
+- Native lm_head top-k is default again after the wider chunk change. Keep `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` as the fallback if a machine or DLL path regresses.
+- The full-chat blocker is still the layer stack, not only the tail: the 4-layer proof still spends most time inside attention/FFN, and the 62-layer proof is dominated by repeating that cost across all layers.

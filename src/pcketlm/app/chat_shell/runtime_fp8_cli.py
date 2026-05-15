@@ -297,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             "executed_layers": list(result.executed_layers),
             "hidden_shape": list(result.hidden_shape),
             "tail_top_token_ids": [] if result.tail is None else list(result.tail.top_token_ids),
+            "tail_elapsed_seconds": float(result.tail_elapsed_seconds),
             "cache_sequence_lengths": {
                 str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()
             },

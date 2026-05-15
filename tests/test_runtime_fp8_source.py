@@ -61,6 +61,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
     assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
+    assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:
@@ -317,6 +318,9 @@ def test_run_fp8_single_token_forward_carries_kv_cache(tmp_path: Path, monkeypat
     assert result.hidden_shape == [1, 1, 4]
     assert result.step_summaries[0]["ffn_type"] == "dense"
     assert result.step_summaries[0]["cache_sequence_length"] == 1
+    assert result.step_summaries[0]["attention_elapsed_seconds"] >= 0.0
+    assert result.step_summaries[0]["ffn_elapsed_seconds"] >= 0.0
+    assert result.step_summaries[0]["total_elapsed_seconds"] >= 0.0
 
     next_result = run_fp8_single_token_forward(
         model_id,
@@ -345,6 +349,7 @@ def test_run_fp8_decode_loop_generates_from_prompt_tail(tmp_path: Path, monkeypa
     assert result.step_summaries[-1]["cache_sequence_lengths"] == {}
     assert result.step_summaries[-1]["skipped_final_cache_forward"] is True
     assert "layer_summaries" in result.step_summaries[0]
+    assert "tail_elapsed_seconds" in result.step_summaries[0]
     assert "attention_weight_cache" in result.to_dict()
 
 
@@ -373,6 +378,10 @@ def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monk
     assert result.output_tensor is not None
     assert result.hidden_shape == [1, 2, 4]
     assert result.next_kv_caches[0][0].shape[1] == 2
+    assert result.step_summaries[0]["attention_elapsed_seconds"] >= 0.0
+    assert result.step_summaries[0]["ffn_elapsed_seconds"] >= 0.0
+    assert result.step_summaries[0]["total_elapsed_seconds"] >= 0.0
+    assert result.tail_elapsed_seconds == 0.0
 
 
 def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatch) -> None:

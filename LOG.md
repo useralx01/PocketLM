@@ -5957,3 +5957,11 @@ Result: 297 passed in 21.83s
 - Final top token ids were `[0, 261, 223, 65, 18]` with logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
 - Timing: prompt prefill elapsed about `664.12s`; final generated-token cache-forward was skipped as intended, total runtime about `664.12s` with shell wall time about `668.1s`.
 - This is a correctness win: the full DeepSeek FP8 stack is runnable from disk with selected experts and no Q4 re-quantization. It is also a speed loss for normal chat right now: one bounded output token takes about `11 minutes`, so the next work must reduce per-layer MoE/attention cost rather than prove more layer counts.
+
+## Phase FP8 Tail Timing / Evidence
+- Added per-layer `attention_elapsed_seconds`, `ffn_elapsed_seconds`, and `total_elapsed_seconds` to FP8 block summaries, plus `tail_elapsed_seconds` for prompt/decode summaries.
+- Real DeepSeek bounded decode layers `0-3`, prompt `[0,1]`, `max_new=1` stayed ready and generated `[76394]` with clean caches.
+- The new timing split showed the 4-layer probe spent about `33-34s` in the layer stack and about `17s` in the final `lm_head` tail on the cold-ish external-disk run.
+- Widened the default `lm_head` tail chunk from `2048` rows to `8192` rows and exposed `PCKETLM_FP8_LM_HEAD_CHUNK_ROWS` for overrides.
+- Promoted native lm_head top-k to default with `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` as the fallback switch. After the wider chunk change, native top-k was a small real DeepSeek tail win instead of the earlier rejected path.
+- Direct real DeepSeek tail smoke now reports `chunk_rows=8192`, `chunk_count=16`, native top-k enabled, ready true, and about `2.06s` on a warm file-cache run.

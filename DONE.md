@@ -638,3 +638,8 @@
 - Verified real DeepSeek layers `0-61` run from the external FP8 source with clean caches and no blockers.
 - Generated one bounded token from prompt `[0, 1]` through the full available stack.
 - Classified the current path as correctness-complete but not interactive because the full proof took about `664s`.
+
+## Phase FP8 Tail Timing
+- Added block-level attention/FFN timing and prompt/decode tail timing to FP8 summaries.
+- Defaulted the FP8 lm_head tail to wider `8192` row chunks.
+- Promoted native lm_head top-k to default with a disable switch after the wider chunks made it a small real DeepSeek win.

@@ -314,6 +314,9 @@ class FP8BlockResult:
     dense_mlp: FP8DenseMLPResult | None = None
     output_tensor: torch.Tensor | None = None
     next_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    attention_elapsed_seconds: float = 0.0
+    ffn_elapsed_seconds: float = 0.0
+    total_elapsed_seconds: float = 0.0
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -328,6 +331,9 @@ class FP8BlockResult:
             "dense_mlp": None if self.dense_mlp is None else self.dense_mlp.to_dict(),
             "output_materialized": self.output_tensor is not None,
             "cache_sequence_length": 0 if self.next_kv_cache is None else int(self.next_kv_cache[0].shape[1]),
+            "attention_elapsed_seconds": float(self.attention_elapsed_seconds),
+            "ffn_elapsed_seconds": float(self.ffn_elapsed_seconds),
+            "total_elapsed_seconds": float(self.total_elapsed_seconds),
             "blockers": list(self.blockers),
             "ready": self.ready,
         }
@@ -398,6 +404,7 @@ class FP8TokenForwardResult:
     embedding: FP8TokenEmbeddingResult | None = None
     tail: FP8DecodeTailResult | None = None
     step_summaries: list[dict] = field(default_factory=list)
+    tail_elapsed_seconds: float = 0.0
     output_tensor: torch.Tensor | None = None
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
@@ -414,6 +421,7 @@ class FP8TokenForwardResult:
             "embedding": None if self.embedding is None else self.embedding.to_dict(),
             "tail": None if self.tail is None else self.tail.to_dict(),
             "step_summaries": [dict(item) for item in self.step_summaries],
+            "tail_elapsed_seconds": float(self.tail_elapsed_seconds),
             "output_materialized": self.output_tensor is not None,
             "cache_sequence_lengths": {
                 str(key): int(value[0].shape[1]) for key, value in self.next_kv_caches.items()
@@ -475,6 +483,7 @@ class FP8PromptPrefillResult:
     output_tensor: torch.Tensor | None = None
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     step_summaries: list[dict] = field(default_factory=list)
+    tail_elapsed_seconds: float = 0.0
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
 
@@ -514,6 +523,7 @@ def fp8_source_status(model_id: str) -> dict:
             "attention_weight_cache_max_bytes": _fp8_attention_weight_cache_max_bytes(),
             "streamed_attention": _streamed_fp8_attention_enabled(),
             "native_lm_head_topk": _native_lm_head_topk_enabled(),
+            "lm_head_chunk_rows": _fp8_lm_head_chunk_rows(),
             "moe_expert_workers": _fp8_moe_expert_workers(),
         },
         "fp8_weight_count": catalog.fp8_weight_count,
@@ -1104,6 +1114,9 @@ def run_fp8_single_token_block(
     previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> FP8BlockResult:
     """Run one DeepSeek block for a single token using FP8 attention and FP8 MoE."""
+    block_start = time.perf_counter()
+    attention_elapsed = 0.0
+    ffn_elapsed = 0.0
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
     config = _load_deepseek_config(model_id)
     input_norm = _load_regular_tensor(model_id, f"model.layers.{int(layer_index)}.input_layernorm.weight")
@@ -1119,6 +1132,7 @@ def run_fp8_single_token_block(
         blockers.append("Post-attention layer norm did not materialize.")
     if not blockers and input_norm[0] is not None and post_norm[0] is not None:
         normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0].float(), float(config["rms_norm_eps"]))
+        attention_start = time.perf_counter()
         attention = run_fp8_single_token_attention(
             model_id,
             layer_index,
@@ -1127,10 +1141,12 @@ def run_fp8_single_token_block(
             start_pos=int(start_pos),
             previous_kv_cache=previous_kv_cache,
         )
+        attention_elapsed = time.perf_counter() - attention_start
         blockers.extend(attention.blockers)
         if attention.output_tensor is not None:
             after_attention = hidden_3d.to(dtype=dtype) + attention.output_tensor
             ffn_input = _rms_norm_any(after_attention, post_norm[0].float(), float(config["rms_norm_eps"]))
+            ffn_start = time.perf_counter()
             if int(layer_index) < int(config["first_k_dense_replace"]):
                 dense_mlp = run_fp8_dense_mlp(model_id, layer_index, ffn_input, dtype=dtype)
                 blockers.extend(dense_mlp.blockers)
@@ -1141,6 +1157,7 @@ def run_fp8_single_token_block(
                 blockers.extend(moe.blockers)
                 if moe.output_tensor is not None and not blockers:
                     output = (after_attention + moe.output_tensor).contiguous()
+            ffn_elapsed = time.perf_counter() - ffn_start
 
     return FP8BlockResult(
         model_id=model_id,
@@ -1152,6 +1169,9 @@ def run_fp8_single_token_block(
         dense_mlp=dense_mlp,
         output_tensor=output,
         next_kv_cache=None if attention is None else attention.kv_cache,
+        attention_elapsed_seconds=float(attention_elapsed),
+        ffn_elapsed_seconds=float(ffn_elapsed),
+        total_elapsed_seconds=float(time.perf_counter() - block_start),
         blockers=blockers,
         ready=not blockers and output is not None,
     )
@@ -1162,7 +1182,7 @@ def run_fp8_decode_tail_topk(
     hidden: torch.Tensor,
     *,
     top_k: int = 5,
-    chunk_rows: int = 2048,
+    chunk_rows: int | None = None,
 ) -> FP8DecodeTailResult:
     """Run final norm and stream lm_head chunks to get top-k logits."""
     norm_tensor, blockers = _load_regular_tensor(model_id, "model.norm.weight")
@@ -1191,7 +1211,7 @@ def run_fp8_decode_tail_topk(
             )
         else:
             keep_k = max(1, min(int(top_k), vocab_size))
-            rows_per_chunk = max(1, int(chunk_rows))
+            rows_per_chunk = max(1, int(_fp8_lm_head_chunk_rows() if chunk_rows is None else chunk_rows))
             for start in range(0, vocab_size, rows_per_chunk):
                 end = min(vocab_size, start + rows_per_chunk)
                 weight = _read_tensor_rows(lm_head_entry, start, end)
@@ -1229,7 +1249,7 @@ def run_fp8_decode_tail_topk(
         input_shape=[int(value) for value in hidden.shape],
         top_token_ids=token_ids,
         top_logits=logits,
-        chunk_rows=int(chunk_rows),
+        chunk_rows=int(rows_per_chunk if "rows_per_chunk" in locals() else (_fp8_lm_head_chunk_rows() if chunk_rows is None else chunk_rows)),
         chunk_count=int(chunk_count),
         loaded_lm_head_bytes=int(loaded_bytes),
         blockers=blockers,
@@ -1287,6 +1307,9 @@ def _run_fp8_prefill_block(
     *,
     dtype: torch.dtype = torch.bfloat16,
 ) -> FP8BlockResult:
+    block_start = time.perf_counter()
+    attention_elapsed = 0.0
+    ffn_elapsed = 0.0
     hidden_3d = hidden.reshape(1, -1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
     config = _load_deepseek_config(model_id)
     input_norm = _load_regular_tensor(model_id, f"model.layers.{int(layer_index)}.input_layernorm.weight")
@@ -1299,6 +1322,7 @@ def _run_fp8_prefill_block(
     next_cache = None
     if not blockers and input_norm[0] is not None and post_norm[0] is not None:
         normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0], float(config["rms_norm_eps"]))
+        attention_start = time.perf_counter()
         attention = _run_fp8_single_token_attention_materialized(
             model_id,
             layer_index,
@@ -1307,10 +1331,12 @@ def _run_fp8_prefill_block(
             start_pos=0,
             previous_kv_cache=None,
         )
+        attention_elapsed = time.perf_counter() - attention_start
         blockers.extend(attention.blockers)
         if attention.output_tensor is not None:
             hidden_after_attn = hidden_3d.to(dtype=dtype) + attention.output_tensor.to(dtype=dtype)
             post_normed = _rms_norm_any(hidden_after_attn, post_norm[0], float(config["rms_norm_eps"]))
+            ffn_start = time.perf_counter()
             if int(layer_index) < int(config["first_k_dense_replace"]):
                 dense_mlp = run_fp8_dense_mlp(model_id, layer_index, post_normed, dtype=dtype)
                 blockers.extend(dense_mlp.blockers)
@@ -1321,6 +1347,7 @@ def _run_fp8_prefill_block(
                 blockers.extend(moe.blockers)
                 if moe.output_tensor is not None:
                     output = hidden_after_attn + moe.output_tensor.to(dtype=dtype)
+            ffn_elapsed = time.perf_counter() - ffn_start
             next_cache = attention.kv_cache
 
     return FP8BlockResult(
@@ -1333,6 +1360,9 @@ def _run_fp8_prefill_block(
         dense_mlp=dense_mlp,
         output_tensor=None if output is None else output.contiguous(),
         next_kv_cache=next_cache,
+        attention_elapsed_seconds=float(attention_elapsed),
+        ffn_elapsed_seconds=float(ffn_elapsed),
+        total_elapsed_seconds=float(time.perf_counter() - block_start),
         blockers=blockers,
         ready=not blockers and output is not None,
     )
@@ -1354,6 +1384,7 @@ def run_fp8_prompt_prefill(
     summaries: list[dict] = []
     caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     tail = None
+    tail_elapsed = 0.0
     if not prompt:
         blockers.append("At least one token id is required.")
     if hidden is None:
@@ -1371,6 +1402,9 @@ def run_fp8_prompt_prefill(
                     "ffn_type": "dense" if step.dense_mlp is not None else "moe",
                     "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
                     "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
+                    "attention_elapsed_seconds": float(step.attention_elapsed_seconds),
+                    "ffn_elapsed_seconds": float(step.ffn_elapsed_seconds),
+                    "total_elapsed_seconds": float(step.total_elapsed_seconds),
                     "elapsed_seconds": float(time.perf_counter() - layer_start),
                     "blockers": list(step.blockers),
                 }
@@ -1383,7 +1417,9 @@ def run_fp8_prompt_prefill(
                 caches[int(layer_index)] = step.next_kv_cache
             executed_layers.append(int(layer_index))
         if include_tail and not blockers and hidden is not None:
+            tail_start = time.perf_counter()
             tail = run_fp8_decode_tail_topk(model_id, hidden[:, -1:, :])
+            tail_elapsed = time.perf_counter() - tail_start
             blockers.extend(tail.blockers)
 
     return FP8PromptPrefillResult(
@@ -1397,6 +1433,7 @@ def run_fp8_prompt_prefill(
         output_tensor=hidden,
         next_kv_caches=caches,
         step_summaries=summaries,
+        tail_elapsed_seconds=float(tail_elapsed),
         blockers=blockers,
         ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
     )
@@ -1421,6 +1458,7 @@ def run_fp8_single_token_forward(
     step_summaries: list[dict] = []
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     tail = None
+    tail_elapsed = 0.0
     if hidden is None:
         blockers.append("Token embedding did not materialize.")
 
@@ -1442,6 +1480,9 @@ def run_fp8_single_token_forward(
                     "ffn_type": "dense" if step.dense_mlp is not None else "moe",
                     "selected_experts": [] if step.moe is None else list(step.moe.selected_experts),
                     "cache_sequence_length": 0 if step.next_kv_cache is None else int(step.next_kv_cache[0].shape[1]),
+                    "attention_elapsed_seconds": float(step.attention_elapsed_seconds),
+                    "ffn_elapsed_seconds": float(step.ffn_elapsed_seconds),
+                    "total_elapsed_seconds": float(step.total_elapsed_seconds),
                     "blockers": list(step.blockers),
                 }
             )
@@ -1453,7 +1494,9 @@ def run_fp8_single_token_forward(
                 next_kv_caches[int(layer_index)] = step.next_kv_cache
             executed_layers.append(int(layer_index))
         if include_tail and not blockers and hidden is not None:
+            tail_start = time.perf_counter()
             tail = run_fp8_decode_tail_topk(model_id, hidden)
+            tail_elapsed = time.perf_counter() - tail_start
             blockers.extend(tail.blockers)
 
     return FP8TokenForwardResult(
@@ -1466,6 +1509,7 @@ def run_fp8_single_token_forward(
         embedding=embedding,
         tail=tail,
         step_summaries=step_summaries,
+        tail_elapsed_seconds=float(tail_elapsed),
         output_tensor=hidden,
         next_kv_caches=next_kv_caches,
         blockers=blockers,
@@ -1514,6 +1558,7 @@ def run_fp8_decode_loop(
                 "executed_layers": list(prefill.executed_layers),
                 "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
                 "layer_summaries": [dict(item) for item in prefill.step_summaries],
+                "tail_elapsed_seconds": float(prefill.tail_elapsed_seconds),
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
                 },
@@ -1582,6 +1627,7 @@ def run_fp8_decode_loop(
                 "executed_layers": list(step.executed_layers),
                 "tail_top_token_ids": [] if step.tail is None else list(step.tail.top_token_ids),
                 "layer_summaries": [dict(item) for item in step.step_summaries],
+                "tail_elapsed_seconds": float(step.tail_elapsed_seconds),
                 "cache_sequence_lengths": {
                     str(key): int(value[0].shape[1]) for key, value in step.next_kv_caches.items()
                 },
@@ -2151,7 +2197,19 @@ def _fp8_attention_weight_cache_max_bytes() -> int:
 
 
 def _native_lm_head_topk_enabled() -> bool:
-    return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return True
+
+
+def _fp8_lm_head_chunk_rows() -> int:
+    raw = os.environ.get("PCKETLM_FP8_LM_HEAD_CHUNK_ROWS", "").strip()
+    if not raw:
+        return 8192
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 8192
 
 
 def _fp8_moe_expert_workers() -> int:

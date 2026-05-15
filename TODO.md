@@ -144,6 +144,6 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next DeepSeek speed step: full `0-61` bounded proof passes, so stop spending time on layer-count proof and reduce broad per-layer cost instead.
 - Build a batched selected-expert FP8 MoE path that reduces per-expert Python/native crossings and repeated payload handling across the routed expert set.
 - Build or prove out a fused FP8 MLA attention/projection path; simple independent streamed attention exists but is not a default win.
-- Add timing detail only where it directly drives one of those speed cuts, such as separating per-layer attention, routed MoE, shared expert, and tail time in long probes.
+- Add the next timing detail only where it directly drives one of those speed cuts, such as separating routed MoE from shared expert cost.
 - Next product step: expose the bounded FP8 chat-template mode in the app once speed is less painful.
 - Next DeepSeek product step: wire the concise FP8 status summary into the desktop/web model view once that UI is the active work surface.
