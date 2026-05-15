@@ -142,7 +142,10 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Full FP8 MLP fusion is now available but did not materially improve DeepSeek. Next speed work should prioritize fused MLA attention and/or a truly batched selected-expert kernel that reduces repeated file reads, not another per-expert MLP wrapper.
 - Next chat path step: move from bounded layer-count text probes to product-facing full-stack attempts once the FP8 layer path is faster enough.
 - Next DeepSeek speed step: full `0-61` bounded proof passes, so stop spending time on layer-count proof and reduce broad per-layer cost instead.
-- Build a packed/reordered FP8 artifact path for DeepSeek routed experts and attention weights so cold external-disk reads are not the normal execution path.
+- Build the resumable lossless FP8 pack writer for the planned layout: persistent region, attention per layer, router per MoE layer, routed expert per layer/expert, shared expert per layer.
+- Build the FP8 pack reader and route `run_fp8_moe()` expert payload reads through packed expert units when the artifact is ready.
+- Add a conversion/progress state file for FP8 packing under `state/` like downloads and Q4 conversion.
+- Benchmark DeepSeek layer 3 and bounded layers 0-3 from the FP8 pack before attempting another full 62-layer timing run.
 - Build a batched selected-expert FP8 MoE path only after payload access is improved; current timing shows routed expert payload time, not shared expert math, is the first MoE target.
 - Build or prove out a fused FP8 MLA attention/projection path; simple independent streamed attention exists but is not a default win.
 - Add the next timing detail only where it directly drives one of those speed cuts, such as separating FP8 payload read time from native expert math time.

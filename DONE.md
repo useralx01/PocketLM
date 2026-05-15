@@ -648,3 +648,8 @@
 - Added router/routed/shared MoE timing fields.
 - Wrapped FP8 decode-loop calls in request-scoped safetensors handles.
 - Verified real DeepSeek MoE and bounded 4-layer decode still pass; routed expert payload time is the next MoE bottleneck.
+
+## Phase FP8 Pack Planner
+- Added lossless FP8 packed artifact planning.
+- Exposed the FP8 pack plan in acquisition state.
+- Verified the real DeepSeek V3 pack plan is ready and identifies routed expert packs as the dominant speed target.

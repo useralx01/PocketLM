@@ -90,6 +90,8 @@ def test_build_acquisition_snapshot_fp8_recommends_paged_runtime_not_q4(tmp_path
     assert snapshot.compact_q4_plan is not None
     assert snapshot.compact_q4_plan["fp8_native"] is True
     assert snapshot.compact_q4_plan["ready_for_conversion"] is False
+    assert snapshot.fp8_pack_plan is not None
+    assert snapshot.fp8_pack_plan["ready_for_pack"] is True
     assert "FP8 paged runtime planning" in snapshot.recommended_next_step
 
 
@@ -141,6 +143,8 @@ def test_build_acquisition_snapshot_fp8_includes_runtime_status(
     assert snapshot.fp8_runtime_status["ready"] is True
     assert snapshot.fp8_runtime_status["runtime_policy"]["weight_residency"] == "paged_fp8_source"
     assert snapshot.fp8_runtime_status["runtime_policy"]["layer_count"] == 1
+    assert snapshot.fp8_pack_plan is not None
+    assert snapshot.fp8_pack_plan["lossless"] is True
     assert "Use the FP8 paged runtime path" in snapshot.recommended_next_step
 
 

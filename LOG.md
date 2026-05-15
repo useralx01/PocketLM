@@ -5973,3 +5973,12 @@ Result: 297 passed in 21.83s
 - Real DeepSeek bounded decode layers `0-3`, prompt `[0,1]`, `max_new=1` stayed ready and generated `[76394]`. The MoE layer showed about `4.23s` routed expert time and about `0.37s` shared expert time inside about `5.30s` FFN time.
 - Rechecked `PCKETLM_FP8_MOE_EXPERT_WORKERS=4`; the full 4-layer probe remained correct and was only a small/noisy wall-time improvement, with routed expert time still around `4.17s`, so it remains opt-in.
 - Conclusion: the next true MoE speed cut is not the shared expert and not Python thread-level workers. It needs lower-latency routed expert payload access, a repacked FP8 artifact layout, or a native selected-expert path that reduces external-disk reads and per-expert payload handling.
+
+## Phase FP8 Pack Planner / Evidence
+- Added a header-only lossless FP8 pack planner and `tools/plan_fp8_pack.py`.
+- Acquisition snapshots for FP8-native sources now include `fp8_pack_plan` and recommend a lossless FP8 packed artifact for speed instead of direct Q4 conversion.
+- Synthetic tests cover routed expert, attention, router, shared expert, dense MLP, lm_head, missing-shard, and JSON-write planning.
+- Real DeepSeek V3 plan from `D:\PocketLM\sources\deepseek-v3` is ready: `91,991` tensors, `163` shards, `688,574,839,360` bytes, `15,350` pack units.
+- Real DeepSeek routed expert packs dominate the artifact: `15,104` routed expert units, `665,345,458,176` bytes total, `44,050,944` bytes per routed expert pack.
+- Real DeepSeek other key pack rows: attention `62` packs / `11,603,620,416` bytes, shared expert `59` packs / `2,599,005,696` bytes, router `59` packs / `216,591,360` bytes, lm_head `1,853,358,080` bytes.
+- This confirms the next implementation target: build the lossless FP8 pack writer/reader so routed experts can be read as local contiguous expert units instead of scattered source tensors.

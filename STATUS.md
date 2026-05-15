@@ -696,3 +696,4 @@ Phase FP8 Layer Scaling 32: bounded DeepSeek now passes layers 0-31 with clean c
 Phase FP8 Full Stack Proof: bounded DeepSeek now passes the full catalog stack, layers 0-61, from the external FP8 source with no blockers in about 664s; this is correctness-complete but still far too slow for interactive chat.
 Phase FP8 Tail Timing: FP8 summaries now expose attention/FFN/tail timing; lm_head tail uses 8192-row chunks and native top-k by default, but the main DeepSeek speed blocker remains per-layer attention and MoE cost.
 Phase FP8 MoE Timing: MoE summaries now split router, routed expert, and shared expert time; real DeepSeek shows routed expert payload time is the next MoE speed target, while worker threads remain opt-in.
+Phase FP8 Pack Planner: lossless FP8 pack planning is implemented and real DeepSeek V3 is ready for a `688.57 GB` packed artifact plan with `15,104` routed expert units; next is the resumable writer/reader.

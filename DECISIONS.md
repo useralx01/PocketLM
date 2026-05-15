@@ -1522,3 +1522,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep MoE routed/shared timing visible in layer summaries. The routed expert path is the meaningful MoE target; shared expert time is small on the current real DeepSeek probe.
 - Keep `PCKETLM_FP8_MOE_EXPERT_WORKERS` opt-in. Four workers did not reduce routed expert time enough to justify default oversubscription risk.
 - Treat external-disk payload layout as a real speed factor. Cold routed expert time is much worse than warm routed expert time, so an FP8 packed/reordered artifact is likely more valuable than another small Python scheduling tweak.
+
+## Phase FP8 Pack Planner
+- The FP8 packed artifact must be lossless: keep source FP8 values and fp32 scales, do not Q4 re-quantize DeepSeek by default.
+- Pack routed experts as layer/expert units containing gate/up/down FP8 weights and scales. The real DeepSeek plan shows each routed expert unit is about `44 MB`, which matches the observed routed payload bottleneck.
+- Keep the planner header-only. The writer phase can be long-running and resumable later, but planning must stay cheap and safe to run against the huge source.
+- Expose the plan through acquisition so the product guidance says the real next speed path is FP8 packed artifact work, not more layer-count proof.
