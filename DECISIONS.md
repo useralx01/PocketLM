@@ -1528,3 +1528,11 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Pack routed experts as layer/expert units containing gate/up/down FP8 weights and scales. The real DeepSeek plan shows each routed expert unit is about `44 MB`, which matches the observed routed payload bottleneck.
 - Keep the planner header-only. The writer phase can be long-running and resumable later, but planning must stay cheap and safe to run against the huge source.
 - Expose the plan through acquisition so the product guidance says the real next speed path is FP8 packed artifact work, not more layer-count proof.
+
+## Phase FP8 Lossless Pack
+- Use JSON for `pack_manifest.json`. It is large but debuggable, and the reader loads it once per session.
+- Keep pack chunk size at the writer default `16 GiB`. Windows handled the completed DeepSeek pack with `41` pack files, so no smaller chunk fallback was needed for writing.
+- Keep the mmap API in `FP8PackReader` for zero-copy byte-identity checks and direct tensor views, but use exact native file reads from pack offsets for production tensor materialization. On Windows/PyTorch this avoided non-writable-buffer issues and gave better runtime stability.
+- Add packed span reads for full selected-expert MLP units. Gate/up/down FP8 weights and their scale companions are adjacent in the pack, so reading the whole expert span reduced full-stack pack reads from `6,897` to `2,102`.
+- Do not keep native lm_head top-k enabled by default in the FP8 source runtime. A full-stack hidden state hit a Windows access-violation path; the safe default is the PyTorch top-k tail unless `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1` is explicitly set for diagnostics.
+- Treat the first lossless pack as a correctness and stability win, not the final speed win. The measured full-stack delta was `10.52%`, below the `50%` gate, so the next speed phase needs fused selected-expert/attention compute instead of more file-layout-only work.

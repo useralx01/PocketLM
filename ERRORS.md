@@ -344,3 +344,18 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: Windows Application Control blocked the existing `src\pcketlm\native\fp16_kv_cache.dll` with `[WinError 4551]`. `Unblock-File` did not clear the policy block.
 - Fix state: no native source or DLL rebuild was performed in the planner-only phase. A later full-suite rerun in the FP8 runtime phase passed with `402` tests, so the local policy block is no longer active in this shell.
 
+## Phase FP8 Lossless Pack / native lm_head crash
+- Symptom: bounded DeepSeek decode with the native lm_head top-k tail exited with Windows access-violation code `-1073741819` after deeper hidden states.
+- Root cause: the native tail path is not stable for all full-stack FP8 hidden states on this machine.
+- Fix: made native lm_head top-k opt-in through `PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK=1`; the default FP8 tail now uses the stable PyTorch path.
+
+## Phase FP8 Lossless Pack / scattered paging pressure
+- Symptom: disabled-pack comparison hit `The paging file is too small for this operation to complete. (os error 1455)` while loading small regular tensors through the broad tensor loader.
+- Root cause: the scattered fallback could route regular tensors through safetensors mapping behavior that creates too much Windows paging pressure during a long DeepSeek run.
+- Fix: regular FP8 runtime tensors now use catalog byte ranges and exact reads when an entry is known, matching the pack path's bounded read behavior.
+
+## Phase FP8 Lossless Pack / Gate B miss
+- Symptom: full DeepSeek pack enabled run was only `10.52%` faster than scattered (`741.916s` vs `829.127s`), below the required `50%` timing delta.
+- Root cause: after exact reads and grouped expert spans, wall time is dominated by broad FP8 layer compute and Python/native per-layer execution, not only random external-disk seeks.
+- Fix state: reduced pack read count from `6,897` to `2,102` with grouped selected-expert reads, but left the phase marked partial because the hard timing gate still failed.
+

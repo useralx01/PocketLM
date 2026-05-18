@@ -24,6 +24,41 @@ def test_pack_writer_preserves_bytes_and_reader_returns_views(tmp_path: Path, mo
     assert reader.telemetry()["sequential_reads"] == 1
 
 
+def test_pack_reader_reports_native_slice_and_span_locations(tmp_path: Path, monkeypatch) -> None:
+    import tools.pack_fp8 as pack_tool
+
+    monkeypatch.setattr(pack_tool, "state_root", lambda: tmp_path / "state")
+    model_dir = _write_pack_fixture(tmp_path)
+    output_dir = model_dir / "artifacts" / "fp8_pack"
+
+    pack_model_dir_to_fp8(model_dir, output_dir, model_id="span-pack-test", pack_bytes=128)
+    reader = FP8PackReader(model_dir)
+
+    slice_location = reader.get_tensor_slice_location(
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        2,
+        3,
+    )
+    span_location = reader.get_tensor_span_location(
+        [
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv",
+        ]
+    )
+    with slice_location.path.open("rb") as handle:
+        handle.seek(slice_location.byte_offset)
+        slice_bytes = handle.read(slice_location.byte_length)
+    with span_location.path.open("rb") as handle:
+        handle.seek(span_location.byte_offset)
+        span_bytes = handle.read(span_location.byte_length)
+
+    assert slice_bytes == b"cde"
+    assert span_bytes == b"abcdefghSCAL"
+    assert span_location.tensor_slices["model.layers.0.mlp.experts.0.gate_proj.weight"] == (0, 8)
+    assert span_location.tensor_slices["model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv"] == (8, 4)
+    assert reader.telemetry()["sequential_reads"] == 2
+
+
 def test_pack_writer_resumes_without_rewriting_finalized_tensors(tmp_path: Path, monkeypatch) -> None:
     import tools.pack_fp8 as pack_tool
 

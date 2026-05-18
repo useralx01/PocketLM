@@ -5987,3 +5987,16 @@ Result: 297 passed in 21.83s
 - Branch: phase-fp8-lossless-pack from current FP8 planner/runtime branch commit c0cd47c.
 - D drive check: 1203.99 GiB free, enough for the roughly 700 GiB full DeepSeek FP8 pack output.
 
+## Phase FP8 Lossless Pack / Evidence
+- Added the resumable FP8 pack writer and packed runtime reader. The writer completed the real DeepSeek V3 source at `D:\PocketLM\sources\deepseek-v3\artifacts\fp8_pack`.
+- Full pack output: `688,574,839,360` bytes across `41` `pack_*.bin` files, plus `pack_manifest.json`.
+- Writer elapsed time: first interrupted/timed-out writer pass about `7,204s`, final resume pass about `22,677s`, total observed wall time about `29,881s` (`8.30h`).
+- Gate A byte identity passed on 5 expert tensors and 5 non-expert tensors. Verified examples included `model.layers.37.mlp.experts.19.down_proj.weight`, `model.layers.29.mlp.experts.157.up_proj.weight`, `model.layers.34.mlp.experts.222.gate_proj.weight`, `model.layers.60.mlp.shared_experts.gate_proj.weight`, `model.layers.51.self_attn.q_b_proj.weight`, and all checked scale companions.
+- Runtime pack routing passed anti-cheat: bounded DeepSeek decode executed all `62` catalog layers (`0-61`) with pack enabled.
+- Gate C output equivalence passed: pack and scattered runs both produced final top token ids `[0, 261, 223, 65, 18]` with logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+- Initial pack timing was not a win: pack enabled `852.119s`, `6,897` sequential reads, `0` scattered reads.
+- After grouped packed expert MLP reads, pack enabled improved to `741.916s`, `2,102` sequential reads, `0` scattered reads.
+- Stabilized scattered fallback by loading regular tensors through exact catalog byte ranges instead of broad safetensors loader mappings. Scattered comparison completed in `829.127s`, `6,897` scattered reads.
+- Gate B failed honestly: grouped pack was `10.52%` faster than scattered, below the required `50%` timing delta. This means the lossless pack is correct and stable, but not yet the claimed I/O speed breakthrough on this machine.
+- Focused pack/runtime tests passed with `24 passed`; full test suite passed with `427 passed`.
+

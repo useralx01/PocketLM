@@ -815,27 +815,25 @@ def run_fp8_router(
     hidden: torch.Tensor,
 ) -> FP8RouterResult:
     """Run DeepSeek V3 compatible sigmoid/grouped top-k routing for one layer."""
-    from pcketlm.core.runtime.tensor_loader import load_tensor_by_name
-
     route_config = _load_deepseek_route_config(model_id)
     router_name = f"model.layers.{int(layer_index)}.mlp.gate.weight"
     bias_name = f"model.layers.{int(layer_index)}.mlp.gate.e_score_correction_bias"
-    router = load_tensor_by_name(model_id, router_name)
-    bias = load_tensor_by_name(model_id, bias_name)
-    blockers = list(router.blockers)
+    router_tensor, router_blockers = _load_regular_tensor(model_id, router_name)
+    raw_bias_tensor, bias_blockers = _load_regular_tensor(model_id, bias_name)
+    blockers = list(router_blockers)
     bias_tensor = None
-    if bias.ready and bias.tensor is not None:
-        bias_tensor = bias.tensor.float()
-    elif bias.blockers and "not present" not in " ".join(bias.blockers):
-        blockers.extend(bias.blockers)
+    if raw_bias_tensor is not None:
+        bias_tensor = raw_bias_tensor.float()
+    elif bias_blockers and "not present" not in " ".join(bias_blockers):
+        blockers.extend(bias_blockers)
 
     weights = None
     indices = None
-    if router.tensor is None:
+    if router_tensor is None:
         blockers.append(f"Router tensor {router_name} did not materialize.")
-    if not blockers and router.tensor is not None:
+    if not blockers and router_tensor is not None:
         flat_hidden = hidden.reshape(-1, hidden.shape[-1]).float()
-        scores = F.linear(flat_hidden, router.tensor.float())
+        scores = F.linear(flat_hidden, router_tensor.float())
         if route_config["scoring_func"] == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
@@ -1760,20 +1758,25 @@ def load_fp8_weight_pair(model_id: str, weight_name: str, *, load_payload: bool 
 
 
 def _read_tensor_as_uint8(entry: TensorCatalogEntry) -> torch.Tensor:
+    packed_tensor = _read_packed_tensor_to_tensor(entry, torch.uint8, tuple(entry.shape))
+    if packed_tensor is not None:
+        return packed_tensor.contiguous()
     packed = _read_packed_tensor(entry)
     if packed is not None:
-        return torch.frombuffer(packed, dtype=torch.uint8).reshape(tuple(entry.shape))
+        return torch.frombuffer(bytearray(packed), dtype=torch.uint8).reshape(tuple(entry.shape)).contiguous()
     raw = _read_tensor_bytes(entry)
     return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(tuple(entry.shape)).contiguous()
 
 
 def _read_scale_tensor(entry: TensorCatalogEntry) -> torch.Tensor:
+    dtype = _torch_dtype_for_scale(entry.dtype)
+    packed_tensor = _read_packed_tensor_to_tensor(entry, dtype, tuple(entry.shape))
+    if packed_tensor is not None:
+        return packed_tensor.clone()
     packed = _read_packed_tensor(entry)
     if packed is not None:
-        dtype = _torch_dtype_for_scale(entry.dtype)
-        return torch.frombuffer(packed, dtype=dtype).reshape(tuple(entry.shape))
+        return torch.frombuffer(bytearray(packed), dtype=dtype).reshape(tuple(entry.shape)).clone()
     raw = _read_tensor_bytes(entry)
-    dtype = _torch_dtype_for_scale(entry.dtype)
     return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(tuple(entry.shape)).clone()
 
 
@@ -1801,6 +1804,49 @@ def _read_packed_tensor(entry: TensorCatalogEntry) -> memoryview | None:
         return None
 
 
+def _read_packed_tensor_slice(entry: TensorCatalogEntry, relative_offset: int, byte_length: int) -> memoryview | None:
+    reader = reader_for_model_dir(entry.shard_path.parent)
+    if reader is None:
+        return None
+    try:
+        return reader.get_tensor_slice_bytes(entry.tensor_name, int(relative_offset), int(byte_length))
+    except (KeyError, ValueError):
+        return None
+
+
+def _read_packed_tensor_to_tensor(
+    entry: TensorCatalogEntry,
+    dtype: torch.dtype,
+    shape: tuple[int, ...],
+    *,
+    relative_offset: int = 0,
+    byte_length: int | None = None,
+) -> torch.Tensor | None:
+    reader = reader_for_model_dir(entry.shard_path.parent)
+    if reader is None:
+        return None
+    shape = tuple(int(value) for value in shape)
+    out = torch.empty(shape, dtype=dtype)
+    expected_nbytes = out.numel() * out.element_size()
+    if byte_length is None:
+        byte_length = expected_nbytes
+    if int(byte_length) != int(expected_nbytes):
+        raise ValueError(f"Packed tensor shape byte count mismatch for {entry.tensor_name}.")
+    if int(byte_length) == 0:
+        return out
+    if native_fp16_loader_available():
+        try:
+            location = reader.get_tensor_slice_location(entry.tensor_name, int(relative_offset), int(byte_length))
+        except (KeyError, ValueError):
+            return None
+        native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, out)
+        return out
+    packed = _read_packed_tensor_slice(entry, int(relative_offset), int(byte_length))
+    if packed is None:
+        return None
+    return torch.frombuffer(bytearray(packed), dtype=dtype).reshape(shape).clone()
+
+
 def _read_tensor_bytes(entry: TensorCatalogEntry) -> bytes:
     packed = _read_packed_tensor(entry)
     if packed is not None:
@@ -1819,9 +1865,15 @@ def _read_tensor_rows(entry: TensorCatalogEntry, start_row: int, end_row: int) -
     row_count = max(0, int(end_row) - int(start_row))
     cols = int(entry.shape[1])
     row_bytes = cols * torch.empty((), dtype=dtype).element_size()
-    packed = _read_packed_tensor(entry)
-    if packed is not None:
-        return torch.frombuffer(packed, dtype=dtype).reshape(tuple(entry.shape))[int(start_row) : int(end_row)]
+    packed_tensor = _read_packed_tensor_to_tensor(
+        entry,
+        dtype,
+        (row_count, cols),
+        relative_offset=int(start_row) * row_bytes,
+        byte_length=row_count * row_bytes,
+    )
+    if packed_tensor is not None:
+        return packed_tensor
     record_scattered_read(entry.shard_path.parent, row_count * row_bytes)
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
     if native_fp16_loader_available():
@@ -1845,9 +1897,15 @@ def _read_fp8_weight_rows(entry: TensorCatalogEntry, start_row: int, end_row: in
     row_count = max(0, int(end_row) - int(start_row))
     cols = int(entry.shape[1])
     row_bytes = cols
-    packed = _read_packed_tensor(entry)
-    if packed is not None:
-        return torch.frombuffer(packed, dtype=torch.uint8).reshape(tuple(entry.shape))[int(start_row) : int(end_row)]
+    packed_tensor = _read_packed_tensor_to_tensor(
+        entry,
+        torch.uint8,
+        (row_count, cols),
+        relative_offset=int(start_row) * row_bytes,
+        byte_length=row_count * row_bytes,
+    )
+    if packed_tensor is not None:
+        return packed_tensor.contiguous()
     record_scattered_read(entry.shard_path.parent, row_count * row_bytes)
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
     if native_fp16_loader_available():
@@ -1869,6 +1927,43 @@ def _read_scale_rows_for_weight_chunk(scale: TensorCatalogEntry, start_row: int,
     scale_start = int(start_row) // 128
     scale_end = (int(end_row) + 127) // 128
     return _read_tensor_rows(scale, scale_start, scale_end).to(dtype=torch.float32)
+
+
+def _read_packed_mlp_full_tensors(
+    gate: TensorCatalogEntry,
+    gate_scale: TensorCatalogEntry,
+    up: TensorCatalogEntry,
+    up_scale: TensorCatalogEntry,
+    down: TensorCatalogEntry,
+    down_scale: TensorCatalogEntry,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if not native_fp16_loader_available():
+        return None
+    reader = reader_for_model_dir(gate.shard_path.parent)
+    if reader is None:
+        return None
+    entries = [gate, gate_scale, up, up_scale, down, down_scale]
+    try:
+        location = reader.get_tensor_span_location([entry.tensor_name for entry in entries])
+    except (KeyError, ValueError):
+        return None
+
+    raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
+    native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, raw)
+
+    def tensor_view(entry: TensorCatalogEntry, dtype: torch.dtype) -> torch.Tensor:
+        relative_offset, byte_length = location.tensor_slices[entry.tensor_name]
+        data = raw[int(relative_offset) : int(relative_offset) + int(byte_length)]
+        return data.view(dtype).reshape(tuple(int(value) for value in entry.shape))
+
+    return (
+        tensor_view(gate, torch.uint8),
+        tensor_view(gate_scale, _torch_dtype_for_scale(gate_scale.dtype)).to(dtype=torch.float32),
+        tensor_view(up, torch.uint8),
+        tensor_view(up_scale, _torch_dtype_for_scale(up_scale.dtype)).to(dtype=torch.float32),
+        tensor_view(down, torch.uint8),
+        tensor_view(down_scale, _torch_dtype_for_scale(down_scale.dtype)).to(dtype=torch.float32),
+    )
 
 
 def _run_fp8_native_mlp_full(
@@ -1917,12 +2012,16 @@ def _run_fp8_native_mlp_full(
         return None, 0, 0, blockers, True
 
     try:
-        gate_rows = _read_fp8_weight_rows(gate, 0, int(gate.shape[0]))
-        up_rows = _read_fp8_weight_rows(up, 0, int(up.shape[0]))
-        down_rows = _read_fp8_weight_rows(down, 0, int(down.shape[0]))
-        gate_scale_rows = _read_scale_rows_for_weight_chunk(gate_scale, 0, int(gate.shape[0]))
-        up_scale_rows = _read_scale_rows_for_weight_chunk(up_scale, 0, int(up.shape[0]))
-        down_scale_rows = _read_scale_rows_for_weight_chunk(down_scale, 0, int(down.shape[0]))
+        packed_mlp = _read_packed_mlp_full_tensors(gate, gate_scale, up, up_scale, down, down_scale)
+        if packed_mlp is None:
+            gate_rows = _read_fp8_weight_rows(gate, 0, int(gate.shape[0]))
+            up_rows = _read_fp8_weight_rows(up, 0, int(up.shape[0]))
+            down_rows = _read_fp8_weight_rows(down, 0, int(down.shape[0]))
+            gate_scale_rows = _read_scale_rows_for_weight_chunk(gate_scale, 0, int(gate.shape[0]))
+            up_scale_rows = _read_scale_rows_for_weight_chunk(up_scale, 0, int(up.shape[0]))
+            down_scale_rows = _read_scale_rows_for_weight_chunk(down_scale, 0, int(down.shape[0]))
+        else:
+            gate_rows, gate_scale_rows, up_rows, up_scale_rows, down_rows, down_scale_rows = packed_mlp
         native_out = fp8_e4m3_block_mlp_f32(
             gate_rows,
             gate_scale_rows,
@@ -2227,15 +2326,18 @@ def _apply_rope_real(x: torch.Tensor, *, start_pos: int, config: dict) -> torch.
 def _load_regular_tensor(model_id: str, tensor_name: str) -> tuple[torch.Tensor | None, list[str]]:
     entry = find_tensor_catalog_entry(model_id, tensor_name)
     if entry is not None:
-        packed = _read_packed_tensor(entry)
-        if packed is not None:
-            dtype = _torch_dtype_for_scale(entry.dtype)
-            return torch.frombuffer(packed, dtype=dtype).reshape(tuple(entry.shape)), []
+        dtype = _torch_dtype_for_scale(entry.dtype)
+        packed_tensor = _read_packed_tensor_to_tensor(entry, dtype, tuple(entry.shape))
+        if packed_tensor is not None:
+            return packed_tensor.clone(), []
+        try:
+            raw = _read_tensor_bytes(entry)
+            return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(tuple(entry.shape)).clone(), []
+        except (OSError, RuntimeError, ValueError) as exc:
+            return None, [f"Failed to load tensor {tensor_name}: {exc}"]
     from pcketlm.core.runtime.tensor_loader import load_tensor_by_name
 
     loaded = load_tensor_by_name(model_id, tensor_name)
-    if entry is not None:
-        record_scattered_read(entry.shard_path.parent, entry.data_nbytes)
     if not loaded.ready or loaded.tensor is None:
         return None, list(loaded.blockers) or [f"Tensor {tensor_name} did not materialize."]
     return loaded.tensor, []
@@ -2289,7 +2391,7 @@ def _fp8_attention_weight_cache_max_bytes() -> int:
 def _native_lm_head_topk_enabled() -> bool:
     if os.environ.get("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False
-    return True
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fp8_lm_head_chunk_rows() -> int:

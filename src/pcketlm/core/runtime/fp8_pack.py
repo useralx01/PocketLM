@@ -24,6 +24,25 @@ class PackedTensorView:
     scale_shape: list[int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PackedSliceLocation:
+    """Absolute pack-file byte range for native file reads."""
+
+    path: Path
+    byte_offset: int
+    byte_length: int
+
+
+@dataclass(frozen=True, slots=True)
+class PackedSpanLocation:
+    """One pack-file byte range that contains several tensor payloads."""
+
+    path: Path
+    byte_offset: int
+    byte_length: int
+    tensor_slices: dict[str, tuple[int, int]]
+
+
 class FP8PackReader:
     """Read lossless FP8 pack files through long-lived mmap handles."""
 
@@ -37,6 +56,7 @@ class FP8PackReader:
         self.tensors: dict[str, dict] = dict(self.manifest.get("tensors") or {})
         self._files: dict[int, object] = {}
         self._mmaps: dict[int, mmap.mmap] = {}
+        self._native_files_seen: set[int] = set()
         self._stats = {
             "pack_files_open": 0,
             "mmap_bytes_resident": 0,
@@ -81,10 +101,58 @@ class FP8PackReader:
 
     def get_tensor_bytes(self, name: str) -> memoryview:
         entry = self._entry(name)
-        raw = self._slice(entry["pack_file_index"], entry["byte_offset"], entry["byte_length"])
-        self._stats["sequential_reads"] += 1
-        self._stats["bytes_returned"] += int(entry["byte_length"])
+        raw = self.get_tensor_slice_bytes(name, 0, int(entry["byte_length"]))
         return raw
+
+    def get_tensor_slice_bytes(self, name: str, relative_offset: int, byte_length: int) -> memoryview:
+        entry = self._entry(name)
+        self._validate_slice(name, entry, int(relative_offset), int(byte_length))
+        raw = self._slice(
+            entry["pack_file_index"],
+            int(entry["byte_offset"]) + int(relative_offset),
+            int(byte_length),
+        )
+        self._stats["sequential_reads"] += 1
+        self._stats["bytes_returned"] += int(byte_length)
+        return raw
+
+    def get_tensor_slice_location(self, name: str, relative_offset: int, byte_length: int) -> PackedSliceLocation:
+        entry = self._entry(name)
+        self._validate_slice(name, entry, int(relative_offset), int(byte_length))
+        index = int(entry["pack_file_index"])
+        self._native_files_seen.add(index)
+        self._stats["pack_files_open"] = len(set(self._mmaps) | self._native_files_seen)
+        self._stats["sequential_reads"] += 1
+        self._stats["bytes_returned"] += int(byte_length)
+        return PackedSliceLocation(
+            path=self.pack_dir / f"pack_{index:04d}.bin",
+            byte_offset=int(entry["byte_offset"]) + int(relative_offset),
+            byte_length=int(byte_length),
+        )
+
+    def get_tensor_span_location(self, names: list[str]) -> PackedSpanLocation:
+        if not names:
+            raise ValueError("Packed tensor span requires at least one tensor name.")
+        entries = [(str(name), self._entry(str(name))) for name in names]
+        pack_indexes = {int(entry["pack_file_index"]) for _name, entry in entries}
+        if len(pack_indexes) != 1:
+            raise ValueError("Packed tensor span crosses pack files.")
+        index = pack_indexes.pop()
+        start = min(int(entry["byte_offset"]) for _name, entry in entries)
+        end = max(int(entry["byte_offset"]) + int(entry["byte_length"]) for _name, entry in entries)
+        self._native_files_seen.add(index)
+        self._stats["pack_files_open"] = len(set(self._mmaps) | self._native_files_seen)
+        self._stats["sequential_reads"] += 1
+        self._stats["bytes_returned"] += int(end - start)
+        return PackedSpanLocation(
+            path=self.pack_dir / f"pack_{index:04d}.bin",
+            byte_offset=int(start),
+            byte_length=int(end - start),
+            tensor_slices={
+                name: (int(entry["byte_offset"]) - int(start), int(entry["byte_length"]))
+                for name, entry in entries
+            },
+        )
 
     def get_layer_experts(self, layer_idx: int, expert_ids: list[int]) -> list[PackedTensorView]:
         requested = {int(value) for value in expert_ids}
@@ -105,6 +173,12 @@ class FP8PackReader:
         except KeyError as exc:
             raise KeyError(f"Tensor {name} is not present in FP8 pack manifest.") from exc
 
+    def _validate_slice(self, name: str, entry: dict, relative_offset: int, byte_length: int) -> None:
+        if int(relative_offset) < 0 or int(byte_length) < 0:
+            raise ValueError("Packed tensor slice offset and length must be non-negative.")
+        if int(relative_offset) + int(byte_length) > int(entry["byte_length"]):
+            raise ValueError(f"Packed tensor slice exceeds tensor byte length for {name}.")
+
     def _mmap_for(self, pack_file_index: int) -> mmap.mmap:
         index = int(pack_file_index)
         mapped = self._mmaps.get(index)
@@ -116,7 +190,7 @@ class FP8PackReader:
         mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
         self._files[index] = handle
         self._mmaps[index] = mapped
-        self._stats["pack_files_open"] = len(self._mmaps)
+        self._stats["pack_files_open"] = len(set(self._mmaps) | self._native_files_seen)
         self._stats["mmap_bytes_resident"] += int(path.stat().st_size)
         return mapped
 
