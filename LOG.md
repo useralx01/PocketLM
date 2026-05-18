@@ -6011,3 +6011,14 @@ Result: 297 passed in 21.83s
 - Timing delta: pack hot-cache path is `54.62%` faster than scattered, passing the required `>=50%` gate.
 - Output equivalence stayed exact for the final top-k logits: `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
 
+## Phase FP8 Fused Selected Experts / Evidence
+- Added native `fp8_e4m3_block_mlp_many_f32()` for one-call execution of multiple selected FP8 expert MLPs from already-loaded packed/hot-cache tensors.
+- The FP8 runtime now uses the many-expert path when packed expert spans are preloaded and `PCKETLM_DISABLE_NATIVE_FP8_MLP_MANY` is not set.
+- Real DeepSeek MoE layer smoke matched the old per-expert path exactly: selected experts unchanged, max output diff `0.0`, mean output diff `0.0`.
+- Real DeepSeek MoE layer routed expert timing dropped from about `0.327s` to about `0.081s` on the warm hot-cache path.
+- Real DeepSeek bounded layers `0-7`, prompt `[0,1]`, `max_new=1`: runtime dropped to `54.824s` from the previous hot-cache `67.355s`.
+- Real DeepSeek full `62` layers, prompt `[0,1]`, `max_new=1`: runtime dropped to `260.999s` from hot-cache-only `346.815s` and scattered `764.224s`.
+- Full-stack top-k stayed identical to the scattered and hot-cache baselines: token ids `[0, 261, 223, 65, 18]`, logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+- Full-stack timing delta is now `65.85%` faster than scattered and `24.74%` faster than hot-cache-only.
+- New full-stack timing split: attention about `155.31s`, FFN about `67.41s`, routed experts about `4.93s`. The next big speed target is now FP8 MLA attention and remaining dense/shared FFN work.
+

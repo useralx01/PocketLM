@@ -1540,3 +1540,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Store the hot cache under `state/fp8_hot_cache` by default so it can use local-disk speed without modifying the original DeepSeek source or the full packed artifact. Operators can disable it with `PCKETLM_DISABLE_FP8_HOT_CACHE=1`.
 - Keep native pack spans as the default and mmap spans opt-in. Mmap span copies were slower on this Windows/PyTorch path.
 - Cache Windows file handles in the native byte loader for process-local repeated reads. Pack/hot-cache mode benefits more than scattered mode because grouped pack reads cut the read count from `6,897` to `2,102`.
+
+## Phase FP8 Fused Selected Experts
+- Fuse selected routed experts after the pack/hot-cache layer, not before it. The fused native kernel assumes the expert FP8/scales are already available as stable tensors.
+- Use pointer arrays into existing tensors for the many-expert native call instead of stacking/copying all expert weights into a huge temporary tensor.
+- Keep `PCKETLM_DISABLE_NATIVE_FP8_MLP_MANY=1` as the fallback switch. The fused path is enabled by default after exact real DeepSeek top-k equivalence.
+- Treat routed expert compute as no longer the main full-stack blocker after this phase: routed experts dropped to about `4.93s` total across the full bounded run. Attention is now the largest measured target.

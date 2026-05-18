@@ -698,3 +698,4 @@ Phase FP8 Tail Timing: FP8 summaries now expose attention/FFN/tail timing; lm_he
 Phase FP8 MoE Timing: MoE summaries now split router, routed expert, and shared expert time; real DeepSeek shows routed expert payload time is the next MoE speed target, while worker threads remain opt-in.
 Phase FP8 Pack Planner: lossless FP8 pack planning is implemented and real DeepSeek V3 is ready for a `688.57 GB` packed artifact plan with `15,104` routed expert units; next is the resumable writer/reader.
 Phase FP8 Lossless Pack: full DeepSeek FP8 pack plus byte-identical hot cache now passes byte-identity/output-equivalence/62-layer anti-cheat and Gate B, with pack hot-cache `346.815s` vs scattered `764.224s` (`54.62%` faster).
+Phase FP8 Fused Selected Experts: native many-expert FP8 MLP routing is active and full DeepSeek bounded `62`-layer timing is now `260.999s`, with exact top-k equivalence and routed experts down to about `4.93s` total.

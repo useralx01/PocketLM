@@ -21,12 +21,14 @@ from pcketlm.native import (
     fp8_e4m3_block_dual_linear_f32,
     fp8_e4m3_block_linear_f32,
     fp8_e4m3_block_mlp_f32,
+    fp8_e4m3_block_mlp_many_f32,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
     native_fp8_dual_linear_available,
     native_fp8_linear_available,
     native_fp8_mlp_available,
+    native_fp8_mlp_many_available,
     native_read_tensor_bytes,
 )
 from pcketlm.core.runtime.fp8_pack import fp8_pack_telemetry, reader_for_model_dir, record_scattered_read
@@ -532,6 +534,9 @@ def fp8_source_status(model_id: str) -> dict:
             "top_k_experts": top_k,
             "native_fp8_linear": _native_fp8_linear_enabled() and native_fp8_linear_available(),
             "native_fp8_mlp": _native_fp8_linear_enabled() and native_fp8_mlp_available(),
+            "native_fp8_mlp_many": _native_fp8_linear_enabled()
+            and _native_fp8_mlp_many_enabled()
+            and native_fp8_mlp_many_available(),
             "native_fp8_mlp_full_max_bytes": _native_fp8_mlp_full_max_bytes(),
             "attention_weight_cache_max_bytes": _fp8_attention_weight_cache_max_bytes(),
             "streamed_attention": _streamed_fp8_attention_enabled(),
@@ -922,7 +927,41 @@ def run_fp8_moe(
         preloaded_mlps = _preload_packed_mlp_prefixes(model_id, list(expert_prefixes.values()))
         workers = _fp8_moe_expert_workers()
         routed_start = time.perf_counter()
-        if workers > 1 and len(expert_jobs) > 1:
+        many_attempted = False
+        if _native_fp8_mlp_many_enabled() and native_fp8_mlp_many_available() and expert_jobs:
+            ordered_prefixes = [expert_prefixes[int(expert_index)] for expert_index, *_rest in expert_jobs]
+            if all(prefix in preloaded_mlps for prefix in ordered_prefixes):
+                many_attempted = True
+                try:
+                    many_output = fp8_e4m3_block_mlp_many_f32(
+                        [preloaded_mlps[prefix] for prefix in ordered_prefixes],
+                        flat_hidden.to(dtype=dtype),
+                    )
+                    for item_index, (expert_index, row_indices, top_indices, _expert_hidden) in enumerate(expert_jobs):
+                        tensors = preloaded_mlps[ordered_prefixes[item_index]]
+                        loaded_bytes = sum(int(t.nelement() * t.element_size()) for t in tensors)
+                        dequant_bytes = int(
+                            (
+                                int(tensors[0].shape[0]) * int(tensors[0].shape[1]) * 2
+                                + int(tensors[4].shape[0]) * int(tensors[4].shape[1])
+                            )
+                            * torch.empty((), dtype=dtype).element_size()
+                        )
+                        expert_results.append(
+                            (
+                                expert_index,
+                                row_indices,
+                                top_indices,
+                                many_output[item_index, row_indices].to(dtype=dtype).contiguous(),
+                                loaded_bytes,
+                                dequant_bytes,
+                                [],
+                            )
+                        )
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    many_attempted = False
+                    expert_results.clear()
+        if not many_attempted and workers > 1 and len(expert_jobs) > 1:
             with ThreadPoolExecutor(max_workers=min(workers, len(expert_jobs))) as executor:
                 futures = {
                     executor.submit(
@@ -941,7 +980,7 @@ def run_fp8_moe(
                     expert_results.append(
                         (expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers)
                     )
-        else:
+        elif not many_attempted:
             for expert_index, row_indices, top_indices, expert_hidden in expert_jobs:
                 prefix = expert_prefixes[int(expert_index)]
                 expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers = _run_fp8_mlp_prefix(
@@ -2457,6 +2496,15 @@ def _native_fp8_mlp_full_max_bytes() -> int:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
         return 192 * 1024 * 1024
+
+
+def _native_fp8_mlp_many_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_MLP_MANY", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _fp8_attention_weight_cache_max_bytes() -> int:

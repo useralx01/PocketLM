@@ -658,3 +658,8 @@
 - Built the full real DeepSeek V3 FP8 pack: `688,574,839,360` bytes across `41` pack files.
 - Added grouped packed MLP reads, a byte-identical local hot cache, and cached native read handles.
 - Verified byte identity, output equivalence, all `62` layers executed, and Gate B passed: pack hot-cache `346.815s` vs scattered `764.224s` (`54.62%` faster).
+
+## Phase FP8 Fused Selected Experts
+- Added native many-expert FP8 MLP execution and routed packed selected experts through it.
+- Verified exact full-stack top-k equivalence with the scattered baseline.
+- Reduced full DeepSeek bounded `62`-layer timing to `260.999s`, `65.85%` faster than scattered and `24.74%` faster than hot-cache-only.
