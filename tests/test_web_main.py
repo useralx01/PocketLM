@@ -1113,6 +1113,68 @@ def test_run_chat_payload_gguf_requires_loaded_server_before_chat(monkeypatch) -
     assert "Load the GGUF fast model" in payload["blockers"][0]
 
 
+def test_run_chat_payload_routes_deepseek_to_fp8_decode_loop(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_fp8_decode_loop(model_id, token_ids, *, layer_count, max_new_tokens):
+        captured.update(
+            {
+                "model_id": model_id,
+                "token_ids": list(token_ids),
+                "layer_count": layer_count,
+                "max_new_tokens": max_new_tokens,
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            blockers=[],
+            generated_token_ids=[42],
+            positions_completed=3,
+            next_kv_caches={},
+            attention_weight_cache={"dequant_hot_cache_hits": 5},
+            mlp_span_cache={"max_bytes": 0},
+            fp8_pack={"available": True, "scattered_reads": 0},
+            step_summaries=[
+                {
+                    "layer_summaries": [
+                        {
+                            "layer_index": 0,
+                            "attention_elapsed_seconds": 2.0,
+                            "ffn_elapsed_seconds": 1.0,
+                            "total_elapsed_seconds": 3.0,
+                        }
+                    ]
+                }
+            ],
+        )
+
+    monkeypatch.setattr(web.main, "_memory_guard_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web.main, "_formatted_chat_prompt", lambda *args, **kwargs: ("prepared", 1, True))
+    monkeypatch.setattr(web.main, "_encode_with_catalog_tokenizer", lambda model_id, text: ([1, 2, 3], []))
+    monkeypatch.setattr(web.main, "_decode_with_catalog_tokenizer", lambda model_id, ids: ("answer", []))
+    monkeypatch.setattr(web.main, "run_fp8_decode_loop", fake_run_fp8_decode_loop)
+    monkeypatch.setattr(web.main, "_speed_status_payload", lambda model_id: {})
+    monkeypatch.setattr(web.main, "_model_guardrails", lambda model_id, max_new_tokens=None: {"ready": True})
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "deepseek-v3",
+            "prompt": "hello",
+            "mode": "Quality",
+            "max_new_tokens": 1,
+        }
+    )
+
+    assert payload["ready"] is True
+    assert payload["strategy"] == "deepseek-fp8-pack"
+    assert payload["generated_text"] == "answer"
+    assert payload["fp8_runtime"]["fp8_pack"]["scattered_reads"] == 0
+    assert payload["fp8_runtime"]["timing_summary"]["attention_seconds"] == 2.0
+    assert captured == {"model_id": "deepseek-v3", "token_ids": [1, 2, 3], "layer_count": None, "max_new_tokens": 1}
+
+
 def test_run_chat_payload_blocks_before_generation_when_free_ram_is_too_low(monkeypatch) -> None:
     from pcketlm.app import web
 

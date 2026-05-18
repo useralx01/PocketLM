@@ -35,8 +35,10 @@ from pcketlm.core.runtime import (
     build_gguf_backend_status,
     build_gguf_server_status,
     build_runtime_backend_report,
+    fp8_source_status,
     load_layer_bridge_config,
     run_gguf_prompt,
+    run_fp8_decode_loop,
     run_prompt_decode_loop,
     run_warm_agent_prompt,
     runtime_math_dtype_name,
@@ -48,6 +50,8 @@ from pcketlm.core.runtime import (
     stop_warm_runner,
     warm_runner_status,
 )
+from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+from pcketlm.app.chat_shell.runtime_fp8_cli import _decode_with_catalog_tokenizer, _encode_with_catalog_tokenizer
 from pcketlm.core.runtime.tensor_loader import runtime_pack_selection_snapshot, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tensor_residency import (
     clear_tensor_residency_cache,
@@ -1115,6 +1119,217 @@ def _agent_warm_runner_enabled(mode: str) -> bool:
     return _normalize_agent_warm_runner_mode(settings.get("agent_warm_runner")) in {"safe", "experimental"}
 
 
+def _is_deepseek_fp8_model(model_id: str) -> bool:
+    normalized = str(model_id or "").lower().replace("_", "-")
+    return "deepseek" in normalized and "v3" in normalized
+
+
+def _deepseek_fp8_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
+    try:
+        status = fp8_source_status(model_id)
+        catalog = load_tensor_catalog(model_id)
+        pack_dir = catalog.model_dir / "artifacts" / "fp8_pack"
+        pack_files = list(pack_dir.glob("pack_*.bin")) if pack_dir.exists() else []
+        pack_bytes = sum(path.stat().st_size for path in pack_files)
+        blockers = list(status.get("blockers") or [])
+        if not pack_files:
+            blockers.append("DeepSeek FP8 pack is missing; run the pack step before product chat.")
+        return {
+            "model_id": model_id,
+            "model_label": _display_model_name(model_id),
+            "model_size_class": "deepseek-fp8",
+            "status": "ready-slow" if not blockers else "blocked",
+            "ready": not blockers,
+            "summary": (
+                "DeepSeek V3 is on the FP8 packed path. It runs locally, but attention is still slow."
+                if not blockers
+                else "DeepSeek V3 is not ready for FP8 product chat yet."
+            ),
+            "requested_max_new_tokens": None if requested_max_new_tokens is None else int(requested_max_new_tokens),
+            "recommended_max_new_tokens": 1,
+            "pack": {
+                "path": str(pack_dir),
+                "file_count": len(pack_files),
+                "bytes": int(pack_bytes),
+                "gb": round(pack_bytes / 1_000_000_000, 3),
+            },
+            "runtime_policy": dict(status.get("runtime_policy") or {}),
+            "blockers": blockers,
+            "warnings": [
+                "This is the make-it-run FP8 path, not the final fast chat path.",
+                "Keep replies short until fused MLA attention lands.",
+            ],
+        }
+    except Exception as exc:
+        return {
+            "model_id": model_id,
+            "model_label": _display_model_name(model_id),
+            "model_size_class": "deepseek-fp8",
+            "status": "blocked",
+            "ready": False,
+            "summary": "DeepSeek V3 FP8 status could not be inspected.",
+            "requested_max_new_tokens": None if requested_max_new_tokens is None else int(requested_max_new_tokens),
+            "recommended_max_new_tokens": 1,
+            "pack": {},
+            "runtime_policy": {},
+            "blockers": [str(exc)],
+            "warnings": [],
+        }
+
+
+def _model_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
+    if _is_deepseek_fp8_model(model_id):
+        return _deepseek_fp8_guardrails(model_id, requested_max_new_tokens)
+    return _direct_model_guardrails(model_id, requested_max_new_tokens)
+
+
+def _fp8_step_timing_summary(step_summaries: list[dict]) -> dict:
+    attention = 0.0
+    ffn = 0.0
+    routed = 0.0
+    shared = 0.0
+    total = 0.0
+    layer_count = 0
+    executed: list[int] = []
+    for step in step_summaries:
+        for layer in step.get("layer_summaries", []) or []:
+            layer_count += 1
+            if "layer_index" in layer:
+                executed.append(int(layer["layer_index"]))
+            attention += float(layer.get("attention_elapsed_seconds", 0.0) or 0.0)
+            ffn += float(layer.get("ffn_elapsed_seconds", 0.0) or 0.0)
+            routed += float(layer.get("moe_routed_elapsed_seconds", 0.0) or 0.0)
+            shared += float(layer.get("moe_shared_elapsed_seconds", 0.0) or 0.0)
+            total += float(layer.get("total_elapsed_seconds", 0.0) or 0.0)
+    return {
+        "layer_events": layer_count,
+        "executed_layers": sorted(set(executed)),
+        "attention_seconds": round(attention, 3),
+        "ffn_seconds": round(ffn, 3),
+        "routed_expert_seconds": round(routed, 3),
+        "shared_expert_seconds": round(shared, 3),
+        "layer_total_seconds": round(total, 3),
+    }
+
+
+def _fp8_generation_speed_payload(result, elapsed_seconds: float) -> dict:
+    generated_count = len(getattr(result, "generated_token_ids", []) or [])
+    seconds_per_token = round(elapsed_seconds / generated_count, 3) if generated_count else None
+    tokens_per_second = round(generated_count / elapsed_seconds, 3) if elapsed_seconds > 0 and generated_count else None
+    return {
+        "backend": "deepseek-fp8-pack",
+        "generated_tokens": generated_count,
+        "generation_seconds_per_token": seconds_per_token,
+        "generation_tokens_per_second": tokens_per_second,
+        "target_seconds_per_token_max": 30.0,
+        "target_met": bool(seconds_per_token is not None and seconds_per_token <= 30.0),
+        "summary": (
+            f"DeepSeek FP8 generated at {seconds_per_token}s/token."
+            if seconds_per_token is not None
+            else "DeepSeek FP8 did not produce a measured generated-token speed."
+        ),
+    }
+
+
+def _run_deepseek_fp8_chat_payload(
+    *,
+    payload: dict,
+    model_id: str,
+    prompt: str,
+    mode: str,
+    profile: Any | None,
+    max_new_tokens: int,
+    effective_prompt: str,
+    conversation_turn_count: int,
+    preformatted_chat: bool,
+    session_id: str,
+    cache_key: str,
+) -> dict:
+    token_ids, token_blockers = _encode_with_catalog_tokenizer(model_id, effective_prompt)
+    max_prompt_tokens = int(payload.get("max_prompt_tokens") or 16)
+    used_token_ids = token_ids[-max(1, max_prompt_tokens) :] if token_ids else []
+    layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
+    started = time.perf_counter()
+    result = None
+    run_blockers = list(token_blockers)
+    if not run_blockers:
+        result = run_fp8_decode_loop(
+            model_id,
+            used_token_ids,
+            layer_count=layer_count,
+            max_new_tokens=max_new_tokens,
+        )
+        run_blockers.extend(list(result.blockers))
+    elapsed_seconds = round(time.perf_counter() - started, 2)
+    generated_ids = [] if result is None else list(result.generated_token_ids)
+    generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+    run_blockers.extend(decode_blockers)
+    step_summaries = [] if result is None else list(result.step_summaries)
+    timing_summary = _fp8_step_timing_summary(step_summaries)
+    ready = bool(result is not None and result.ready and not run_blockers)
+    response = {
+        "ready": ready,
+        "generated_text": generated_text,
+        "full_text": f"{prompt}\n{generated_text}",
+        "generated_token_ids": generated_ids,
+        "prompt_token_count": len(used_token_ids),
+        "steps_completed": 0 if result is None else int(result.positions_completed),
+        "max_new_tokens": max_new_tokens,
+        "stop_reason": "deepseek-fp8-complete" if ready else "deepseek-fp8-blocked",
+        "strategy": "deepseek-fp8-pack",
+        "cache_sequence_lengths": {}
+        if result is None
+        else {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()},
+        "blockers": run_blockers,
+        "elapsed_seconds": elapsed_seconds,
+        "timings": {
+            "total": elapsed_seconds,
+            "fp8_attention": timing_summary["attention_seconds"],
+            "fp8_ffn": timing_summary["ffn_seconds"],
+            "fp8_layer_total": timing_summary["layer_total_seconds"],
+        },
+        "performance_summary": {
+            "total_seconds": elapsed_seconds,
+            "stack_seconds": timing_summary["layer_total_seconds"],
+            "tensor_load_seconds": 0.0,
+            "decode_tail_seconds": 0.0,
+            "bottleneck": "FP8 attention" if timing_summary["attention_seconds"] >= timing_summary["ffn_seconds"] else "FP8 FFN",
+            "bottleneck_seconds": max(timing_summary["attention_seconds"], timing_summary["ffn_seconds"]),
+            "summary": "DeepSeek FP8 is using the packed artifact path; attention is still the main speed target.",
+        },
+        "generation_speed": _fp8_generation_speed_payload(result, elapsed_seconds) if result is not None else {},
+        "prefix_reuse": {"enabled": True, "used": False, "reason": "fp8-kv-returned-for-next-phase"},
+        "reusable_token_count": len(used_token_ids) + len(generated_ids),
+        "runtime_settings": _runtime_settings_payload(),
+        "conversation_turn_count": conversation_turn_count,
+        "preformatted_chat": preformatted_chat,
+        "profile_id": None if profile is None else profile.profile_id,
+        "profile_label": None if profile is None else profile.label,
+        "runtime_context": _runtime_context_payload(model_id, mode, profile),
+        "speed_status": _speed_status_payload(model_id),
+        "model_guardrails": _model_guardrails(model_id, max_new_tokens),
+        "fp8_runtime": {
+            "model_id": model_id,
+            "layer_count": layer_count,
+            "max_prompt_tokens": max_prompt_tokens,
+            "used_prompt_token_count": len(used_token_ids),
+            "timing_summary": timing_summary,
+            "attention_weight_cache": {} if result is None else dict(result.attention_weight_cache),
+            "mlp_span_cache": {} if result is None else dict(getattr(result, "mlp_span_cache", {})),
+            "fp8_pack": {} if result is None else dict(result.fp8_pack),
+        },
+        "conversation_state": _conversation_state_payload(
+            conversation_turn_count,
+            preformatted_chat,
+            session_id=session_id,
+            prefix_reuse={"enabled": True, "used": False, "reason": "fp8-runtime-kv-state-not-yet-reused-by-web"},
+        ),
+        "response_reuse": _cache_reuse_payload(False, cache_key=cache_key),
+    }
+    _store_chat_response(cache_key, response)
+    return response
+
+
 def _chat_cache_key_for_runtime_defaults(
     payload: dict,
     *,
@@ -1278,7 +1493,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "profile_label": None if profile is None else profile.label,
             "runtime_context": _runtime_context_payload(model_id, mode, profile),
             "speed_status": speed_status,
-            "model_guardrails": _direct_model_guardrails(model_id, max_new_tokens),
+            "model_guardrails": _model_guardrails(model_id, max_new_tokens),
             "gguf_backend": {
                 **backend_status,
                 "model_id": model_id,
@@ -1310,6 +1525,20 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
         prompt,
         system_prompt=system_prompt,
     )
+    if _is_deepseek_fp8_model(model_id):
+        return _run_deepseek_fp8_chat_payload(
+            payload=payload,
+            model_id=model_id,
+            prompt=prompt,
+            mode=mode,
+            profile=profile,
+            max_new_tokens=max_new_tokens,
+            effective_prompt=effective_prompt,
+            conversation_turn_count=conversation_turn_count,
+            preformatted_chat=preformatted_chat,
+            session_id=session_id,
+            cache_key=cache_key,
+        )
     layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
     if _agent_warm_runner_enabled(mode):
         if not preformatted_chat and _supports_im_chat_tokens(model_id):
@@ -1353,7 +1582,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             "profile_label": None if profile is None else profile.label,
             "runtime_context": _runtime_context_payload(model_id, mode, profile),
             "speed_status": _speed_status_payload(model_id),
-            "model_guardrails": _direct_model_guardrails(model_id, max_new_tokens),
+            "model_guardrails": _model_guardrails(model_id, max_new_tokens),
             "warm_runner": dict(warm_result.runner_status),
             "conversation_state": _conversation_state_payload(
                 conversation_turn_count,
@@ -1395,7 +1624,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
     response["profile_label"] = None if profile is None else profile.label
     response["runtime_context"] = _runtime_context_payload(model_id, mode, profile)
     response["speed_status"] = _speed_status_payload(model_id)
-    response["model_guardrails"] = _direct_model_guardrails(model_id, max_new_tokens)
+    response["model_guardrails"] = _model_guardrails(model_id, max_new_tokens)
     response["conversation_state"] = _conversation_state_payload(
         conversation_turn_count,
         preformatted_chat,

@@ -669,3 +669,9 @@
 - Reduced current default full DeepSeek bounded `62`-layer timing to `245.980s` with exact top-k equivalence and `0` scattered reads.
 - Added an opt-in process-local packed MLP span cache for longer session experiments; default remains off because short-session measurements did not justify always-on RAM use.
 - Verified full test suite: `432 passed`.
+
+## Phase DeepSeek FP8 Product Route
+- Wired DeepSeek V3 web chat to the FP8 packed decode loop.
+- Added FP8 runtime telemetry and DeepSeek-specific guardrails to the chat payload.
+- Verified real web Fast-mode smoke: `66.27s`, layers `0-7`, `0` scattered reads, generated token `[21133]`.
+- Verified web tests: `47 passed`.

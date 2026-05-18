@@ -1557,3 +1557,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the process-local packed MLP span cache opt-in with `PCKETLM_FP8_MLP_SPAN_CACHE_MB`. Default stays `0` because a small cache caused churn and no real DeepSeek hit-rate win.
 - Use this cache only as a longer-session tuning knob. It can reuse packed expert/shared spans when routing repeats across generated tokens, but the one-token proof remains dominated by first-read costs.
 - Preserve the disk hot cache as the default read accelerator. The process span cache sits above it and should not replace byte-identical `state/fp8_hot_cache`.
+
+## Phase DeepSeek FP8 Product Route
+- Route DeepSeek V3 web chat through the FP8 packed decode loop instead of the old generic direct runtime. This makes the current proven DeepSeek path available from the product surface.
+- Keep materialized hot-cache attention as the default. Streamed FP8 attention is available behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1`, but the measured 8-layer delta was too small to make it the product default.
+- Keep DeepSeek web prompts capped by `max_prompt_tokens` with a default of `16`; this is the practical long-prompt guard until efficient long-context FP8 prefill is faster.
+- Report DeepSeek FP8 as ready-slow, not fast. The pack path is correct and usable for short proof replies, but fused MLA attention remains the next real speed phase.

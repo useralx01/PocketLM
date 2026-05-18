@@ -702,3 +702,4 @@ Phase FP8 Fused Selected Experts: native many-expert FP8 MLP routing is active a
 Phase FP8 Attention Dequant Hot Cache: warm full DeepSeek bounded `62`-layer timing is now `244.528s`; attention dropped to `126.49s` with exact top-k equivalence, so the next blocker is remaining attention compute plus dense/shared FFN time.
 Phase FP8 Session Span Cache: packed MLP process cache is implemented but opt-in (`PCKETLM_FP8_MLP_SPAN_CACHE_MB`) because real DeepSeek short-session tests showed small-cache churn and only tiny FFN improvement at `4096 MB`.
 Phase FP8 Current Default: full DeepSeek bounded proof now runs all `62` layers in `245.980s` with `0` scattered reads, `310/310` attention dequant cache hits, and `432` tests passing.
+Phase DeepSeek FP8 Product Route: web chat now routes `deepseek-v3` through the FP8 packed decode loop; real Fast-mode smoke passed in `66.27s` with `0` scattered reads, while Quality remains ready-slow until fused MLA attention lands.

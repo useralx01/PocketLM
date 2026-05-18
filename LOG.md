@@ -6045,3 +6045,11 @@ Result: 297 passed in 21.83s
 - Default MLP span cache stayed off (`max_bytes=0`), as intended after the opt-in decision.
 - Final top token ids stayed `[0, 261, 223, 65, 18]` with logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
 
+## Phase DeepSeek FP8 Product Route
+- Measured current 8-layer attention alternatives before changing defaults. Materialized hot-cache path: `53.920s`, attention `16.535s`; streamed FP8 attention: `53.050s`, attention `16.320s`. The delta is too small/noisy to justify making streamed attention the default.
+- Added a product web chat route for `deepseek-v3`/DeepSeek V3 model ids. Non-GGUF chat now calls `run_fp8_decode_loop()` and returns `strategy=deepseek-fp8-pack` plus FP8 pack/cache telemetry.
+- Added DeepSeek FP8 guardrails that report pack path, pack size/file count, runtime policy, recommended short replies, and the warning that attention is still the main speed target.
+- Real web smoke through `_run_chat_payload`, model `deepseek-v3`, mode `Fast`, `max_new_tokens=1`, `max_prompt_tokens=2`: ready `true`, elapsed `66.27s`, generated token `[21133]`.
+- Web smoke executed layers `0-7`, used pack mode with `237` sequential reads and `0` scattered reads; timing summary was attention `16.825s`, FFN `29.170s`, layer total `48.648s`.
+- Targeted web tests passed; full `tests/test_web_main.py` passed with `47 passed`.
+
