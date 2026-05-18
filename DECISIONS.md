@@ -1560,6 +1560,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 
 ## Phase DeepSeek FP8 Product Route
 - Route DeepSeek V3 web chat through the FP8 packed decode loop instead of the old generic direct runtime. This makes the current proven DeepSeek path available from the product surface.
+- Route DeepSeek V3 desktop chat through the same FP8 packed decode loop for consistency.
 - Keep materialized hot-cache attention as the default. Streamed FP8 attention is available behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1`, but the measured 8-layer delta was too small to make it the product default.
 - Keep DeepSeek web prompts capped by `max_prompt_tokens` with a default of `16`; this is the practical long-prompt guard until efficient long-context FP8 prefill is faster.
 - Report DeepSeek FP8 as ready-slow, not fast. The pack path is correct and usable for short proof replies, but fused MLA attention remains the next real speed phase.

@@ -672,6 +672,7 @@
 
 ## Phase DeepSeek FP8 Product Route
 - Wired DeepSeek V3 web chat to the FP8 packed decode loop.
+- Wired DeepSeek V3 desktop chat to the same FP8 packed decode loop.
 - Added FP8 runtime telemetry and DeepSeek-specific guardrails to the chat payload.
 - Verified real web Fast-mode smoke: `66.27s`, layers `0-7`, `0` scattered reads, generated token `[21133]`.
-- Verified web tests: `47 passed`.
+- Verified web tests: `47 passed`; desktop tests: `8 passed`.

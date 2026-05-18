@@ -7,6 +7,7 @@ from pcketlm.app.desktop.main import (
     _parse_stop_strings,
     _parse_stop_token_ids,
     _planned_action_message,
+    _run_desktop_chat_generation,
     _summarize_prompt_result,
 )
 
@@ -81,3 +82,49 @@ def test_chat_layer_budget_maps_desktop_modes() -> None:
     assert _chat_layer_budget("Quality (full stack)") is None
     assert "quick smoke tests" in _chat_mode_hint("Fast (8 layers)")
     assert "full current stack" in _chat_mode_hint("Quality (full stack)")
+
+
+def test_desktop_chat_generation_routes_deepseek_to_fp8(monkeypatch) -> None:
+    from pcketlm.app import desktop
+
+    captured = {}
+
+    def fake_run_fp8_decode_loop(model_id, token_ids, *, layer_count, max_new_tokens):
+        captured.update(
+            {
+                "model_id": model_id,
+                "token_ids": list(token_ids),
+                "layer_count": layer_count,
+                "max_new_tokens": max_new_tokens,
+            }
+        )
+        return SimpleNamespace(
+            ready=True,
+            blockers=[],
+            generated_token_ids=[9],
+            positions_completed=2,
+            next_kv_caches={},
+        )
+
+    monkeypatch.setattr(desktop.main, "_encode_with_catalog_tokenizer", lambda model_id, prompt: ([1, 2, 3], []))
+    monkeypatch.setattr(desktop.main, "_decode_with_catalog_tokenizer", lambda model_id, ids: ("ok", []))
+    monkeypatch.setattr(desktop.main, "run_fp8_decode_loop", fake_run_fp8_decode_loop)
+
+    result = _run_desktop_chat_generation(
+        "deepseek-v3",
+        prompt="hello",
+        max_new_tokens=1,
+        min_new_tokens=1,
+        top_p=0.9,
+        layer_count=8,
+        repetition_penalty=1.1,
+        system_prompt=None,
+        apply_chat_format=False,
+        stop_token_ids=[],
+        stop_strings=[],
+    )
+
+    assert result.ready is True
+    assert result.strategy == "deepseek-fp8-pack"
+    assert result.generated_text == "ok"
+    assert captured == {"model_id": "deepseek-v3", "token_ids": [1, 2, 3], "layer_count": 8, "max_new_tokens": 1}

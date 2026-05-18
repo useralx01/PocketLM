@@ -7,6 +7,7 @@ import os
 import threading
 import tkinter as tk
 from pathlib import Path
+from types import SimpleNamespace
 from tkinter import messagebox, ttk
 
 from pcketlm.app.desktop.status_screen import (
@@ -19,7 +20,12 @@ from pcketlm.app.desktop.status_screen import (
 from pcketlm.core.benchmark import run_measured_benchmark
 from pcketlm.core.profiles import profile_templates_summary
 from pcketlm.core.runtime import advance_streaming_runtime, advance_streaming_runtime_safely
-from pcketlm.core.runtime import run_prompt_decode_loop
+from pcketlm.core.runtime import run_fp8_decode_loop, run_prompt_decode_loop
+from pcketlm.app.chat_shell.runtime_fp8_cli import (
+    _decode_with_catalog_tokenizer,
+    _encode_with_catalog_tokenizer,
+    _prepare_chat_with_catalog_tokenizer,
+)
 
 
 PALETTE = {
@@ -135,6 +141,82 @@ def _chat_mode_hint(mode_label: str) -> str:
     if layer_budget == 32:
         return "Balanced mode is a speed preview. It is faster, but it can drift or answer oddly."
     return "Quality mode uses the full current stack and gives the best current output."
+
+
+def _is_deepseek_fp8_model(model_id: str) -> bool:
+    normalized = str(model_id or "").lower().replace("_", "-")
+    return "deepseek" in normalized and "v3" in normalized
+
+
+def _run_desktop_chat_generation(
+    model_id: str,
+    *,
+    prompt: str,
+    max_new_tokens: int,
+    min_new_tokens: int,
+    top_p: float,
+    layer_count: int | None,
+    repetition_penalty: float,
+    system_prompt: str | None,
+    apply_chat_format: bool,
+    stop_token_ids: list[int] | None,
+    stop_strings: list[str] | None,
+):
+    if not _is_deepseek_fp8_model(model_id):
+        return run_prompt_decode_loop(
+            model_id,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
+            top_p=top_p,
+            layer_count=layer_count,
+            repetition_penalty=repetition_penalty,
+            system_prompt=system_prompt,
+            apply_chat_format=apply_chat_format,
+            stop_token_ids=stop_token_ids or None,
+            stop_strings=stop_strings or None,
+        )
+
+    if apply_chat_format:
+        prepared_prompt, token_ids, blockers = _prepare_chat_with_catalog_tokenizer(
+            model_id,
+            prompt,
+            system_prompt=system_prompt or "",
+        )
+    else:
+        prepared_prompt = prompt
+        token_ids, blockers = _encode_with_catalog_tokenizer(model_id, prompt)
+    result = None
+    if not blockers:
+        result = run_fp8_decode_loop(
+            model_id,
+            token_ids[-16:],
+            layer_count=layer_count,
+            max_new_tokens=max_new_tokens,
+        )
+        blockers = list(result.blockers)
+    generated_ids = [] if result is None else list(result.generated_token_ids)
+    generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+    blockers.extend(decode_blockers)
+    ready = bool(result is not None and result.ready and not blockers)
+    return SimpleNamespace(
+        ready=ready,
+        strategy="deepseek-fp8-pack",
+        min_new_tokens=min_new_tokens,
+        steps_completed=0 if result is None else int(result.positions_completed),
+        max_new_tokens=max_new_tokens,
+        stop_reason="deepseek-fp8-complete" if ready else "deepseek-fp8-blocked",
+        stop_token_ids=stop_token_ids or [],
+        stop_strings=stop_strings or [],
+        prompt_token_ids=token_ids,
+        generated_token_ids=generated_ids,
+        cache_sequence_lengths={}
+        if result is None
+        else {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()},
+        blockers=blockers,
+        generated_text=generated_text,
+        full_text=f"{prepared_prompt}\n{generated_text}",
+    )
 
 
 class PcketLmStatusApp:
@@ -767,7 +849,7 @@ class PcketLmStatusApp:
 
         def worker() -> None:
             try:
-                result = run_prompt_decode_loop(
+                result = _run_desktop_chat_generation(
                     model_id,
                     prompt=prompt,
                     max_new_tokens=max_new_tokens,
