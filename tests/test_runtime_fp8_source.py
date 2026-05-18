@@ -520,6 +520,35 @@ def test_run_fp8_decode_loop_uses_pack_when_available(tmp_path: Path, monkeypatc
     assert scattered.fp8_pack["scattered_reads"] > 0
 
 
+def test_fp8_packed_mlp_span_cache_reuses_process_spans(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    fp8_source.clear_fp8_mlp_span_cache()
+    monkeypatch.setenv("PCKETLM_FP8_MLP_SPAN_CACHE_MB", "1")
+
+    prefix = "model.layers.0.mlp.experts.1"
+    first = fp8_source._preload_packed_mlp_prefix(model_id, prefix)
+    first_snapshot = fp8_source.fp8_mlp_span_cache_snapshot()
+    second = fp8_source._preload_packed_mlp_prefix(model_id, prefix)
+    second_snapshot = fp8_source.fp8_mlp_span_cache_snapshot()
+
+    assert first is not None
+    assert second is not None
+    assert first_snapshot["stores"] >= 1
+    assert second_snapshot["hits"] >= 1
+    assert torch.equal(first[0], second[0])
+
+
 def test_fp8_pack_runtime_writes_hot_cache_for_used_mlp_spans(tmp_path: Path, monkeypatch) -> None:
     from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
     from tools.pack_fp8 import pack_model_dir_to_fp8

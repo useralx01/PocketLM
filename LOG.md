@@ -6030,3 +6030,10 @@ Result: 297 passed in 21.83s
 - Attention time dropped from `155.31s` to `126.49s`; pack scattered reads stayed `0`; final top token ids stayed `[0, 261, 223, 65, 18]` with identical logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
 - This is a real but modest win: `6.31%` faster than the fused-expert baseline and `68.00%` faster than the current scattered fallback.
 
+## Phase FP8 Session Span Cache / Evidence
+- Added an opt-in process-local packed MLP span cache controlled by `PCKETLM_FP8_MLP_SPAN_CACHE_MB`. Default is `0` because small budgets churn on this machine.
+- Synthetic packed FP8 runtime test proves repeated MLP prefix reads hit the process cache without re-reading the pack span.
+- Real DeepSeek layers `0-7`, prompt `[0,1]`, `max_new=2`: `512 MB` cache had `0` hits and was slower due evictions, so it is not the default.
+- Real DeepSeek layers `0-7`, prompt `[0,1]`, `max_new=2` with `4096 MB` cache had `10` hits, `114` stores, and reduced measured FFN layer time from `32.54s` to `30.84s`, but end-to-end elapsed stayed noise-level slower (`106.14s` vs `104.77s`).
+- Decision: keep the span cache as an operator/session tuning knob for longer chats, not an always-on speed path yet.
+

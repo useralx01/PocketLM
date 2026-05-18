@@ -38,6 +38,9 @@ _FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTe
 _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
 _FP8_ATTENTION_WEIGHT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FP8_DEQUANT_HOT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "read_errors": 0, "write_errors": 0}
+_FP8_MLP_SPAN_CACHE: "OrderedDict[str, tuple[torch.Tensor, dict[str, tuple[int, int]]]]" = OrderedDict()
+_FP8_MLP_SPAN_CACHE_BYTES = 0
+_FP8_MLP_SPAN_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -460,6 +463,7 @@ class FP8DecodeLoopResult:
     step_summaries: list[dict] = field(default_factory=list)
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     attention_weight_cache: dict = field(default_factory=dict)
+    mlp_span_cache: dict = field(default_factory=dict)
     fp8_pack: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
@@ -479,6 +483,7 @@ class FP8DecodeLoopResult:
                 str(key): int(value[0].shape[1]) for key, value in self.next_kv_caches.items()
             },
             "attention_weight_cache": dict(self.attention_weight_cache),
+            "mlp_span_cache": dict(self.mlp_span_cache),
             "fp8_pack": dict(self.fp8_pack),
             "blockers": list(self.blockers),
             "ready": self.ready,
@@ -714,6 +719,25 @@ def fp8_attention_weight_cache_snapshot() -> dict:
         "dequant_hot_cache_enabled": _fp8_dequant_hot_cache_enabled(),
         **{f"dequant_hot_cache_{key}": int(value) for key, value in _FP8_DEQUANT_HOT_CACHE_STATS.items()},
         **{key: int(value) for key, value in _FP8_ATTENTION_WEIGHT_CACHE_STATS.items()},
+    }
+
+
+def clear_fp8_mlp_span_cache() -> None:
+    """Clear process-local packed FP8 MLP span cache."""
+    global _FP8_MLP_SPAN_CACHE_BYTES
+    _FP8_MLP_SPAN_CACHE.clear()
+    _FP8_MLP_SPAN_CACHE_BYTES = 0
+    for key in _FP8_MLP_SPAN_CACHE_STATS:
+        _FP8_MLP_SPAN_CACHE_STATS[key] = 0
+
+
+def fp8_mlp_span_cache_snapshot() -> dict:
+    """Return process-local packed FP8 MLP span cache telemetry."""
+    return {
+        "entries": len(_FP8_MLP_SPAN_CACHE),
+        "bytes": int(_FP8_MLP_SPAN_CACHE_BYTES),
+        "max_bytes": int(_fp8_mlp_span_cache_max_bytes()),
+        **{key: int(value) for key, value in _FP8_MLP_SPAN_CACHE_STATS.items()},
     }
 
 
@@ -1873,6 +1897,7 @@ def _run_fp8_decode_loop_impl(
         step_summaries=summaries,
         next_kv_caches=caches,
         attention_weight_cache=fp8_attention_weight_cache_snapshot(),
+        mlp_span_cache=fp8_mlp_span_cache_snapshot(),
         fp8_pack=fp8_pack_telemetry(load_tensor_catalog(model_id).model_dir),
         blockers=blockers,
         ready=not blockers and position >= len(prompt),
@@ -2096,6 +2121,51 @@ def _read_scale_rows_for_weight_chunk(scale: TensorCatalogEntry, start_row: int,
     return _read_tensor_rows(scale, scale_start, scale_end).to(dtype=torch.float32)
 
 
+def _fp8_mlp_span_cache_key(names: list[str], location_path: Path, byte_offset: int, byte_length: int) -> str:
+    payload = {
+        "names": list(names),
+        "path": str(location_path),
+        "byte_offset": int(byte_offset),
+        "byte_length": int(byte_length),
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _get_fp8_mlp_span_cache(
+    key: str,
+) -> tuple[torch.Tensor, dict[str, tuple[int, int]]] | None:
+    cached = _FP8_MLP_SPAN_CACHE.get(key)
+    if cached is None:
+        _FP8_MLP_SPAN_CACHE_STATS["misses"] += 1
+        return None
+    _FP8_MLP_SPAN_CACHE.move_to_end(key)
+    _FP8_MLP_SPAN_CACHE_STATS["hits"] += 1
+    return cached
+
+
+def _store_fp8_mlp_span_cache(
+    key: str,
+    raw: torch.Tensor,
+    tensor_slices: dict[str, tuple[int, int]],
+) -> None:
+    max_bytes = _fp8_mlp_span_cache_max_bytes()
+    if max_bytes <= 0:
+        return
+    cache_bytes = int(raw.nelement() * raw.element_size())
+    if cache_bytes <= 0 or cache_bytes > max_bytes:
+        return
+    global _FP8_MLP_SPAN_CACHE_BYTES
+    while _FP8_MLP_SPAN_CACHE and _FP8_MLP_SPAN_CACHE_BYTES + cache_bytes > max_bytes:
+        _old_key, old_value = _FP8_MLP_SPAN_CACHE.popitem(last=False)
+        _FP8_MLP_SPAN_CACHE_BYTES -= int(old_value[0].nelement() * old_value[0].element_size())
+        _FP8_MLP_SPAN_CACHE_STATS["evictions"] += 1
+    cached_raw = raw.detach().contiguous()
+    cached_slices = {str(name): (int(span[0]), int(span[1])) for name, span in tensor_slices.items()}
+    _FP8_MLP_SPAN_CACHE[key] = (cached_raw, cached_slices)
+    _FP8_MLP_SPAN_CACHE_BYTES += cache_bytes
+    _FP8_MLP_SPAN_CACHE_STATS["stores"] += 1
+
+
 def _read_packed_mlp_full_tensors(
     gate: TensorCatalogEntry,
     gate_scale: TensorCatalogEntry,
@@ -2113,6 +2183,13 @@ def _read_packed_mlp_full_tensors(
     try:
         names = [entry.tensor_name for entry in entries]
         location = reader.get_tensor_span_location(names)
+        span_cache_key = _fp8_mlp_span_cache_key(names, Path(location.path), location.byte_offset, location.byte_length)
+        span_cached = _get_fp8_mlp_span_cache(span_cache_key)
+        if span_cached is not None:
+            raw, tensor_slices = span_cached
+        else:
+            raw = None
+            tensor_slices = None
         cache_path = _fp8_hot_cache_path(gate, names)
         cache_hit = (
             _fp8_hot_cache_enabled()
@@ -2120,7 +2197,9 @@ def _read_packed_mlp_full_tensors(
             and cache_path.exists()
             and cache_path.stat().st_size == int(location.byte_length)
         )
-        if cache_hit and cache_path is not None:
+        if raw is not None and tensor_slices is not None:
+            pass
+        elif cache_hit and cache_path is not None:
             raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
             native_read_tensor_bytes(cache_path, 0, int(location.byte_length), raw)
             tensor_slices = location.tensor_slices
@@ -2134,6 +2213,8 @@ def _read_packed_mlp_full_tensors(
             tensor_slices = location.tensor_slices
         if not cache_hit and cache_path is not None and _fp8_hot_cache_enabled():
             _write_fp8_hot_cache(cache_path, raw)
+        if span_cached is None and raw is not None and tensor_slices is not None:
+            _store_fp8_mlp_span_cache(span_cache_key, raw, tensor_slices)
     except (KeyError, ValueError):
         return None
 
@@ -2677,6 +2758,16 @@ def _fp8_pack_mmap_spans_enabled() -> bool:
 
 def _fp8_hot_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP8_HOT_CACHE", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _fp8_mlp_span_cache_max_bytes() -> int:
+    raw = os.environ.get("PCKETLM_FP8_MLP_SPAN_CACHE_MB", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(float(raw) * 1024 * 1024))
+    except ValueError:
+        return 0
 
 
 def _fp8_hot_cache_path(entry: TensorCatalogEntry, names: list[str]) -> Path | None:

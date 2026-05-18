@@ -1552,3 +1552,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep this cache separate from the lossless FP8 hot cache. `state/fp8_hot_cache` stores byte-identical FP8 pack spans; `state/fp8_dequant_cache` stores runtime-ready dequantized attention tensors.
 - Enable it by default because it preserves output equivalence and improves warm full-stack DeepSeek timing. Operators can disable it with `PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE=1`.
 - Do not call it a quality conversion path. It is a runtime cache of the same dequantized tensor the current FP8 source path already computes.
+
+## Phase FP8 Session Span Cache
+- Keep the process-local packed MLP span cache opt-in with `PCKETLM_FP8_MLP_SPAN_CACHE_MB`. Default stays `0` because a small cache caused churn and no real DeepSeek hit-rate win.
+- Use this cache only as a longer-session tuning knob. It can reuse packed expert/shared spans when routing repeats across generated tokens, but the one-token proof remains dominated by first-read costs.
+- Preserve the disk hot cache as the default read accelerator. The process span cache sits above it and should not replace byte-identical `state/fp8_hot_cache`.
