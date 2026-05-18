@@ -6037,3 +6037,11 @@ Result: 297 passed in 21.83s
 - Real DeepSeek layers `0-7`, prompt `[0,1]`, `max_new=2` with `4096 MB` cache had `10` hits, `114` stores, and reduced measured FFN layer time from `32.54s` to `30.84s`, but end-to-end elapsed stayed noise-level slower (`106.14s` vs `104.77s`).
 - Decision: keep the span cache as an operator/session tuning knob for longer chats, not an always-on speed path yet.
 
+## Phase FP8 Current Default Proof
+- Full test suite passed after the attention-cache and session-cache work: `432 passed`.
+- Current committed default DeepSeek bounded proof, prompt `[0,1]`, full `62` layers, `max_new=1`: `245.980s`.
+- Anti-cheat stayed clean: executed all `62` layers (`0-61`), pack enabled, `40` pack files open, `1,482` sequential reads, `0` scattered reads.
+- Attention dequant hot cache hit all `310` attention weights with `0` misses and `0` read/write errors.
+- Default MLP span cache stayed off (`max_bytes=0`), as intended after the opt-in decision.
+- Final top token ids stayed `[0, 261, 223, 65, 18]` with logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+

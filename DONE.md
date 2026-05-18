@@ -663,3 +663,9 @@
 - Added native many-expert FP8 MLP execution and routed packed selected experts through it.
 - Verified exact full-stack top-k equivalence with the scattered baseline.
 - Reduced full DeepSeek bounded `62`-layer timing to `260.999s`, `65.85%` faster than scattered and `24.74%` faster than hot-cache-only.
+
+## Phase FP8 Attention And Session Caches
+- Added persistent dequantized attention hot cache for the materialized FP8 MLA path.
+- Reduced current default full DeepSeek bounded `62`-layer timing to `245.980s` with exact top-k equivalence and `0` scattered reads.
+- Added an opt-in process-local packed MLP span cache for longer session experiments; default remains off because short-session measurements did not justify always-on RAM use.
+- Verified full test suite: `432 passed`.
