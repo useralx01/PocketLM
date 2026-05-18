@@ -357,5 +357,5 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 ## Phase FP8 Lossless Pack / Gate B miss
 - Symptom: full DeepSeek pack enabled run was only `10.52%` faster than scattered (`741.916s` vs `829.127s`), below the required `50%` timing delta.
 - Root cause: after exact reads and grouped expert spans, wall time is dominated by broad FP8 layer compute and Python/native per-layer execution, not only random external-disk seeks.
-- Fix state: reduced pack read count from `6,897` to `2,102` with grouped selected-expert reads, but left the phase marked partial because the hard timing gate still failed.
+- Fix: added a byte-identical local FP8 hot cache for used packed MLP spans and process-cached native read handles. The hot-cache full-stack run reached `346.815s` versus current scattered `764.224s`, a `54.62%` win, so Gate B now passes.
 

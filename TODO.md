@@ -151,5 +151,5 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Add the next timing detail only where it directly drives one of those speed cuts, such as separating FP8 payload read time from native expert math time.
 - Next product step: expose the bounded FP8 chat-template mode in the app once speed is less painful.
 - Next DeepSeek product step: wire the concise FP8 status summary into the desktop/web model view once that UI is the active work surface.
-- Next DeepSeek speed step: build a fused selected-expert FP8 kernel or batched expert executor; lossless packing cut read calls but did not reach the 50% timing gate.
+- Next DeepSeek speed step: build a fused selected-expert FP8 kernel or batched expert executor; lossless packing plus hot cache passes the 50% timing gate, but `346.815s` for a bounded full-stack token is still not interactive.
 - Next DeepSeek attention step: fuse MLA projection/attention work only where per-layer timing proves it beats the current materialized path.

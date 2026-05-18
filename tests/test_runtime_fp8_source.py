@@ -450,6 +450,28 @@ def test_run_fp8_decode_loop_uses_pack_when_available(tmp_path: Path, monkeypatc
     assert scattered.fp8_pack["scattered_reads"] > 0
 
 
+def test_fp8_pack_runtime_writes_hot_cache_for_used_mlp_spans(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+
+    result = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+    cache_files = list((tmp_path / "state" / "fp8_hot_cache").rglob("*.bin"))
+
+    assert result.ready is True
+    assert cache_files
+    assert all(path.stat().st_size > 0 for path in cache_files)
+
+
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     from pcketlm.core import storage
 

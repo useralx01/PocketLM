@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import hashlib
 import json
 import math
 import os
@@ -29,6 +30,7 @@ from pcketlm.native import (
     native_read_tensor_bytes,
 )
 from pcketlm.core.runtime.fp8_pack import fp8_pack_telemetry, reader_for_model_dir, record_scattered_read
+from pcketlm.core.storage.paths import state_root
 
 _FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTensor]" = OrderedDict()
 _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
@@ -913,6 +915,11 @@ def run_fp8_moe(
                 expert_jobs.append((int(expert_index), row_indices, top_indices, flat_hidden[row_indices].to(dtype=dtype)))
 
         expert_results: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor | None, int, int, list[str]]] = []
+        expert_prefixes = {
+            int(expert_index): f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}"
+            for expert_index, _row_indices, _top_indices, _expert_hidden in expert_jobs
+        }
+        preloaded_mlps = _preload_packed_mlp_prefixes(model_id, list(expert_prefixes.values()))
         workers = _fp8_moe_expert_workers()
         routed_start = time.perf_counter()
         if workers > 1 and len(expert_jobs) > 1:
@@ -921,9 +928,10 @@ def run_fp8_moe(
                     executor.submit(
                         _run_fp8_mlp_prefix,
                         model_id,
-                        f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}",
+                        expert_prefixes[int(expert_index)],
                         expert_hidden,
                         dtype=dtype,
+                        preloaded_mlp=preloaded_mlps.get(expert_prefixes[int(expert_index)]),
                     ): (expert_index, row_indices, top_indices)
                     for expert_index, row_indices, top_indices, expert_hidden in expert_jobs
                 }
@@ -935,11 +943,13 @@ def run_fp8_moe(
                     )
         else:
             for expert_index, row_indices, top_indices, expert_hidden in expert_jobs:
+                prefix = expert_prefixes[int(expert_index)]
                 expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers = _run_fp8_mlp_prefix(
                     model_id,
-                    f"model.layers.{int(layer_index)}.mlp.experts.{int(expert_index)}",
+                    prefix,
                     expert_hidden,
                     dtype=dtype,
+                    preloaded_mlp=preloaded_mlps.get(prefix),
                 )
                 expert_results.append(
                     (expert_index, row_indices, top_indices, expert_output, loaded_bytes, expert_dequant_bytes, expert_blockers)
@@ -1944,15 +1954,34 @@ def _read_packed_mlp_full_tensors(
         return None
     entries = [gate, gate_scale, up, up_scale, down, down_scale]
     try:
-        location = reader.get_tensor_span_location([entry.tensor_name for entry in entries])
+        names = [entry.tensor_name for entry in entries]
+        location = reader.get_tensor_span_location(names)
+        cache_path = _fp8_hot_cache_path(gate, names)
+        cache_hit = (
+            _fp8_hot_cache_enabled()
+            and cache_path is not None
+            and cache_path.exists()
+            and cache_path.stat().st_size == int(location.byte_length)
+        )
+        if cache_hit and cache_path is not None:
+            raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
+            native_read_tensor_bytes(cache_path, 0, int(location.byte_length), raw)
+            tensor_slices = location.tensor_slices
+        elif _fp8_pack_mmap_spans_enabled():
+            span = reader.get_tensor_span_bytes(names)
+            raw = torch.frombuffer(bytearray(span.bytes), dtype=torch.uint8)
+            tensor_slices = span.tensor_slices
+        else:
+            raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
+            native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, raw)
+            tensor_slices = location.tensor_slices
+        if not cache_hit and cache_path is not None and _fp8_hot_cache_enabled():
+            _write_fp8_hot_cache(cache_path, raw)
     except (KeyError, ValueError):
         return None
 
-    raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
-    native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, raw)
-
     def tensor_view(entry: TensorCatalogEntry, dtype: torch.dtype) -> torch.Tensor:
-        relative_offset, byte_length = location.tensor_slices[entry.tensor_name]
+        relative_offset, byte_length = tensor_slices[entry.tensor_name]
         data = raw[int(relative_offset) : int(relative_offset) + int(byte_length)]
         return data.view(dtype).reshape(tuple(int(value) for value in entry.shape))
 
@@ -1966,12 +1995,60 @@ def _read_packed_mlp_full_tensors(
     )
 
 
+def _preload_packed_mlp_prefix(
+    model_id: str,
+    prefix: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    gate = find_tensor_catalog_entry(model_id, f"{prefix}.gate_proj.weight")
+    up = find_tensor_catalog_entry(model_id, f"{prefix}.up_proj.weight")
+    down = find_tensor_catalog_entry(model_id, f"{prefix}.down_proj.weight")
+    if gate is None or up is None or down is None:
+        return None
+    if not gate.scale_tensor_name or not up.scale_tensor_name or not down.scale_tensor_name:
+        return None
+    gate_scale = find_tensor_catalog_entry(model_id, gate.scale_tensor_name)
+    up_scale = find_tensor_catalog_entry(model_id, up.scale_tensor_name)
+    down_scale = find_tensor_catalog_entry(model_id, down.scale_tensor_name)
+    if gate_scale is None or up_scale is None or down_scale is None:
+        return None
+    try:
+        return _read_packed_mlp_full_tensors(gate, gate_scale, up, up_scale, down, down_scale)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _preload_packed_mlp_prefixes(
+    model_id: str,
+    prefixes: list[str],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    if not prefixes or not reader_for_model_dir(load_tensor_catalog(model_id).model_dir):
+        return {}
+    workers = min(len(prefixes), _fp8_pack_prefetch_workers())
+    if workers <= 1:
+        loaded = {}
+        for prefix in prefixes:
+            tensors = _preload_packed_mlp_prefix(model_id, prefix)
+            if tensors is not None:
+                loaded[prefix] = tensors
+        return loaded
+    loaded: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_preload_packed_mlp_prefix, model_id, prefix): prefix for prefix in prefixes}
+        for future in as_completed(futures):
+            prefix = futures[future]
+            tensors = future.result()
+            if tensors is not None:
+                loaded[prefix] = tensors
+    return loaded
+
+
 def _run_fp8_native_mlp_full(
     model_id: str,
     prefix: str,
     hidden: torch.Tensor,
     *,
     dtype: torch.dtype,
+    preloaded_mlp: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor | None, int, int, list[str], bool]:
     if not (_native_fp8_linear_enabled() and native_fp8_mlp_available()):
         return None, 0, 0, [], False
@@ -2012,7 +2089,9 @@ def _run_fp8_native_mlp_full(
         return None, 0, 0, blockers, True
 
     try:
-        packed_mlp = _read_packed_mlp_full_tensors(gate, gate_scale, up, up_scale, down, down_scale)
+        packed_mlp = preloaded_mlp
+        if packed_mlp is None:
+            packed_mlp = _read_packed_mlp_full_tensors(gate, gate_scale, up, up_scale, down, down_scale)
         if packed_mlp is None:
             gate_rows = _read_fp8_weight_rows(gate, 0, int(gate.shape[0]))
             up_rows = _read_fp8_weight_rows(up, 0, int(up.shape[0]))
@@ -2053,12 +2132,14 @@ def _run_fp8_mlp_prefix(
     hidden: torch.Tensor,
     *,
     dtype: torch.dtype,
+    preloaded_mlp: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor | None, int, int, list[str]]:
     native_output, native_loaded, native_dequant, native_blockers, native_attempted = _run_fp8_native_mlp_full(
         model_id,
         prefix,
         hidden,
         dtype=dtype,
+        preloaded_mlp=preloaded_mlp,
     )
     if native_attempted and native_output is not None and not native_blockers:
         return native_output, native_loaded, native_dequant, []
@@ -2412,6 +2493,46 @@ def _fp8_moe_expert_workers() -> int:
         return max(1, int(raw))
     except ValueError:
         return 1
+
+
+def _fp8_pack_prefetch_workers() -> int:
+    raw = os.environ.get("PCKETLM_FP8_PACK_PREFETCH_WORKERS", "").strip()
+    if not raw:
+        return 8
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 8
+
+
+def _fp8_pack_mmap_spans_enabled() -> bool:
+    return os.environ.get("PCKETLM_FP8_PACK_MMAP_SPANS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fp8_hot_cache_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FP8_HOT_CACHE", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _fp8_hot_cache_path(entry: TensorCatalogEntry, names: list[str]) -> Path | None:
+    override = os.environ.get("PCKETLM_FP8_HOT_CACHE_DIR", "").strip()
+    try:
+        model_key = entry.shard_path.parent.name or "model"
+        root = Path(override) if override else state_root() / "fp8_hot_cache" / model_key
+        digest = hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()
+        layer = "global" if entry.layer_index is None else f"layer_{int(entry.layer_index):02d}"
+        return root / layer / f"{digest}.bin"
+    except (OSError, ValueError):
+        return None
+
+
+def _write_fp8_hot_cache(path: Path, raw: torch.Tensor) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        raw.detach().cpu().contiguous().numpy().tofile(str(tmp_path))
+        tmp_path.replace(path)
+    except (OSError, RuntimeError, ValueError):
+        return
 
 
 def _run_fp8_single_token_attention_materialized(

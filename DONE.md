@@ -653,3 +653,8 @@
 - Added lossless FP8 packed artifact planning.
 - Exposed the FP8 pack plan in acquisition state.
 - Verified the real DeepSeek V3 pack plan is ready and identifies routed expert packs as the dominant speed target.
+
+## Phase FP8 Lossless Pack
+- Built the full real DeepSeek V3 FP8 pack: `688,574,839,360` bytes across `41` pack files.
+- Added grouped packed MLP reads, a byte-identical local hot cache, and cached native read handles.
+- Verified byte identity, output equivalence, all `62` layers executed, and Gate B passed: pack hot-cache `346.815s` vs scattered `764.224s` (`54.62%` faster).

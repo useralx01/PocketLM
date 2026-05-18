@@ -1,6 +1,34 @@
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <windows.h>
+
+static HANDLE cached_read_handle(const char* path) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, HANDLE> handles;
+    const std::string key(path);
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto found = handles.find(key);
+    if (found != handles.end()) {
+        return found->second;
+    }
+    HANDLE handle = CreateFileA(
+        path,
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (handle == INVALID_HANDLE_VALUE) {
+        return INVALID_HANDLE_VALUE;
+    }
+    handles.emplace(key, handle);
+    return handle;
+}
 
 extern "C" __declspec(dllexport) int native_read_tensor_bytes(
     const char* path,
@@ -12,32 +40,29 @@ extern "C" __declspec(dllexport) int native_read_tensor_bytes(
         return 1;
     }
 
-    FILE* handle = nullptr;
-    const errno_t open_error = fopen_s(&handle, path, "rb");
-    if (open_error != 0 || handle == nullptr) {
+    HANDLE handle = cached_read_handle(path);
+    if (handle == INVALID_HANDLE_VALUE) {
         return 2;
-    }
-
-    if (_fseeki64(handle, static_cast<__int64>(absolute_offset), SEEK_SET) != 0) {
-        fclose(handle);
-        return 3;
     }
 
     uint64_t total_read = 0;
     while (total_read < nbytes) {
         const uint64_t remaining = nbytes - total_read;
-        const size_t chunk = remaining > static_cast<uint64_t>(SIZE_MAX)
-            ? SIZE_MAX
-            : static_cast<size_t>(remaining);
-        const size_t got = fread(out + total_read, 1, chunk, handle);
+        const DWORD chunk = remaining > static_cast<uint64_t>(0x7ffff000u)
+            ? static_cast<DWORD>(0x7ffff000u)
+            : static_cast<DWORD>(remaining);
+        OVERLAPPED overlapped = {};
+        const uint64_t read_offset = absolute_offset + total_read;
+        overlapped.Offset = static_cast<DWORD>(read_offset & 0xffffffffu);
+        overlapped.OffsetHigh = static_cast<DWORD>((read_offset >> 32) & 0xffffffffu);
+        DWORD got = 0;
+        const BOOL ok = ReadFile(handle, out + total_read, chunk, &got, &overlapped);
         total_read += static_cast<uint64_t>(got);
-        if (got != chunk) {
-            fclose(handle);
+        if (!ok || got != chunk) {
             return 4;
         }
     }
 
-    fclose(handle);
     return 0;
 }
 

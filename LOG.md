@@ -6000,3 +6000,14 @@ Result: 297 passed in 21.83s
 - Gate B failed honestly: grouped pack was `10.52%` faster than scattered, below the required `50%` timing delta. This means the lossless pack is correct and stable, but not yet the claimed I/O speed breakthrough on this machine.
 - Focused pack/runtime tests passed with `24 passed`; full test suite passed with `427 passed`.
 
+## Phase FP8 Lossless Pack / Hot Cache Completion
+- Continued after the initial Gate B miss by adding a byte-identical FP8 hot cache for packed MLP spans that were actually used by the route. The cache lives under `state/fp8_hot_cache` by default and can be disabled with `PCKETLM_DISABLE_FP8_HOT_CACHE=1`.
+- Added pack-layer prefetch for selected expert MLP spans and kept `PCKETLM_FP8_PACK_PREFETCH_WORKERS` configurable. The measured default for this machine is `8` workers.
+- Updated the native byte loader to reuse Windows read handles inside the process instead of reopening the file for every tensor/span read.
+- Hot-cache working set after the DeepSeek gate run: `42,244,855,296` bytes across `959` cache files.
+- Gate B now passes on the same full bounded DeepSeek prompt `[0, 1]`, full `62` layer stack, `max_new=1`.
+- Pack enabled hot-cache hit: `346.815s`, `2,102` sequential reads, `0` scattered reads, final top token ids `[0, 261, 223, 65, 18]`.
+- Pack disabled scattered current comparison: `764.224s`, `0` sequential reads, `6,897` scattered reads, final top token ids `[0, 261, 223, 65, 18]`.
+- Timing delta: pack hot-cache path is `54.62%` faster than scattered, passing the required `>=50%` gate.
+- Output equivalence stayed exact for the final top-k logits: `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+
