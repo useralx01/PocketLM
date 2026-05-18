@@ -1546,3 +1546,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use pointer arrays into existing tensors for the many-expert native call instead of stacking/copying all expert weights into a huge temporary tensor.
 - Keep `PCKETLM_DISABLE_NATIVE_FP8_MLP_MANY=1` as the fallback switch. The fused path is enabled by default after exact real DeepSeek top-k equivalence.
 - Treat routed expert compute as no longer the main full-stack blocker after this phase: routed experts dropped to about `4.93s` total across the full bounded run. Attention is now the largest measured target.
+
+## Phase FP8 Attention Dequant Hot Cache
+- Add a persistent dequantized attention hot cache because the materialized MLA path repeatedly reconstructs the same BF16/FP32 attention weights from FP8 source bytes and block scales.
+- Keep this cache separate from the lossless FP8 hot cache. `state/fp8_hot_cache` stores byte-identical FP8 pack spans; `state/fp8_dequant_cache` stores runtime-ready dequantized attention tensors.
+- Enable it by default because it preserves output equivalence and improves warm full-stack DeepSeek timing. Operators can disable it with `PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE=1`.
+- Do not call it a quality conversion path. It is a runtime cache of the same dequantized tensor the current FP8 source path already computes.

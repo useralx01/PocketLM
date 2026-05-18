@@ -6022,3 +6022,11 @@ Result: 297 passed in 21.83s
 - Full-stack timing delta is now `65.85%` faster than scattered and `24.74%` faster than hot-cache-only.
 - New full-stack timing split: attention about `155.31s`, FFN about `67.41s`, routed experts about `4.93s`. The next big speed target is now FP8 MLA attention and remaining dense/shared FFN work.
 
+## Phase FP8 Attention Dequant Hot Cache / Evidence
+- Added a persistent dequantized attention hot cache under `state/fp8_dequant_cache` for materialized FP8 attention weights. It reuses the exact BF16/FP32 tensor produced from FP8+scale dequantization and does not modify source safetensors or the lossless FP8 pack.
+- Focused DeepSeek layers `0-7`, prompt `[0,1]`, `max_new=1`: hot-cache hit ran in `53.600s`; attention time dropped to `16.38s` from the prior `19.21s` layers-8 fused-expert run.
+- Full DeepSeek cache populate pass completed in `444.734s`; this is expected to be slower because it wrote `270` newly cached attention tensors.
+- Full DeepSeek hot-cache hit, prompt `[0,1]`, `max_new=1`: runtime dropped to `244.528s` from the previous fused-expert `260.999s`.
+- Attention time dropped from `155.31s` to `126.49s`; pack scattered reads stayed `0`; final top token ids stayed `[0, 261, 223, 65, 18]` with identical logits `[24.537437438964844, 10.999222755432129, 10.961983680725098, 10.682106018066406, 10.563382148742676]`.
+- This is a real but modest win: `6.31%` faster than the fused-expert baseline and `68.00%` faster than the current scattered fallback.
+

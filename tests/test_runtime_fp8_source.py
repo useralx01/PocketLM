@@ -451,6 +451,44 @@ def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatc
     assert second.loaded_weight_bytes == 0
 
 
+def test_fp8_attention_materialized_reuses_dequant_hot_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    fp8_source.clear_fp8_attention_weight_cache()
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    first = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    first_snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+    fp8_source.clear_fp8_attention_weight_cache()
+
+    def fail_load(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("source FP8 dequantization should not run on a hot-cache hit")
+
+    monkeypatch.setattr(fp8_source, "load_dequantized_fp8_weight", fail_load)
+    second = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    second_snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+
+    assert first.ready is True
+    assert first_snapshot["dequant_hot_cache_stores"] >= 5
+    assert second.ready is True
+    assert second.loaded_weight_bytes == 0
+    assert second_snapshot["dequant_hot_cache_hits"] >= 5
+
+
 def test_run_fp8_decode_loop_uses_pack_when_available(tmp_path: Path, monkeypatch) -> None:
     from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
     from tools.pack_fp8 import pack_model_dir_to_fp8

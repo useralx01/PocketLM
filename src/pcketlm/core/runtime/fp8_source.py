@@ -37,6 +37,7 @@ from pcketlm.core.storage.paths import state_root
 _FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTensor]" = OrderedDict()
 _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
 _FP8_ATTENTION_WEIGHT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FP8_DEQUANT_HOT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "read_errors": 0, "write_errors": 0}
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -700,6 +701,8 @@ def clear_fp8_attention_weight_cache() -> None:
     _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
     for key in _FP8_ATTENTION_WEIGHT_CACHE_STATS:
         _FP8_ATTENTION_WEIGHT_CACHE_STATS[key] = 0
+    for key in _FP8_DEQUANT_HOT_CACHE_STATS:
+        _FP8_DEQUANT_HOT_CACHE_STATS[key] = 0
 
 
 def fp8_attention_weight_cache_snapshot() -> dict:
@@ -708,6 +711,8 @@ def fp8_attention_weight_cache_snapshot() -> dict:
         "entries": len(_FP8_ATTENTION_WEIGHT_CACHE),
         "bytes": int(_FP8_ATTENTION_WEIGHT_CACHE_BYTES),
         "max_bytes": int(_fp8_attention_weight_cache_max_bytes()),
+        "dequant_hot_cache_enabled": _fp8_dequant_hot_cache_enabled(),
+        **{f"dequant_hot_cache_{key}": int(value) for key, value in _FP8_DEQUANT_HOT_CACHE_STATS.items()},
         **{key: int(value) for key, value in _FP8_ATTENTION_WEIGHT_CACHE_STATS.items()},
     }
 
@@ -719,32 +724,49 @@ def _load_dequantized_fp8_attention_weight(
     dtype: torch.dtype,
 ) -> FP8DequantizedTensor:
     max_bytes = _fp8_attention_weight_cache_max_bytes()
-    if max_bytes <= 0:
-        return load_dequantized_fp8_weight(model_id, weight_name, dtype=dtype)
     key = (str(model_id), str(weight_name), str(dtype).replace("torch.", ""))
-    cached = _FP8_ATTENTION_WEIGHT_CACHE.get(key)
-    if cached is not None and cached.tensor is not None:
-        _FP8_ATTENTION_WEIGHT_CACHE.move_to_end(key)
-        _FP8_ATTENTION_WEIGHT_CACHE_STATS["hits"] += 1
-        return FP8DequantizedTensor(
-            model_id=cached.model_id,
-            weight_name=cached.weight_name,
-            scale_name=cached.scale_name,
-            shape=list(cached.shape),
-            dtype=cached.dtype,
-            loaded_nbytes=0,
-            tensor=cached.tensor,
-            blockers=[],
-            ready=True,
-        )
+    if max_bytes > 0:
+        cached = _FP8_ATTENTION_WEIGHT_CACHE.get(key)
+        if cached is not None and cached.tensor is not None:
+            _FP8_ATTENTION_WEIGHT_CACHE.move_to_end(key)
+            _FP8_ATTENTION_WEIGHT_CACHE_STATS["hits"] += 1
+            return FP8DequantizedTensor(
+                model_id=cached.model_id,
+                weight_name=cached.weight_name,
+                scale_name=cached.scale_name,
+                shape=list(cached.shape),
+                dtype=cached.dtype,
+                loaded_nbytes=0,
+                tensor=cached.tensor,
+                blockers=[],
+                ready=True,
+            )
+        _FP8_ATTENTION_WEIGHT_CACHE_STATS["misses"] += 1
 
-    _FP8_ATTENTION_WEIGHT_CACHE_STATS["misses"] += 1
+    disk_cached = _load_fp8_dequant_hot_cache(model_id, weight_name, dtype=dtype)
+    if disk_cached is not None:
+        _store_fp8_attention_weight_cache(key, disk_cached, max_bytes=max_bytes)
+        return disk_cached
+
     loaded = load_dequantized_fp8_weight(model_id, weight_name, dtype=dtype)
     if loaded.tensor is None or loaded.blockers:
         return loaded
+    _write_fp8_dequant_hot_cache(loaded)
+    _store_fp8_attention_weight_cache(key, loaded, max_bytes=max_bytes)
+    return loaded
+
+
+def _store_fp8_attention_weight_cache(
+    key: tuple[str, str, str],
+    loaded: FP8DequantizedTensor,
+    *,
+    max_bytes: int,
+) -> None:
+    if max_bytes <= 0 or loaded.tensor is None or loaded.blockers:
+        return
     tensor_bytes = int(loaded.tensor.nelement() * loaded.tensor.element_size())
     if tensor_bytes > max_bytes:
-        return loaded
+        return
     global _FP8_ATTENTION_WEIGHT_CACHE_BYTES
     while _FP8_ATTENTION_WEIGHT_CACHE and _FP8_ATTENTION_WEIGHT_CACHE_BYTES + tensor_bytes > max_bytes:
         _old_key, old_value = _FP8_ATTENTION_WEIGHT_CACHE.popitem(last=False)
@@ -765,7 +787,103 @@ def _load_dequantized_fp8_attention_weight(
     _FP8_ATTENTION_WEIGHT_CACHE[key] = cached_value
     _FP8_ATTENTION_WEIGHT_CACHE_BYTES += tensor_bytes
     _FP8_ATTENTION_WEIGHT_CACHE_STATS["stores"] += 1
-    return loaded
+
+
+def _fp8_dequant_hot_cache_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _fp8_dequant_hot_cache_path(model_id: str, entry: TensorCatalogEntry, dtype: torch.dtype) -> Path | None:
+    if not _fp8_dequant_hot_cache_enabled():
+        return None
+    override = os.environ.get("PCKETLM_FP8_DEQUANT_HOT_CACHE_DIR", "").strip()
+    try:
+        catalog = load_tensor_catalog(model_id)
+        model_key = catalog.model_dir.name or str(model_id)
+        digest_payload = {
+            "model_id": str(model_id),
+            "tensor_name": entry.tensor_name,
+            "scale_tensor_name": entry.scale_tensor_name,
+            "dtype": str(dtype).replace("torch.", ""),
+            "shape": list(entry.shape),
+            "source_nbytes": int(entry.data_nbytes),
+            "source_offset_start": int(entry.data_offset_start),
+            "source_offset_end": int(entry.data_offset_end),
+            "shard_name": entry.shard_name,
+        }
+        digest = hashlib.sha1(json.dumps(digest_payload, sort_keys=True).encode("utf-8")).hexdigest()
+        layer = "global" if entry.layer_index is None else f"layer_{int(entry.layer_index):02d}"
+        root = Path(override) if override else state_root() / "fp8_dequant_cache" / model_key
+        return root / layer / f"{digest}.bin"
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _load_fp8_dequant_hot_cache(
+    model_id: str,
+    weight_name: str,
+    *,
+    dtype: torch.dtype,
+) -> FP8DequantizedTensor | None:
+    entry = find_tensor_catalog_entry(model_id, weight_name)
+    if entry is None:
+        return None
+    cache_path = _fp8_dequant_hot_cache_path(model_id, entry, dtype)
+    if cache_path is None:
+        return None
+    expected_shape = tuple(int(value) for value in entry.shape)
+    expected_nbytes = int(math.prod(expected_shape) * torch.empty((), dtype=dtype).element_size())
+    try:
+        if not cache_path.exists() or cache_path.stat().st_size != expected_nbytes:
+            _FP8_DEQUANT_HOT_CACHE_STATS["misses"] += 1
+            return None
+        tensor = torch.empty(expected_shape, dtype=dtype)
+        if expected_nbytes:
+            if native_fp16_loader_available():
+                native_read_tensor_bytes(cache_path, 0, expected_nbytes, tensor)
+            else:
+                raw = cache_path.read_bytes()
+                tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(expected_shape).clone()
+        _FP8_DEQUANT_HOT_CACHE_STATS["hits"] += 1
+        return FP8DequantizedTensor(
+            model_id=model_id,
+            weight_name=entry.tensor_name,
+            scale_name=entry.scale_tensor_name,
+            shape=list(entry.shape),
+            dtype=str(dtype).replace("torch.", ""),
+            loaded_nbytes=0,
+            tensor=tensor.contiguous(),
+            blockers=[],
+            ready=True,
+        )
+    except (OSError, RuntimeError, ValueError):
+        _FP8_DEQUANT_HOT_CACHE_STATS["read_errors"] += 1
+        return None
+
+
+def _write_fp8_dequant_hot_cache(loaded: FP8DequantizedTensor) -> None:
+    if loaded.tensor is None or loaded.blockers or not _fp8_dequant_hot_cache_enabled():
+        return
+    entry = find_tensor_catalog_entry(loaded.model_id, loaded.weight_name)
+    if entry is None:
+        return
+    dtype = loaded.tensor.dtype
+    cache_path = _fp8_dequant_hot_cache_path(loaded.model_id, entry, dtype)
+    if cache_path is None:
+        return
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(".tmp")
+        loaded.tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tofile(str(tmp_path))
+        tmp_path.replace(cache_path)
+        _FP8_DEQUANT_HOT_CACHE_STATS["stores"] += 1
+    except (OSError, RuntimeError, ValueError):
+        _FP8_DEQUANT_HOT_CACHE_STATS["write_errors"] += 1
 
 
 def run_fp8_expert_mlp(
