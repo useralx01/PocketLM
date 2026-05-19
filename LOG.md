@@ -6093,3 +6093,13 @@ Result: 297 passed in 21.83s
 - Hypothesis 3: treat the current C boundary as the PLM-4 monolithic call counter while Python attention remains in production. Rejected because the real FP8 decode path never enters `pcketlm_forward_decode`; fresh global `monolithic_call_count("all")` after reset is `0`, so the required `monolithic_call_counter > 0` gate fails.
 - Existing full DeepSeek proof remains far above the PLM-4 raw target: committed current default full 62-layer one-token run is `245.980s` with all `62` layers executed and top ids `[0, 261, 223, 65, 18]`; the ticket requires `<=10s/token` raw and `<=2s/token` effective with speculative.
 - Outcome: PLM-4 cannot be marked done without a real DeepSeek FP8 monolithic execution backend. No partial PLM-4 code was committed.
+
+## PLM-5 DeepSeek C-Side Session / Evidence
+- Branch: `plm-5-deepseek-c-side-session-fp8-pack-interface`.
+- Added `src/pcketlm/native/ds_forward.cpp` and built `src/pcketlm/native/ds_forward.dll`.
+- Added `DeepSeekNativeSession` ctypes bindings with `PCKETLM_DISABLE_DS_MONOLITHIC=1` as the future routing kill switch.
+- Added `tests/test_native_ds_session.py` with a synthetic 2-layer FP8 pack fixture. The Python callbacks read tensor bytes through `FP8PackReader`, hand pointers to C, and C stores the pointer/nbytes metadata.
+- Focused tests: `python -m pytest tests\test_native_ds_session.py -q` -> `2 passed in 2.82s`.
+- Callback anti-bluff: synthetic fixture registered `2` layers and C reported `4` callback invocations (`2` FP8 callbacks + `2` scale callbacks); first registered FP8 payload was `8` bytes and scale payload was `4` bytes.
+- Full suite: `python -m pytest tests\ -q` -> `444 passed in 24.89s`.
+- No production routing changes were made.

@@ -157,3 +157,4 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 Done: PLM-1 Native FP8 dequant kernel.
 Done: PLM-2 Native FP8 linear MLP gate.
 - Resolve PLM-4 by adding a real DeepSeek FP8 monolithic backend or explicitly revising PLM-4 acceptance to allow Python orchestration with native FP8 kernels.
+Done: PLM-5 DeepSeek C-side session + FP8 pack interface.

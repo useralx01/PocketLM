@@ -688,3 +688,4 @@
 - Real DeepSeek expert microbench: `29.049 ms` native vs `95.646 ms` Python (`3.293x`).
 - Full DeepSeek 62-layer kill-switch comparison: `307.894s` enabled vs `800.553s` disabled (`61.54%` faster).
 - Full suite passed: `442 passed in 33.16s`.
+PLM-5 DeepSeek C-side session + FP8 pack interface: done. Added `ds_forward.dll`, ctypes wrapper, synthetic FP8PackReader callback tests, and kill switch coverage.

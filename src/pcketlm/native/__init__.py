@@ -22,6 +22,7 @@ _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
 _FP8_DEQUANT_DLL = _NATIVE_DIR / "fp8_dequant.dll"
 _FP8_LINEAR_DLL = _NATIVE_DIR / "fp8_linear.dll"
+_DS_FORWARD_DLL = _NATIVE_DIR / "ds_forward.dll"
 _PCKETLM_FORWARD_DLL = _NATIVE_DIR / "pcketlm_forward.dll"
 _Q4_LIB: ctypes.CDLL | None = None
 _Q4_LOAD_ERROR: Exception | None = None
@@ -43,6 +44,8 @@ _FP8_DEQUANT_LIB: ctypes.CDLL | None = None
 _FP8_DEQUANT_ERROR: Exception | None = None
 _FP8_LINEAR_LIB: ctypes.CDLL | None = None
 _FP8_LINEAR_ERROR: Exception | None = None
+_DS_FORWARD_LIB: ctypes.CDLL | None = None
+_DS_FORWARD_ERROR: Exception | None = None
 _PCKETLM_FORWARD_LIB: ctypes.CDLL | None = None
 _PCKETLM_FORWARD_ERROR: Exception | None = None
 _PACKED_GEMV_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
@@ -97,6 +100,10 @@ def _native_fp8_dequant_disabled() -> bool:
 
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ds_monolithic_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_DS_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _u16_storage_dtype_code(dtype: torch.dtype) -> int:
@@ -356,6 +363,178 @@ def native_fp8_linear_available() -> bool:
 def native_fp8_linear_error() -> Exception | None:
     _load_fp8_linear_lib()
     return _FP8_LINEAR_ERROR
+
+
+_DS_TENSOR_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_longlong,
+    ctypes.c_longlong,
+    ctypes.c_longlong,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_longlong),
+)
+
+
+def _load_ds_forward_lib() -> ctypes.CDLL | None:
+    global _DS_FORWARD_LIB, _DS_FORWARD_ERROR
+    if _ds_monolithic_disabled():
+        return None
+    if _DS_FORWARD_LIB is not None:
+        return _DS_FORWARD_LIB
+    if not _DS_FORWARD_DLL.exists():
+        _DS_FORWARD_ERROR = FileNotFoundError(str(_DS_FORWARD_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_DS_FORWARD_DLL))
+        lib.ds_cpu_has_avx2.argtypes = []
+        lib.ds_cpu_has_avx2.restype = ctypes.c_int
+        lib.ds_session_create.argtypes = [
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.ds_session_create.restype = ctypes.c_void_p
+        lib.ds_session_destroy.argtypes = [ctypes.c_void_p]
+        lib.ds_session_destroy.restype = None
+        lib.ds_session_register_layer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            _DS_TENSOR_CALLBACK,
+            _DS_TENSOR_CALLBACK,
+        ]
+        lib.ds_session_register_layer.restype = ctypes.c_int
+        lib.ds_monolithic_call_counter.argtypes = [ctypes.c_void_p]
+        lib.ds_monolithic_call_counter.restype = ctypes.c_longlong
+        lib.ds_callback_invocation_count.argtypes = [ctypes.c_void_p]
+        lib.ds_callback_invocation_count.restype = ctypes.c_longlong
+        lib.ds_registered_layer_count.argtypes = [ctypes.c_void_p]
+        lib.ds_registered_layer_count.restype = ctypes.c_longlong
+        lib.ds_registered_fp8_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.ds_registered_fp8_nbytes.restype = ctypes.c_longlong
+        lib.ds_registered_scale_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+        lib.ds_registered_scale_nbytes.restype = ctypes.c_longlong
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _DS_FORWARD_ERROR = exc
+        return None
+    _DS_FORWARD_LIB = lib
+    _DS_FORWARD_ERROR = None
+    return lib
+
+
+def native_ds_forward_available() -> bool:
+    return _load_ds_forward_lib() is not None
+
+
+def native_ds_forward_error() -> Exception | None:
+    _load_ds_forward_lib()
+    return _DS_FORWARD_ERROR
+
+
+def native_ds_forward_has_avx2() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(lib and lib.ds_cpu_has_avx2())
+
+
+class DeepSeekNativeSession:
+    """ctypes wrapper for the DeepSeek C-side session and pack callbacks."""
+
+    def __init__(
+        self,
+        *,
+        num_layers: int,
+        hidden_dim: int,
+        num_experts: int,
+        top_k: int,
+        fp8_pack_callback: object | None = None,
+        kv_session_handle: int | None = None,
+    ):
+        lib = _load_ds_forward_lib()
+        if lib is None:
+            reason = "disabled" if _ds_monolithic_disabled() else _DS_FORWARD_ERROR
+            raise RuntimeError(f"DeepSeek native session is unavailable: {reason}")
+        self._lib = lib
+        self._callback_keepalive: list[object] = []
+        self._tensor_keepalive: list[object] = []
+        pack_ptr = 0 if fp8_pack_callback is None else int(ctypes.cast(fp8_pack_callback, ctypes.c_void_p).value or 0)
+        kv_ptr = 0 if kv_session_handle is None else int(kv_session_handle)
+        handle = lib.ds_session_create(
+            ctypes.c_longlong(int(num_layers)),
+            ctypes.c_longlong(int(hidden_dim)),
+            ctypes.c_longlong(int(num_experts)),
+            ctypes.c_longlong(int(top_k)),
+            ctypes.c_void_p(pack_ptr),
+            ctypes.c_void_p(kv_ptr),
+        )
+        if not handle:
+            raise RuntimeError("ds_session_create returned a null handle")
+        self._handle = ctypes.c_void_p(handle)
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._lib.ds_session_destroy(self._handle)
+            self._handle = None
+            self._callback_keepalive.clear()
+            self._tensor_keepalive.clear()
+
+    def __enter__(self) -> "DeepSeekNativeSession":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    @staticmethod
+    def tensor_callback(fn):
+        return _DS_TENSOR_CALLBACK(fn)
+
+    def register_layer(
+        self,
+        *,
+        layer_idx: int,
+        layer_kind: int,
+        weight_role: int,
+        fp8_callback,
+        scale_callback,
+    ) -> None:
+        fp8_cb = fp8_callback if isinstance(fp8_callback, _DS_TENSOR_CALLBACK) else _DS_TENSOR_CALLBACK(fp8_callback)
+        scale_cb = (
+            scale_callback
+            if isinstance(scale_callback, _DS_TENSOR_CALLBACK)
+            else _DS_TENSOR_CALLBACK(scale_callback)
+        )
+        self._callback_keepalive.extend([fp8_cb, scale_cb])
+        code = self._lib.ds_session_register_layer(
+            self._handle,
+            ctypes.c_longlong(int(layer_idx)),
+            ctypes.c_longlong(int(layer_kind)),
+            ctypes.c_longlong(int(weight_role)),
+            fp8_cb,
+            scale_cb,
+        )
+        if code != 0:
+            raise RuntimeError(f"ds_session_register_layer failed with code {code}")
+
+    def keep_tensor_alive(self, tensor: object) -> None:
+        self._tensor_keepalive.append(tensor)
+
+    def monolithic_call_count(self) -> int:
+        return int(self._lib.ds_monolithic_call_counter(self._handle))
+
+    def callback_invocation_count(self) -> int:
+        return int(self._lib.ds_callback_invocation_count(self._handle))
+
+    def registered_layer_count(self) -> int:
+        return int(self._lib.ds_registered_layer_count(self._handle))
+
+    def registered_fp8_nbytes(self, index: int) -> int:
+        return int(self._lib.ds_registered_fp8_nbytes(self._handle, ctypes.c_longlong(int(index))))
+
+    def registered_scale_nbytes(self, index: int) -> int:
+        return int(self._lib.ds_registered_scale_nbytes(self._handle, ctypes.c_longlong(int(index))))
 
 
 def native_fp8_dual_linear_available() -> bool:

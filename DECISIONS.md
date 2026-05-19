@@ -1574,3 +1574,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the existing hand-rolled OpenMP C kernel path for FP8 MLP instead of adding a BLAS dependency. The kernel fuses FP8 E4M3 lookup, per-block scale application, gate/up projection, SiLU activation, and down projection without materializing full dequantized weights.
 - Use `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` as the one kill switch for native single linear, dual linear, full MLP, and many-expert MLP.
 - Treat the direct real MLP F32 reference as the correctness gate for this ticket. The full decode kill-switch row is a performance sanity row; its close-logit top order can differ because the fallback takes the older materialized dtype route.
+
+## PLM-5 DeepSeek C-Side Session
+- Use a separate `ds_forward.dll` instead of extending `pcketlm_forward.dll`. The old DLL remains the synthetic dense monolithic boundary; the DeepSeek path needs different FP8 pack callbacks and later ticket-specific kernels.
+- Store callback-returned pointer metadata in the C session, but keep tensor lifetime owned by Python for now. The Python wrapper keeps callbacks alive; later tickets can move ownership or add explicit arena management if needed.
+- Keep `PCKETLM_DISABLE_DS_MONOLITHIC=1` separate from `PCKETLM_DISABLE_MONOLITHIC=1` so DeepSeek monolithic routing can be disabled without affecting existing synthetic/general monolithic tests.
