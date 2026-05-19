@@ -363,3 +363,7 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: first full DeepSeek single-token comparison returned native top ids `[0, 223, 261, 65, 18]` while Python fallback returned `[0, 261, 223, 65, 18]`.
 - Root cause: the first native runtime integration returned FP16 tensors for the default DeepSeek path, while the Python path dequantized to BF16. The two close logits around tokens `223` and `261` changed order.
 - Fix: added `fp8_e4m3_dequant_to_bf16` to the native DLL and routed `dtype=torch.bfloat16` calls through it. Rerun matched top ids and logits exactly: `[0, 261, 223, 65, 18]` and `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`.
+## PLM-2 Native FP8 Linear / Windows Application Control after rebuild
+- Symptom: after forcing a native rebuild while experimenting with `fp8_linear.cpp`, `fp8_linear.dll` and `fp16_loader.dll` were blocked with `[WinError 4551] An Application Control policy has blocked this file`.
+- Root cause: locally rebuilt DLLs can be policy-blocked on this Windows machine even when the committed DLLs are allowed.
+- Fix: reverted the rebuilt non-ticket DLLs to the previously committed binaries and avoided changing `fp8_linear.cpp` in this ticket. Native availability returned to `True`, and focused tests passed.

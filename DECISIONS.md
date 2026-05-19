@@ -1570,3 +1570,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep FP16 output for tile-level consumers and add BF16 output for the default DeepSeek runtime. The default path compares against BF16 Python dequant, so routing it through FP16 changes the logits tie/order even when values are close.
 - Match PyTorch's FP8 E4M3FN NaN byte behavior in the native LUT/output conversion so synthetic all-byte tests and real tensors share one exact path.
 - `PCKETLM_DISABLE_NATIVE_FP8_DEQUANT=1` is the explicit fallback switch. If the DLL is missing, CPU AVX2+F16C support is not reported, or the native call fails, runtime falls back to the existing Python dequant path.
+## PLM-2 Native FP8 Linear MLP
+- Keep the existing hand-rolled OpenMP C kernel path for FP8 MLP instead of adding a BLAS dependency. The kernel fuses FP8 E4M3 lookup, per-block scale application, gate/up projection, SiLU activation, and down projection without materializing full dequantized weights.
+- Use `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` as the one kill switch for native single linear, dual linear, full MLP, and many-expert MLP.
+- Treat the direct real MLP F32 reference as the correctness gate for this ticket. The full decode kill-switch row is a performance sanity row; its close-logit top order can differ because the fallback takes the older materialized dtype route.

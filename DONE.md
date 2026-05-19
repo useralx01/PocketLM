@@ -682,3 +682,9 @@
 - 4096x4096 microbench passed the 3x gate: `3.999 ms` native vs `42.610 ms` Python (`10.655x`).
 - DeepSeek full 62-layer single-token top-k matched the Python fallback exactly after the BF16 native output fix.
 - Full suite passed: `439 passed in 32.76s`.
+## PLM-2 Native FP8 Linear MLP
+- Confirmed the existing fused native FP8 MLP path satisfies the ticket gate with real DeepSeek evidence.
+- Added direct native FP8 linear/MLP tests and kill-switch coverage.
+- Real DeepSeek expert microbench: `29.049 ms` native vs `95.646 ms` Python (`3.293x`).
+- Full DeepSeek 62-layer kill-switch comparison: `307.894s` enabled vs `800.553s` disabled (`61.54%` faster).
+- Full suite passed: `442 passed in 33.16s`.

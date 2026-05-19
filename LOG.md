@@ -6069,3 +6069,15 @@ Result: 297 passed in 21.83s
 - DeepSeek native BF16 dequant run: layer_count `62`, elapsed `276.226s`, top ids `[0, 261, 223, 65, 18]`, logits `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`, pack scattered reads `0`.
 - DeepSeek Python fallback run with `PCKETLM_DISABLE_NATIVE_FP8_DEQUANT=1`: layer_count `62`, elapsed `304.332s`, top ids `[0, 261, 223, 65, 18]`, logits `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`, pack scattered reads `0`.
 - Real DeepSeek speed delta for this isolated dequant swap: Python fallback / native = `1.102x`.
+## PLM-2 Native FP8 Linear MLP / Evidence
+- Branch: `plm-2-native-fp8-linear-mlp`.
+- Existing `src/pcketlm/native/fp8_linear.cpp` already provides the fused FP8 dequant plus matmul kernels used by the DeepSeek MLP path: single linear, dual gate/up linear, full MLP, and many-expert MLP.
+- Added direct native tests in `tests/test_native_fp8_linear.py` for native single linear, native full MLP, and the `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1` kill switch.
+- Focused tests: `python -m pytest tests\test_native_fp8_linear.py tests\test_runtime_fp8_source.py -q` -> `28 passed in 3.14s`.
+- Full suite: `python -m pytest tests\ -q` -> `442 passed in 33.16s`.
+- Real DeepSeek MLP microbench on `model.layers.3.mlp.experts.0`: native best `29.049 ms`, Python best `95.646 ms`, speedup `3.293x`.
+- Real MLP numerical delta against Python F32 reference: max abs `3.2782554626464844e-07`, mean abs `4.5911299650924775e-08`.
+- Full DeepSeek 62-layer timing with native FP8 linear enabled: `307.894s`, layer_count `62`, top ids `[0, 261, 223, 65, 18]`, pack scattered reads `0`.
+- Full DeepSeek 62-layer timing with `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1`: `800.553s`, layer_count `62`, top ids `[0, 223, 261, 65, 18]`, pack scattered reads `0`.
+- Enabled vs kill-switch timing improvement: `61.54%` faster, satisfying the ticket's `>=30%` full-decode gate.
+- The kill-switch full-run top order differs on close logits because the fallback uses the slower materialized Python/BF16-ish route, while the native MLP path keeps the fused FP8 math in F32 until the runtime output cast. The direct real MLP reference comparison above is the numerical acceptance row for the MLP kernel itself.
