@@ -1579,3 +1579,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use a separate `ds_forward.dll` instead of extending `pcketlm_forward.dll`. The old DLL remains the synthetic dense monolithic boundary; the DeepSeek path needs different FP8 pack callbacks and later ticket-specific kernels.
 - Store callback-returned pointer metadata in the C session, but keep tensor lifetime owned by Python for now. The Python wrapper keeps callbacks alive; later tickets can move ownership or add explicit arena management if needed.
 - Keep `PCKETLM_DISABLE_DS_MONOLITHIC=1` separate from `PCKETLM_DISABLE_MONOLITHIC=1` so DeepSeek monolithic routing can be disabled without affecting existing synthetic/general monolithic tests.
+
+## PLM-6 Native DeepSeek Router
+- Add `hidden_dim` and `dtype_code` to the C router ABI even though the ticket's short signature omitted them. The kernel cannot safely read row-major router weights without the hidden dimension, and DeepSeek runtime tensors may be fp16 or bf16 storage.
+- Keep PLM-6 as a standalone softmax top-k router primitive. The current production DeepSeek router has extra sigmoid/group/bias policy; later integration can layer that policy around this primitive or add a policy-specific native variant.
+- Use `PCKETLM_DISABLE_NATIVE_DS_ROUTER=1` for router-only fallback without disabling the rest of the DeepSeek monolithic session.

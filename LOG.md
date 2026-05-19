@@ -6103,3 +6103,13 @@ Result: 297 passed in 21.83s
 - Callback anti-bluff: synthetic fixture registered `2` layers and C reported `4` callback invocations (`2` FP8 callbacks + `2` scale callbacks); first registered FP8 payload was `8` bytes and scale payload was `4` bytes.
 - Full suite: `python -m pytest tests\ -q` -> `444 passed in 24.89s`.
 - No production routing changes were made.
+
+## PLM-6 Native DeepSeek Router / Evidence
+- Branch: `plm-6-native-deepseek-router-top-k-softmax-kernel`.
+- Added `ds_router_topk_u16()` to `src/pcketlm/native/ds_forward.cpp` and exposed `ds_router_topk()` through the Python native bindings.
+- Added `PCKETLM_DISABLE_NATIVE_DS_ROUTER=1` as the native router kill switch; the wrapper falls back to a Python reference.
+- Added `tests/test_native_ds_router.py`.
+- Focused tests: `python -m pytest tests\test_native_ds_router.py -q` -> `3 passed in 7.89s`.
+- Combined focused tests: `python -m pytest tests\test_native_ds_router.py tests\test_native_ds_session.py -q` -> `5 passed in 2.88s`.
+- Real DeepSeek router anti-bluff used `model.layers.3.mlp.gate.weight` because DeepSeek layers `0-2` are dense. Native and Python reference produced identical top-8 expert ids for the same deterministic hidden vector.
+- Full suite: `python -m pytest tests\ -q` -> `447 passed in 26.42s`.

@@ -98,6 +98,10 @@ def _native_fp8_dequant_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_DEQUANT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_ds_router_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_DS_ROUTER", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -418,6 +422,17 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
         lib.ds_registered_fp8_nbytes.restype = ctypes.c_longlong
         lib.ds_registered_scale_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
         lib.ds_registered_scale_nbytes.restype = ctypes.c_longlong
+        lib.ds_router_topk_u16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.ds_router_topk_u16.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _DS_FORWARD_ERROR = exc
         return None
@@ -438,6 +453,62 @@ def native_ds_forward_error() -> Exception | None:
 def native_ds_forward_has_avx2() -> bool:
     lib = _load_ds_forward_lib()
     return bool(lib and lib.ds_cpu_has_avx2())
+
+
+def native_ds_router_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(lib is not None and not _native_ds_router_disabled() and hasattr(lib, "ds_router_topk_u16"))
+
+
+def ds_router_topk(
+    hidden: torch.Tensor,
+    router_weights: torch.Tensor,
+    *,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run DeepSeek router top-k, falling back to the Python reference when disabled."""
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1)
+    weights_cpu = router_weights.detach().cpu().contiguous()
+    if weights_cpu.ndim != 2:
+        raise ValueError("router_weights must be rank-2 [num_experts, hidden_dim]")
+    if hidden_cpu.numel() != weights_cpu.shape[1]:
+        raise ValueError("hidden size must match router weight columns")
+    effective_k = max(1, min(int(k), int(weights_cpu.shape[0])))
+    if not native_ds_router_available():
+        return _python_ds_router_topk(hidden_cpu, weights_cpu, effective_k)
+    if hidden_cpu.dtype not in {torch.float16, torch.bfloat16}:
+        hidden_cpu = hidden_cpu.to(torch.float16)
+    if weights_cpu.dtype != hidden_cpu.dtype:
+        weights_cpu = weights_cpu.to(hidden_cpu.dtype)
+    ids = torch.empty((effective_k,), dtype=torch.int64)
+    route_weights = torch.empty((effective_k,), dtype=torch.float32)
+    lib = _load_ds_forward_lib()
+    assert lib is not None
+    code = lib.ds_router_topk_u16(
+        ctypes.c_void_p(int(hidden_cpu.view(torch.uint16).data_ptr())),
+        ctypes.c_void_p(int(weights_cpu.view(torch.uint16).data_ptr())),
+        ctypes.c_longlong(int(weights_cpu.shape[1])),
+        ctypes.c_longlong(int(weights_cpu.shape[0])),
+        ctypes.c_longlong(effective_k),
+        ctypes.c_longlong(_u16_storage_dtype_code(hidden_cpu.dtype)),
+        ctypes.c_void_p(int(ids.data_ptr())),
+        ctypes.c_void_p(int(route_weights.data_ptr())),
+    )
+    if code != 0:
+        raise RuntimeError(f"ds_router_topk_u16 failed with code {code}")
+    return ids, route_weights
+
+
+def _python_ds_router_topk(
+    hidden: torch.Tensor,
+    router_weights: torch.Tensor,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scores = torch.nn.functional.linear(hidden.reshape(1, -1).float(), router_weights.float()).reshape(-1)
+    probs = torch.softmax(scores, dim=-1)
+    weights, ids = torch.topk(probs, int(k), dim=-1)
+    weights = weights / weights.sum().clamp_min(1e-12)
+    return ids.to(torch.int64).contiguous(), weights.to(torch.float32).contiguous()
 
 
 class DeepSeekNativeSession:

@@ -1,8 +1,12 @@
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <immintrin.h>
 #include <intrin.h>
 
 using DsTensorCallback = int (*)(
@@ -34,6 +38,23 @@ struct DsSession {
     int64_t callback_invocations = 0;
     std::vector<DsLayerRegistration> registrations;
 };
+
+static inline float fp16_to_fp32(uint16_t value) {
+    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(value));
+    const __m128 full = _mm_cvtph_ps(half);
+    return _mm_cvtss_f32(full);
+}
+
+static inline float bf16_to_fp32(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(float));
+    return out;
+}
+
+static inline float read_u16(uint16_t value, int64_t dtype_code) {
+    return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
+}
 
 static std::string registration_key(int64_t layer_idx, int64_t layer_kind, int64_t weight_role) {
     return std::to_string(layer_idx) + ":" + std::to_string(layer_kind) + ":" + std::to_string(weight_role);
@@ -160,4 +181,82 @@ extern "C" __declspec(dllexport) int64_t ds_registered_scale_nbytes(void* handle
         return -1;
     }
     return session->registrations[static_cast<size_t>(index)].scale_nbytes;
+}
+
+extern "C" __declspec(dllexport) int ds_router_topk_u16(
+    const uint16_t* hidden_u16,
+    const uint16_t* router_weights_u16,
+    int64_t hidden_dim,
+    int64_t num_experts,
+    int64_t k,
+    int64_t dtype_code,
+    int64_t* output_expert_ids,
+    float* output_weights
+) {
+    if (
+        hidden_u16 == nullptr || router_weights_u16 == nullptr ||
+        output_expert_ids == nullptr || output_weights == nullptr
+    ) {
+        return 1;
+    }
+    if (hidden_dim <= 0 || num_experts <= 0 || k <= 0 || k > num_experts) {
+        return 2;
+    }
+
+    std::vector<float> scores(static_cast<size_t>(num_experts), 0.0f);
+    for (int64_t expert = 0; expert < num_experts; ++expert) {
+        const uint16_t* row = router_weights_u16 + static_cast<size_t>(expert) * static_cast<size_t>(hidden_dim);
+        float acc = 0.0f;
+        for (int64_t col = 0; col < hidden_dim; ++col) {
+            acc += read_u16(hidden_u16[static_cast<size_t>(col)], dtype_code) *
+                read_u16(row[static_cast<size_t>(col)], dtype_code);
+        }
+        scores[static_cast<size_t>(expert)] = acc;
+    }
+
+    const float max_score = *std::max_element(scores.begin(), scores.end());
+    double denom = 0.0;
+    for (float& score : scores) {
+        score = std::exp(score - max_score);
+        denom += static_cast<double>(score);
+    }
+    if (denom <= 0.0) {
+        return 3;
+    }
+    for (float& score : scores) {
+        score = static_cast<float>(static_cast<double>(score) / denom);
+    }
+
+    std::vector<int64_t> ids(static_cast<size_t>(num_experts));
+    for (int64_t expert = 0; expert < num_experts; ++expert) {
+        ids[static_cast<size_t>(expert)] = expert;
+    }
+    std::partial_sort(
+        ids.begin(),
+        ids.begin() + static_cast<std::ptrdiff_t>(k),
+        ids.end(),
+        [&scores](int64_t left, int64_t right) {
+            const float left_score = scores[static_cast<size_t>(left)];
+            const float right_score = scores[static_cast<size_t>(right)];
+            if (left_score == right_score) {
+                return left < right;
+            }
+            return left_score > right_score;
+        }
+    );
+
+    double selected_sum = 0.0;
+    for (int64_t index = 0; index < k; ++index) {
+        selected_sum += static_cast<double>(scores[static_cast<size_t>(ids[static_cast<size_t>(index)])]);
+    }
+    if (selected_sum <= 0.0) {
+        return 4;
+    }
+    for (int64_t index = 0; index < k; ++index) {
+        const int64_t expert_id = ids[static_cast<size_t>(index)];
+        output_expert_ids[static_cast<size_t>(index)] = expert_id;
+        output_weights[static_cast<size_t>(index)] =
+            static_cast<float>(static_cast<double>(scores[static_cast<size_t>(expert_id)]) / selected_sum);
+    }
+    return 0;
 }
