@@ -6124,3 +6124,14 @@ Result: 297 passed in 21.83s
 - Real DeepSeek layer-3 routed MoE comparison used native C dispatch over FP8 gate/up/down tensors for the selected top-8 experts. Output matched PLM-2 many-MLP plus Python combine with max abs diff `<=1e-5`.
 - Anti-cheat counters: synthetic and real dispatch incremented `ds_monolithic_call_counter` by `1`; expert invocation count matched selected top-k (`2` synthetic, `8` real).
 - Full suite: `python -m pytest tests\ -q` -> `451 passed in 26.47s`.
+
+## PLM-8 DeepSeek Attention Callback Bridge / Evidence
+- Branch: `plm-8-c-side-attention-bridge-python-callback`.
+- Added `ds_attention_layer_forward_f32()` to `ds_forward.dll`. The C bridge calls a Python MLA attention callback once per layer, validates the returned output size, copies it into the caller buffer, and increments monolithic plus attention counters.
+- Added `ds_attention_layer_forward()` Python bindings, `DeepSeekNativeSession.attention_invocation_count()`, and `PCKETLM_DISABLE_NATIVE_DS_ATTENTION_BRIDGE=1` fallback.
+- Added `tests/test_native_ds_attention_bridge.py`.
+- Focused tests: `python -m pytest tests\test_native_ds_attention_bridge.py -q` -> `3 passed in 18.41s`.
+- Combined focused tests: `python -m pytest tests\test_native_ds_attention_bridge.py tests\test_native_ds_moe.py tests\test_native_ds_router.py tests\test_native_ds_session.py -q` -> `12 passed in 13.68s`.
+- Real DeepSeek layer-3 attention bridge comparison called `run_fp8_single_token_attention("deepseek-v3", 3, hidden, dtype=torch.float32)` through the C callback boundary and directly through Python; outputs matched with max abs diff `<=1e-6`.
+- Anti-cheat counters: real bridge row incremented `ds_monolithic_call_counter` to `1` and `attention_invocation_count` to `1`.
+- Full suite: `python -m pytest tests\ -q` -> `454 passed in 30.81s`.

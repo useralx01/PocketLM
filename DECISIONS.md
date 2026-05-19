@@ -1589,3 +1589,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Do not rewrite FP8 MLP math in `ds_forward.cpp`. The DeepSeek dispatch DLL dynamically loads `fp8_linear.dll` and calls PLM-2's existing `fp8_e4m3_block_mlp_many_f32()` kernel.
 - Count a MoE dispatch as one monolithic C call for the DeepSeek session and record the selected expert count separately. Later full-forward tickets can use those counters for anti-cheat checks.
 - Keep `PCKETLM_DISABLE_NATIVE_DS_MOE=1` scoped to the C-side MoE dispatch boundary; it falls back to Python combine over the same expert outputs.
+
+## PLM-8 DeepSeek Attention Callback Bridge
+- Keep attention as a callback bridge in this ticket instead of pretending native MLA is complete. PLM-8 is the C-side call boundary that lets a later full-forward loop call the existing Python/PyTorch MLA path once per layer.
+- Copy callback output into the C-owned destination buffer before returning. Python still owns the callback result lifetime, but the caller receives stable output bytes after the bridge call completes.
+- Count an attention bridge call as one DeepSeek monolithic C call and track `attention_invocations` separately for the anti-cheat gate.
+- Keep `PCKETLM_DISABLE_NATIVE_DS_ATTENTION_BRIDGE=1` scoped to this bridge so attention can fall back directly to the Python MLA function without disabling router or MoE native pieces.

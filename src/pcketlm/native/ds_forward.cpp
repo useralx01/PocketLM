@@ -17,6 +17,14 @@ using DsTensorCallback = int (*)(
     const void** out_ptr,
     int64_t* out_nbytes
 );
+using DsAttentionCallback = int (*)(
+    int64_t layer_idx,
+    const float* hidden_in,
+    int64_t batch,
+    int64_t hidden_dim,
+    const float** out_ptr,
+    int64_t* out_count
+);
 using Fp8MlpManyFn = int (*)(
     const uint64_t*,
     const uint64_t*,
@@ -54,6 +62,7 @@ struct DsSession {
     int64_t monolithic_calls = 0;
     int64_t callback_invocations = 0;
     int64_t expert_invocations = 0;
+    int64_t attention_invocations = 0;
     std::vector<DsLayerRegistration> registrations;
 };
 
@@ -219,6 +228,14 @@ extern "C" __declspec(dllexport) int64_t ds_expert_invocation_count(void* handle
     return session->expert_invocations;
 }
 
+extern "C" __declspec(dllexport) int64_t ds_attention_invocation_count(void* handle) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    return session->attention_invocations;
+}
+
 extern "C" __declspec(dllexport) int64_t ds_registered_layer_count(void* handle) {
     DsSession* session = reinterpret_cast<DsSession*>(handle);
     if (session == nullptr) {
@@ -272,6 +289,39 @@ extern "C" __declspec(dllexport) int ds_moe_layer_forward_f32(
     }
     session->monolithic_calls += 1;
     session->expert_invocations += selected_count;
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ds_attention_layer_forward_f32(
+    void* handle,
+    int64_t layer_idx,
+    const float* hidden_in,
+    int64_t batch,
+    int64_t hidden_dim,
+    DsAttentionCallback attention_callback,
+    float* hidden_out
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr || hidden_in == nullptr || attention_callback == nullptr || hidden_out == nullptr) {
+        return 1;
+    }
+    if (layer_idx < 0 || layer_idx >= session->num_layers || batch <= 0 || hidden_dim <= 0) {
+        return 2;
+    }
+    const float* callback_out = nullptr;
+    int64_t callback_count = 0;
+    const int code = attention_callback(layer_idx, hidden_in, batch, hidden_dim, &callback_out, &callback_count);
+    session->callback_invocations += 1;
+    if (code != 0 || callback_out == nullptr) {
+        return 10 + code;
+    }
+    const int64_t expected = batch * hidden_dim;
+    if (callback_count != expected) {
+        return 20;
+    }
+    std::memcpy(hidden_out, callback_out, static_cast<size_t>(expected) * sizeof(float));
+    session->monolithic_calls += 1;
+    session->attention_invocations += 1;
     return 0;
 }
 

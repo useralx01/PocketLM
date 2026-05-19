@@ -106,6 +106,15 @@ def _native_ds_moe_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_DS_MOE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_ds_attention_bridge_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_DS_ATTENTION_BRIDGE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -381,6 +390,15 @@ _DS_TENSOR_CALLBACK = ctypes.CFUNCTYPE(
     ctypes.POINTER(ctypes.c_void_p),
     ctypes.POINTER(ctypes.c_longlong),
 )
+_DS_ATTENTION_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_longlong,
+    ctypes.c_void_p,
+    ctypes.c_longlong,
+    ctypes.c_longlong,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_longlong),
+)
 
 
 def _load_ds_forward_lib() -> ctypes.CDLL | None:
@@ -422,6 +440,8 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
         lib.ds_callback_invocation_count.restype = ctypes.c_longlong
         lib.ds_expert_invocation_count.argtypes = [ctypes.c_void_p]
         lib.ds_expert_invocation_count.restype = ctypes.c_longlong
+        lib.ds_attention_invocation_count.argtypes = [ctypes.c_void_p]
+        lib.ds_attention_invocation_count.restype = ctypes.c_longlong
         lib.ds_registered_layer_count.argtypes = [ctypes.c_void_p]
         lib.ds_registered_layer_count.restype = ctypes.c_longlong
         lib.ds_registered_fp8_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
@@ -449,6 +469,16 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
             ctypes.c_void_p,
         ]
         lib.ds_moe_layer_forward_f32.restype = ctypes.c_int
+        lib.ds_attention_layer_forward_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            _DS_ATTENTION_CALLBACK,
+            ctypes.c_void_p,
+        ]
+        lib.ds_attention_layer_forward_f32.restype = ctypes.c_int
         lib.ds_moe_layer_forward_fp8_f32.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -549,6 +579,63 @@ def _python_ds_router_topk(
 def native_ds_moe_available() -> bool:
     lib = _load_ds_forward_lib()
     return bool(lib is not None and not _native_ds_moe_disabled() and hasattr(lib, "ds_moe_layer_forward_f32"))
+
+
+def native_ds_attention_bridge_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(
+        lib is not None
+        and not _native_ds_attention_bridge_disabled()
+        and hasattr(lib, "ds_attention_layer_forward_f32")
+    )
+
+
+def ds_attention_layer_forward(
+    session: "DeepSeekNativeSession",
+    layer_idx: int,
+    hidden: torch.Tensor,
+    attention_fn,
+) -> torch.Tensor:
+    """Call the existing Python MLA attention path through the C-side DeepSeek bridge."""
+    hidden_cpu = hidden.detach().cpu().contiguous().to(torch.float32)
+    original_shape = tuple(hidden_cpu.shape)
+    flat = hidden_cpu.reshape(-1, int(hidden_cpu.shape[-1]))
+    if not native_ds_attention_bridge_available():
+        return attention_fn(int(layer_idx), hidden_cpu).detach().cpu().contiguous().to(torch.float32)
+
+    keepalive: list[torch.Tensor] = []
+
+    def callback(c_layer_idx, hidden_ptr, batch, hidden_dim, out_ptr, out_count):  # noqa: ANN001
+        count = int(batch) * int(hidden_dim)
+        array_type = ctypes.c_float * count
+        incoming = torch.tensor(array_type.from_address(int(hidden_ptr)), dtype=torch.float32).reshape(
+            *original_shape
+        )
+        output = attention_fn(int(c_layer_idx), incoming).detach().cpu().contiguous().to(torch.float32)
+        if tuple(output.shape) != original_shape:
+            output = output.reshape(*original_shape)
+        output_flat = output.reshape(-1)
+        keepalive.append(output_flat)
+        out_ptr[0] = ctypes.c_void_p(int(output_flat.data_ptr()))
+        out_count[0] = int(output_flat.numel())
+        return 0
+
+    c_callback = _DS_ATTENTION_CALLBACK(callback)
+    session._callback_keepalive.append(c_callback)
+    out = torch.empty_like(flat)
+    code = session._lib.ds_attention_layer_forward_f32(
+        session._handle,
+        ctypes.c_longlong(int(layer_idx)),
+        ctypes.c_void_p(int(flat.data_ptr())),
+        ctypes.c_longlong(int(flat.shape[0])),
+        ctypes.c_longlong(int(flat.shape[1])),
+        c_callback,
+        ctypes.c_void_p(int(out.data_ptr())),
+    )
+    session._tensor_keepalive.extend(keepalive)
+    if code != 0:
+        raise RuntimeError(f"ds_attention_layer_forward_f32 failed with code {code}")
+    return out.reshape(*original_shape)
 
 
 def ds_moe_layer_forward(
@@ -751,6 +838,9 @@ class DeepSeekNativeSession:
 
     def expert_invocation_count(self) -> int:
         return int(self._lib.ds_expert_invocation_count(self._handle))
+
+    def attention_invocation_count(self) -> int:
+        return int(self._lib.ds_attention_invocation_count(self._handle))
 
     def registered_layer_count(self) -> int:
         return int(self._lib.ds_registered_layer_count(self._handle))
