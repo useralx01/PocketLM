@@ -367,3 +367,10 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: after forcing a native rebuild while experimenting with `fp8_linear.cpp`, `fp8_linear.dll` and `fp16_loader.dll` were blocked with `[WinError 4551] An Application Control policy has blocked this file`.
 - Root cause: locally rebuilt DLLs can be policy-blocked on this Windows machine even when the committed DLLs are allowed.
 - Fix: reverted the rebuilt non-ticket DLLs to the previously committed binaries and avoided changing `fp8_linear.cpp` in this ticket. Native availability returned to `True`, and focused tests passed.
+## PLM-4 Monolithic Forward Blocker
+- Gate failed: PLM-4 anti-bluff requires `monolithic_call_counter > 0` and `PCKETLM_DISABLE_MONOLITHIC=1` vs default timing delta `>=50%`.
+- Cause: the current native `pcketlm_forward.dll` is a working monolithic boundary for synthetic registered dense u16 models, not a DeepSeek FP8 engine. The production DeepSeek path still runs through the Python FP8 loop with native FP8 dequant/MLP kernels and Python/PyTorch attention.
+- Attempt 1: reuse existing `pcketlm_forward.dll` for DeepSeek FP8. This cannot produce real DeepSeek logits because the DLL does not read FP8 pack files or implement DeepSeek MLA/router/MoE.
+- Attempt 2: use the relaxed PLM-3 production path and compare default vs `PCKETLM_DISABLE_MONOLITHIC=1`. Bounded 8-layer DeepSeek default was `61.292s`; disabled was `58.142s`; same top ids and same pack reads. The required `>=50%` delta is not present.
+- Attempt 3: count the current C boundary as monolithic telemetry. Fresh `monolithic_call_count("all")` after reset is `0` for the FP8 decode path, so that would be false evidence.
+- Resolution: mark PLM-4 blocked, not done. The unblock is a real monolithic DeepSeek FP8 backend that owns the layer loop and calls native MLP plus a supported attention backend from inside the token call, or a revised PLM-4 scope that explicitly accepts the current Python orchestration as the product path.

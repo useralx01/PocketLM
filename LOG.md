@@ -6081,3 +6081,15 @@ Result: 297 passed in 21.83s
 - Full DeepSeek 62-layer timing with `PCKETLM_DISABLE_NATIVE_FP8_LINEAR=1`: `800.553s`, layer_count `62`, top ids `[0, 223, 261, 65, 18]`, pack scattered reads `0`.
 - Enabled vs kill-switch timing improvement: `61.54%` faster, satisfying the ticket's `>=30%` full-decode gate.
 - The kill-switch full-run top order differs on close logits because the fallback uses the slower materialized Python/BF16-ish route, while the native MLP path keeps the fused FP8 math in F32 until the runtime output cast. The direct real MLP reference comparison above is the numerical acceptance row for the MLP kernel itself.
+
+## PLM-4 Monolithic Forward / Blocker Evidence
+- Branch: `plm-4-monolithic-forward-benchmark`.
+- Linear PLM-4 was moved to `In Progress` after PLM-3 was relaxed to correctness-only native MLA scaffolding with production attention routed through the Python/PyTorch path.
+- Existing native monolithic boundary is present and works for synthetic registered dense models: `python -m pytest tests\test_native_monolithic_forward.py -q` -> `7 passed in 22.31s`.
+- Current FP8 runtime focused tests still pass: `python -m pytest tests\test_runtime_fp8_source.py -q` -> `25 passed in 16.67s`.
+- Full test suite still passes: `python -m pytest tests\ -q` -> `442 passed in 23.89s`.
+- Hypothesis 1: reuse the existing `pcketlm_forward.dll` for DeepSeek FP8. Rejected because it only supports registered u16 dense tensors and synthetic fallback logits; it does not load FP8 pack tensors, run DeepSeek MLA, run router/selected experts, or produce real DeepSeek logits.
+- Hypothesis 2: proceed with the relaxed PLM-3 path (`native FP8 MLP + Python/PyTorch attention`) and expect the existing FP8 loop to satisfy the PLM-4 anti-bluff gate. Real bounded DeepSeek check failed: default 8-layer run was `61.292s`, `8` layers executed, final top ids `[0, 20917, 4178, 94986, 43873]`; `PCKETLM_DISABLE_MONOLITHIC=1` run was `58.142s`, same top ids, same pack reads (`272` sequential, `0` scattered). Delta was noise in the wrong direction, not the required `>=50%`.
+- Hypothesis 3: treat the current C boundary as the PLM-4 monolithic call counter while Python attention remains in production. Rejected because the real FP8 decode path never enters `pcketlm_forward_decode`; fresh global `monolithic_call_count("all")` after reset is `0`, so the required `monolithic_call_counter > 0` gate fails.
+- Existing full DeepSeek proof remains far above the PLM-4 raw target: committed current default full 62-layer one-token run is `245.980s` with all `62` layers executed and top ids `[0, 261, 223, 65, 18]`; the ticket requires `<=10s/token` raw and `<=2s/token` effective with speculative.
+- Outcome: PLM-4 cannot be marked done without a real DeepSeek FP8 monolithic execution backend. No partial PLM-4 code was committed.

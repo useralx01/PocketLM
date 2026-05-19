@@ -705,3 +705,4 @@ Phase FP8 Current Default: full DeepSeek bounded proof now runs all `62` layers 
 Phase DeepSeek FP8 Product Route: web and desktop chat now route `deepseek-v3` through the FP8 packed decode loop; real web Fast-mode smoke passed in `66.27s` with `0` scattered reads, while Quality remains ready-slow until fused MLA attention lands.
 PLM-1 Native FP8 Dequant: target met; native BF16/FP16 dequant passes tests, microbench, real tensor identity, and DeepSeek top-k equivalence.
 PLM-2 Native FP8 Linear MLP: target met; existing fused native MLP path proved with tests, real MLP microbench, and full DeepSeek kill-switch timing.
+PLM-4 blocked: tests pass, but real DeepSeek FP8 does not enter the monolithic C boundary (`monolithic_call_count=0`) and default vs `PCKETLM_DISABLE_MONOLITHIC=1` has no speed win.
