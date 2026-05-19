@@ -8,6 +8,7 @@
 #include <vector>
 #include <immintrin.h>
 #include <intrin.h>
+#include <windows.h>
 
 using DsTensorCallback = int (*)(
     int64_t layer_idx,
@@ -15,6 +16,22 @@ using DsTensorCallback = int (*)(
     int64_t weight_role,
     const void** out_ptr,
     int64_t* out_nbytes
+);
+using Fp8MlpManyFn = int (*)(
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const float*,
+    float*,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t
 );
 
 struct DsLayerRegistration {
@@ -36,6 +53,7 @@ struct DsSession {
     void* kv_session_handle = nullptr;
     int64_t monolithic_calls = 0;
     int64_t callback_invocations = 0;
+    int64_t expert_invocations = 0;
     std::vector<DsLayerRegistration> registrations;
 };
 
@@ -54,6 +72,40 @@ static inline float bf16_to_fp32(uint16_t value) {
 
 static inline float read_u16(uint16_t value, int64_t dtype_code) {
     return dtype_code == 1 ? bf16_to_fp32(value) : fp16_to_fp32(value);
+}
+
+static HMODULE load_sibling_dll(const char* name) {
+    char self_path[MAX_PATH] = {0};
+    HMODULE self_module = nullptr;
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&load_sibling_dll),
+            &self_module
+        ) && GetModuleFileNameA(self_module, self_path, MAX_PATH) > 0) {
+        std::string path(self_path);
+        const size_t slash = path.find_last_of("\\/");
+        if (slash != std::string::npos) {
+            const std::string full_name = path.substr(0, slash + 1) + name;
+            return LoadLibraryA(full_name.c_str());
+        }
+    }
+    return LoadLibraryA(name);
+}
+
+static Fp8MlpManyFn fp8_mlp_many_fn() {
+    static HMODULE module = nullptr;
+    static Fp8MlpManyFn fn = nullptr;
+    if (fn != nullptr) {
+        return fn;
+    }
+    if (module == nullptr) {
+        module = load_sibling_dll("fp8_linear.dll");
+    }
+    if (module == nullptr) {
+        return nullptr;
+    }
+    fn = reinterpret_cast<Fp8MlpManyFn>(GetProcAddress(module, "fp8_e4m3_block_mlp_many_f32"));
+    return fn;
 }
 
 static std::string registration_key(int64_t layer_idx, int64_t layer_kind, int64_t weight_role) {
@@ -159,6 +211,14 @@ extern "C" __declspec(dllexport) int64_t ds_callback_invocation_count(void* hand
     return session->callback_invocations;
 }
 
+extern "C" __declspec(dllexport) int64_t ds_expert_invocation_count(void* handle) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    return session->expert_invocations;
+}
+
 extern "C" __declspec(dllexport) int64_t ds_registered_layer_count(void* handle) {
     DsSession* session = reinterpret_cast<DsSession*>(handle);
     if (session == nullptr) {
@@ -181,6 +241,108 @@ extern "C" __declspec(dllexport) int64_t ds_registered_scale_nbytes(void* handle
         return -1;
     }
     return session->registrations[static_cast<size_t>(index)].scale_nbytes;
+}
+
+extern "C" __declspec(dllexport) int ds_moe_layer_forward_f32(
+    void* handle,
+    const float* expert_outputs,
+    const float* route_weights,
+    int64_t selected_count,
+    int64_t batch,
+    int64_t hidden_dim,
+    float* hidden_out
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (
+        session == nullptr || expert_outputs == nullptr ||
+        route_weights == nullptr || hidden_out == nullptr
+    ) {
+        return 1;
+    }
+    if (selected_count <= 0 || batch <= 0 || hidden_dim <= 0) {
+        return 2;
+    }
+    const int64_t batch_width = batch * hidden_dim;
+    for (int64_t offset = 0; offset < batch_width; ++offset) {
+        float acc = 0.0f;
+        for (int64_t expert = 0; expert < selected_count; ++expert) {
+            acc += route_weights[expert] * expert_outputs[expert * batch_width + offset];
+        }
+        hidden_out[offset] = acc;
+    }
+    session->monolithic_calls += 1;
+    session->expert_invocations += selected_count;
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ds_moe_layer_forward_fp8_f32(
+    void* handle,
+    const uint64_t* gate_weight_ptrs,
+    const uint64_t* gate_scale_ptrs,
+    const uint64_t* up_weight_ptrs,
+    const uint64_t* up_scale_ptrs,
+    const uint64_t* down_weight_ptrs,
+    const uint64_t* down_scale_ptrs,
+    const float* hidden,
+    const float* route_weights,
+    int64_t selected_count,
+    int64_t batch,
+    int64_t intermediate_rows,
+    int64_t hidden_dim,
+    int64_t gate_scale_cols,
+    int64_t down_scale_cols,
+    float* hidden_out
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (
+        session == nullptr || gate_weight_ptrs == nullptr || gate_scale_ptrs == nullptr ||
+        up_weight_ptrs == nullptr || up_scale_ptrs == nullptr ||
+        down_weight_ptrs == nullptr || down_scale_ptrs == nullptr ||
+        hidden == nullptr || route_weights == nullptr || hidden_out == nullptr
+    ) {
+        return 1;
+    }
+    if (
+        selected_count <= 0 || batch <= 0 || intermediate_rows <= 0 ||
+        hidden_dim <= 0 || gate_scale_cols <= 0 || down_scale_cols <= 0
+    ) {
+        return 2;
+    }
+    Fp8MlpManyFn fn = fp8_mlp_many_fn();
+    if (fn == nullptr) {
+        return 3;
+    }
+    std::vector<float> expert_outputs(static_cast<size_t>(selected_count * batch * hidden_dim), 0.0f);
+    const int mlp_code = fn(
+        gate_weight_ptrs,
+        gate_scale_ptrs,
+        up_weight_ptrs,
+        up_scale_ptrs,
+        down_weight_ptrs,
+        down_scale_ptrs,
+        hidden,
+        expert_outputs.data(),
+        selected_count,
+        batch,
+        intermediate_rows,
+        hidden_dim,
+        gate_scale_cols,
+        down_scale_cols
+    );
+    if (mlp_code != 0) {
+        return 100 + mlp_code;
+    }
+    const int64_t batch_width = batch * hidden_dim;
+    for (int64_t offset = 0; offset < batch_width; ++offset) {
+        float acc = 0.0f;
+        for (int64_t expert = 0; expert < selected_count; ++expert) {
+            acc += route_weights[expert] * expert_outputs[expert * batch_width + offset];
+        }
+        hidden_out[offset] = acc;
+    }
+    session->monolithic_calls += 1;
+    session->expert_invocations += selected_count;
+    return 0;
 }
 
 extern "C" __declspec(dllexport) int ds_router_topk_u16(

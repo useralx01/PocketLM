@@ -690,3 +690,4 @@
 - Full suite passed: `442 passed in 33.16s`.
 PLM-5 DeepSeek C-side session + FP8 pack interface: done. Added `ds_forward.dll`, ctypes wrapper, synthetic FP8PackReader callback tests, and kill switch coverage.
 PLM-6 Native DeepSeek router: done. Added native u16 softmax top-k router, Python fallback switch, synthetic and real DeepSeek expert-id tests.
+PLM-7 Native DeepSeek MoE dispatch: done. Added C dispatch that calls PLM-2 FP8 many-MLP, combines route weights in C, and records expert invocation counters.

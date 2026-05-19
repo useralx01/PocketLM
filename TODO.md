@@ -159,3 +159,4 @@ Done: PLM-2 Native FP8 linear MLP gate.
 - Resolve PLM-4 by adding a real DeepSeek FP8 monolithic backend or explicitly revising PLM-4 acceptance to allow Python orchestration with native FP8 kernels.
 Done: PLM-5 DeepSeek C-side session + FP8 pack interface.
 Done: PLM-6 Native DeepSeek router top-k kernel.
+Done: PLM-7 Native DeepSeek MoE expert dispatch loop.

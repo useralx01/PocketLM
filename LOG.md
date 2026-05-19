@@ -6113,3 +6113,14 @@ Result: 297 passed in 21.83s
 - Combined focused tests: `python -m pytest tests\test_native_ds_router.py tests\test_native_ds_session.py -q` -> `5 passed in 2.88s`.
 - Real DeepSeek router anti-bluff used `model.layers.3.mlp.gate.weight` because DeepSeek layers `0-2` are dense. Native and Python reference produced identical top-8 expert ids for the same deterministic hidden vector.
 - Full suite: `python -m pytest tests\ -q` -> `447 passed in 26.42s`.
+
+## PLM-7 Native DeepSeek MoE Dispatch / Evidence
+- Branch: `plm-7-native-deepseek-moe-expert-dispatch-loop`.
+- Added `ds_moe_layer_forward_fp8_f32()` to `ds_forward.dll`. It dynamically loads `fp8_linear.dll`, calls PLM-2's `fp8_e4m3_block_mlp_many_f32()` for selected experts, then combines route weights in C.
+- Added `ds_moe_layer_forward()` and `ds_moe_layer_forward_fp8()` Python bindings plus `PCKETLM_DISABLE_NATIVE_DS_MOE=1` fallback.
+- Added `tests/test_native_ds_moe.py`.
+- Focused tests: `python -m pytest tests\test_native_ds_moe.py -q` -> `4 passed in 14.91s`.
+- Combined focused tests: `python -m pytest tests\test_native_ds_moe.py tests\test_native_ds_router.py tests\test_native_ds_session.py -q` -> `9 passed in 4.04s`.
+- Real DeepSeek layer-3 routed MoE comparison used native C dispatch over FP8 gate/up/down tensors for the selected top-8 experts. Output matched PLM-2 many-MLP plus Python combine with max abs diff `<=1e-5`.
+- Anti-cheat counters: synthetic and real dispatch incremented `ds_monolithic_call_counter` by `1`; expert invocation count matched selected top-k (`2` synthetic, `8` real).
+- Full suite: `python -m pytest tests\ -q` -> `451 passed in 26.47s`.

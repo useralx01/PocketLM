@@ -102,6 +102,10 @@ def _native_ds_router_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_DS_ROUTER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_ds_moe_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_DS_MOE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -416,6 +420,8 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
         lib.ds_monolithic_call_counter.restype = ctypes.c_longlong
         lib.ds_callback_invocation_count.argtypes = [ctypes.c_void_p]
         lib.ds_callback_invocation_count.restype = ctypes.c_longlong
+        lib.ds_expert_invocation_count.argtypes = [ctypes.c_void_p]
+        lib.ds_expert_invocation_count.restype = ctypes.c_longlong
         lib.ds_registered_layer_count.argtypes = [ctypes.c_void_p]
         lib.ds_registered_layer_count.restype = ctypes.c_longlong
         lib.ds_registered_fp8_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
@@ -433,6 +439,35 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
             ctypes.c_void_p,
         ]
         lib.ds_router_topk_u16.restype = ctypes.c_int
+        lib.ds_moe_layer_forward_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+        ]
+        lib.ds_moe_layer_forward_f32.restype = ctypes.c_int
+        lib.ds_moe_layer_forward_fp8_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+        ]
+        lib.ds_moe_layer_forward_fp8_f32.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _DS_FORWARD_ERROR = exc
         return None
@@ -509,6 +544,122 @@ def _python_ds_router_topk(
     weights, ids = torch.topk(probs, int(k), dim=-1)
     weights = weights / weights.sum().clamp_min(1e-12)
     return ids.to(torch.int64).contiguous(), weights.to(torch.float32).contiguous()
+
+
+def native_ds_moe_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(lib is not None and not _native_ds_moe_disabled() and hasattr(lib, "ds_moe_layer_forward_f32"))
+
+
+def ds_moe_layer_forward(
+    session: "DeepSeekNativeSession",
+    expert_outputs: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Combine selected expert outputs through the DeepSeek C-side MoE dispatch boundary."""
+    outputs_cpu = expert_outputs.detach().cpu().contiguous().to(torch.float32)
+    if outputs_cpu.ndim == 2:
+        outputs_cpu = outputs_cpu.unsqueeze(1)
+    if outputs_cpu.ndim != 3:
+        raise ValueError("expert_outputs must be [selected, batch, hidden]")
+    weights_cpu = route_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if int(weights_cpu.numel()) != int(outputs_cpu.shape[0]):
+        raise ValueError("route weight count must match selected expert count")
+    if not native_ds_moe_available():
+        return _python_ds_moe_layer_forward(outputs_cpu, weights_cpu)
+    out = torch.empty((int(outputs_cpu.shape[1]), int(outputs_cpu.shape[2])), dtype=torch.float32)
+    code = session._lib.ds_moe_layer_forward_f32(
+        session._handle,
+        ctypes.c_void_p(int(outputs_cpu.data_ptr())),
+        ctypes.c_void_p(int(weights_cpu.data_ptr())),
+        ctypes.c_longlong(int(outputs_cpu.shape[0])),
+        ctypes.c_longlong(int(outputs_cpu.shape[1])),
+        ctypes.c_longlong(int(outputs_cpu.shape[2])),
+        ctypes.c_void_p(int(out.data_ptr())),
+    )
+    if code != 0:
+        raise RuntimeError(f"ds_moe_layer_forward_f32 failed with code {code}")
+    return out
+
+
+def ds_moe_layer_forward_fp8(
+    session: "DeepSeekNativeSession",
+    items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    hidden: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Run selected FP8 expert MLPs through PLM-2's native kernel, then combine in C."""
+    if not native_ds_moe_available():
+        expert_outputs = fp8_e4m3_block_mlp_many_f32(items, hidden)
+        return _python_ds_moe_layer_forward(expert_outputs, route_weights)
+    if not items:
+        raise ValueError("items must not be empty")
+    prepared: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    first_gate = items[0][0].detach().cpu().contiguous().to(torch.uint8)
+    intermediate_rows = int(first_gate.shape[0])
+    hidden_cols = int(first_gate.shape[1])
+    for gate, gate_scale, up, up_scale, down, down_scale in items:
+        tensors = (
+            gate.detach().cpu().contiguous().to(torch.uint8),
+            gate_scale.detach().cpu().contiguous().to(torch.float32),
+            up.detach().cpu().contiguous().to(torch.uint8),
+            up_scale.detach().cpu().contiguous().to(torch.float32),
+            down.detach().cpu().contiguous().to(torch.uint8),
+            down_scale.detach().cpu().contiguous().to(torch.float32),
+        )
+        if tuple(tensors[0].shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all gate weights must have matching shape")
+        if tuple(tensors[2].shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all up weights must have matching shape")
+        if tuple(tensors[4].shape) != (hidden_cols, intermediate_rows):
+            raise ValueError("all down weights must have matching shape")
+        prepared.append(tensors)
+
+    gate_scale_cols = (hidden_cols + 127) // 128
+    down_scale_cols = (intermediate_rows + 127) // 128
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    route_cpu = route_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+    if int(route_cpu.numel()) != len(prepared):
+        raise ValueError("route weight count must match selected experts")
+    ptr_dtype = torch.int64
+    gate_ptrs = torch.tensor([int(item[0].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    gate_scale_ptrs = torch.tensor([int(item[1].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_ptrs = torch.tensor([int(item[2].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_scale_ptrs = torch.tensor([int(item[3].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_ptrs = torch.tensor([int(item[4].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_scale_ptrs = torch.tensor([int(item[5].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = session._lib.ds_moe_layer_forward_fp8_f32(
+        session._handle,
+        ctypes.c_void_p(int(gate_ptrs.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(route_cpu.data_ptr())),
+        ctypes.c_longlong(len(prepared)),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(gate_scale_cols),
+        ctypes.c_longlong(down_scale_cols),
+        ctypes.c_void_p(int(out.data_ptr())),
+    )
+    if code != 0:
+        raise RuntimeError(f"ds_moe_layer_forward_fp8_f32 failed with code {code}")
+    return out
+
+
+def _python_ds_moe_layer_forward(expert_outputs: torch.Tensor, route_weights: torch.Tensor) -> torch.Tensor:
+    outputs_cpu = expert_outputs.detach().cpu().contiguous().to(torch.float32)
+    if outputs_cpu.ndim == 2:
+        outputs_cpu = outputs_cpu.unsqueeze(1)
+    weights_cpu = route_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    return (outputs_cpu * weights_cpu.view(-1, 1, 1)).sum(dim=0)
 
 
 class DeepSeekNativeSession:
@@ -597,6 +748,9 @@ class DeepSeekNativeSession:
 
     def callback_invocation_count(self) -> int:
         return int(self._lib.ds_callback_invocation_count(self._handle))
+
+    def expert_invocation_count(self) -> int:
+        return int(self._lib.ds_expert_invocation_count(self._handle))
 
     def registered_layer_count(self) -> int:
         return int(self._lib.ds_registered_layer_count(self._handle))

@@ -1584,3 +1584,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Add `hidden_dim` and `dtype_code` to the C router ABI even though the ticket's short signature omitted them. The kernel cannot safely read row-major router weights without the hidden dimension, and DeepSeek runtime tensors may be fp16 or bf16 storage.
 - Keep PLM-6 as a standalone softmax top-k router primitive. The current production DeepSeek router has extra sigmoid/group/bias policy; later integration can layer that policy around this primitive or add a policy-specific native variant.
 - Use `PCKETLM_DISABLE_NATIVE_DS_ROUTER=1` for router-only fallback without disabling the rest of the DeepSeek monolithic session.
+
+## PLM-7 Native DeepSeek MoE Dispatch
+- Do not rewrite FP8 MLP math in `ds_forward.cpp`. The DeepSeek dispatch DLL dynamically loads `fp8_linear.dll` and calls PLM-2's existing `fp8_e4m3_block_mlp_many_f32()` kernel.
+- Count a MoE dispatch as one monolithic C call for the DeepSeek session and record the selected expert count separately. Later full-forward tickets can use those counters for anti-cheat checks.
+- Keep `PCKETLM_DISABLE_NATIVE_DS_MOE=1` scoped to the C-side MoE dispatch boundary; it falls back to Python combine over the same expert outputs.

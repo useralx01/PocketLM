@@ -708,3 +708,4 @@ PLM-2 Native FP8 Linear MLP: target met; existing fused native MLP path proved w
 PLM-4 blocked: tests pass, but real DeepSeek FP8 does not enter the monolithic C boundary (`monolithic_call_count=0`) and default vs `PCKETLM_DISABLE_MONOLITHIC=1` has no speed win.
 PLM-5 target met: DeepSeek C-side session and FP8 pack callback bridge landed; focused tests and full suite pass.
 PLM-6 target met: native router top-k landed with kill switch, real DeepSeek layer-3 expert-id comparison, and `447 passed`.
+PLM-7 target met: native MoE dispatch boundary calls PLM-2 many-MLP, matches real DeepSeek layer-3 routed output, and `451 passed`.
