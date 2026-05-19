@@ -25,6 +25,23 @@ using DsAttentionCallback = int (*)(
     const float** out_ptr,
     int64_t* out_count
 );
+using DsDecodeCallback = int (*)(
+    int64_t input_token_id,
+    const float** out_ptr,
+    int64_t* out_count
+);
+using DsPrefillCallback = int (*)(
+    const int64_t* input_token_ids,
+    int64_t n_tokens,
+    const float** out_ptr,
+    int64_t* out_count
+);
+using DsVerifyCallback = int (*)(
+    const int64_t* candidate_token_ids,
+    int64_t k,
+    const float** out_ptr,
+    int64_t* out_count
+);
 using Fp8MlpManyFn = int (*)(
     const uint64_t*,
     const uint64_t*,
@@ -63,6 +80,7 @@ struct DsSession {
     int64_t callback_invocations = 0;
     int64_t expert_invocations = 0;
     int64_t attention_invocations = 0;
+    int64_t layers_executed = 0;
     std::vector<DsLayerRegistration> registrations;
 };
 
@@ -236,6 +254,14 @@ extern "C" __declspec(dllexport) int64_t ds_attention_invocation_count(void* han
     return session->attention_invocations;
 }
 
+extern "C" __declspec(dllexport) int64_t ds_layers_executed_count(void* handle) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    return session->layers_executed;
+}
+
 extern "C" __declspec(dllexport) int64_t ds_registered_layer_count(void* handle) {
     DsSession* session = reinterpret_cast<DsSession*>(handle);
     if (session == nullptr) {
@@ -322,6 +348,104 @@ extern "C" __declspec(dllexport) int ds_attention_layer_forward_f32(
     std::memcpy(hidden_out, callback_out, static_cast<size_t>(expected) * sizeof(float));
     session->monolithic_calls += 1;
     session->attention_invocations += 1;
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ds_forward_decode_f32(
+    void* handle,
+    int64_t input_token_id,
+    DsDecodeCallback decode_callback,
+    float* output_logits,
+    int64_t vocab_size
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr || decode_callback == nullptr || output_logits == nullptr) {
+        return 1;
+    }
+    if (vocab_size <= 0) {
+        return 2;
+    }
+    const float* callback_out = nullptr;
+    int64_t callback_count = 0;
+    const int code = decode_callback(input_token_id, &callback_out, &callback_count);
+    session->callback_invocations += 1;
+    if (code != 0 || callback_out == nullptr) {
+        return 10 + code;
+    }
+    if (callback_count != vocab_size) {
+        return 20;
+    }
+    std::memcpy(output_logits, callback_out, static_cast<size_t>(vocab_size) * sizeof(float));
+    session->monolithic_calls += 1;
+    session->layers_executed += session->num_layers;
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ds_forward_prefill_f32(
+    void* handle,
+    const int64_t* input_token_ids,
+    int64_t n_tokens,
+    DsPrefillCallback prefill_callback,
+    float* output_final_logits,
+    int64_t vocab_size
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (
+        session == nullptr || input_token_ids == nullptr || prefill_callback == nullptr ||
+        output_final_logits == nullptr
+    ) {
+        return 1;
+    }
+    if (n_tokens <= 0 || vocab_size <= 0) {
+        return 2;
+    }
+    const float* callback_out = nullptr;
+    int64_t callback_count = 0;
+    const int code = prefill_callback(input_token_ids, n_tokens, &callback_out, &callback_count);
+    session->callback_invocations += 1;
+    if (code != 0 || callback_out == nullptr) {
+        return 10 + code;
+    }
+    if (callback_count != vocab_size) {
+        return 20;
+    }
+    std::memcpy(output_final_logits, callback_out, static_cast<size_t>(vocab_size) * sizeof(float));
+    session->monolithic_calls += 1;
+    session->layers_executed += session->num_layers * n_tokens;
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ds_forward_verify_f32(
+    void* handle,
+    const int64_t* candidate_token_ids,
+    int64_t k,
+    DsVerifyCallback verify_callback,
+    float* output_logits_per_position,
+    int64_t vocab_size
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (
+        session == nullptr || candidate_token_ids == nullptr || verify_callback == nullptr ||
+        output_logits_per_position == nullptr
+    ) {
+        return 1;
+    }
+    if (k <= 0 || vocab_size <= 0) {
+        return 2;
+    }
+    const float* callback_out = nullptr;
+    int64_t callback_count = 0;
+    const int code = verify_callback(candidate_token_ids, k, &callback_out, &callback_count);
+    session->callback_invocations += 1;
+    if (code != 0 || callback_out == nullptr) {
+        return 10 + code;
+    }
+    if (callback_count != k * vocab_size) {
+        return 20;
+    }
+    std::memcpy(output_logits_per_position, callback_out, static_cast<size_t>(callback_count) * sizeof(float));
+    session->monolithic_calls += 1;
+    session->layers_executed += session->num_layers * k;
     return 0;
 }
 

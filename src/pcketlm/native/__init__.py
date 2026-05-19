@@ -399,6 +399,26 @@ _DS_ATTENTION_CALLBACK = ctypes.CFUNCTYPE(
     ctypes.POINTER(ctypes.c_void_p),
     ctypes.POINTER(ctypes.c_longlong),
 )
+_DS_DECODE_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_longlong,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_longlong),
+)
+_DS_PREFILL_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_longlong,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_longlong),
+)
+_DS_VERIFY_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_longlong,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_longlong),
+)
 
 
 def _load_ds_forward_lib() -> ctypes.CDLL | None:
@@ -442,6 +462,8 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
         lib.ds_expert_invocation_count.restype = ctypes.c_longlong
         lib.ds_attention_invocation_count.argtypes = [ctypes.c_void_p]
         lib.ds_attention_invocation_count.restype = ctypes.c_longlong
+        lib.ds_layers_executed_count.argtypes = [ctypes.c_void_p]
+        lib.ds_layers_executed_count.restype = ctypes.c_longlong
         lib.ds_registered_layer_count.argtypes = [ctypes.c_void_p]
         lib.ds_registered_layer_count.restype = ctypes.c_longlong
         lib.ds_registered_fp8_nbytes.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
@@ -479,6 +501,32 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
             ctypes.c_void_p,
         ]
         lib.ds_attention_layer_forward_f32.restype = ctypes.c_int
+        lib.ds_forward_decode_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            _DS_DECODE_CALLBACK,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+        ]
+        lib.ds_forward_decode_f32.restype = ctypes.c_int
+        lib.ds_forward_prefill_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            _DS_PREFILL_CALLBACK,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+        ]
+        lib.ds_forward_prefill_f32.restype = ctypes.c_int
+        lib.ds_forward_verify_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            _DS_VERIFY_CALLBACK,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+        ]
+        lib.ds_forward_verify_f32.restype = ctypes.c_int
         lib.ds_moe_layer_forward_fp8_f32.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -588,6 +636,185 @@ def native_ds_attention_bridge_available() -> bool:
         and not _native_ds_attention_bridge_disabled()
         and hasattr(lib, "ds_attention_layer_forward_f32")
     )
+
+
+def native_ds_decode_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(lib is not None and hasattr(lib, "ds_forward_decode_f32"))
+
+
+def ds_forward_decode(
+    session: "DeepSeekNativeSession",
+    input_token_id: int,
+    decode_fn,
+    *,
+    vocab_size: int | None = None,
+) -> torch.Tensor:
+    """Run the DeepSeek token-level forward boundary and copy callback logits through C."""
+    flat_first = None
+    if vocab_size is None:
+        first = decode_fn(int(input_token_id)).detach().cpu().contiguous().to(torch.float32)
+        flat_first = first.reshape(-1)
+        effective_vocab = int(flat_first.numel())
+    else:
+        effective_vocab = int(vocab_size)
+    if not native_ds_decode_available():
+        if flat_first is None:
+            flat_first = decode_fn(int(input_token_id)).detach().cpu().contiguous().to(torch.float32).reshape(-1)
+        if int(flat_first.numel()) != effective_vocab:
+            raise ValueError("vocab_size must match decode_fn output size")
+        return flat_first.clone()
+
+    keepalive = [] if flat_first is None else [flat_first]
+
+    def callback(c_input_token_id, out_ptr, out_count):  # noqa: ANN001
+        logits = decode_fn(int(c_input_token_id)).detach().cpu().contiguous().to(torch.float32).reshape(-1)
+        if int(logits.numel()) != effective_vocab:
+            return 21
+        keepalive.append(logits)
+        out_ptr[0] = ctypes.c_void_p(int(logits.data_ptr()))
+        out_count[0] = int(logits.numel())
+        return 0
+
+    c_callback = _DS_DECODE_CALLBACK(callback)
+    session._callback_keepalive.append(c_callback)
+    out = torch.empty((effective_vocab,), dtype=torch.float32)
+    code = session._lib.ds_forward_decode_f32(
+        session._handle,
+        ctypes.c_longlong(int(input_token_id)),
+        c_callback,
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(effective_vocab),
+    )
+    session._tensor_keepalive.extend(keepalive)
+    if code != 0:
+        raise RuntimeError(f"ds_forward_decode_f32 failed with code {code}")
+    return out
+
+
+def ds_forward_prefill(
+    session: "DeepSeekNativeSession",
+    input_token_ids: list[int] | torch.Tensor,
+    prefill_fn,
+    *,
+    vocab_size: int | None = None,
+) -> torch.Tensor:
+    """Run the DeepSeek prefill boundary and copy final logits through C."""
+    token_tensor = torch.as_tensor([int(value) for value in input_token_ids], dtype=torch.int64).contiguous()
+    if int(token_tensor.numel()) <= 0:
+        raise ValueError("input_token_ids must not be empty")
+    flat_first = None
+    if vocab_size is None:
+        first = prefill_fn([int(value) for value in token_tensor.tolist()]).detach().cpu().contiguous().to(torch.float32)
+        flat_first = first.reshape(-1)
+        effective_vocab = int(flat_first.numel())
+    else:
+        effective_vocab = int(vocab_size)
+    if not native_ds_decode_available():
+        if flat_first is None:
+            flat_first = prefill_fn([int(value) for value in token_tensor.tolist()]).detach().cpu().contiguous().to(
+                torch.float32
+            ).reshape(-1)
+        if int(flat_first.numel()) != effective_vocab:
+            raise ValueError("vocab_size must match prefill_fn output size")
+        return flat_first.clone()
+
+    keepalive = [] if flat_first is None else [flat_first]
+
+    def callback(tokens_ptr, n_tokens, out_ptr, out_count):  # noqa: ANN001
+        count = int(n_tokens)
+        array_type = ctypes.c_longlong * count
+        tokens = [int(value) for value in array_type.from_address(int(tokens_ptr))]
+        logits = prefill_fn(tokens).detach().cpu().contiguous().to(torch.float32).reshape(-1)
+        if int(logits.numel()) != effective_vocab:
+            return 21
+        keepalive.append(logits)
+        out_ptr[0] = ctypes.c_void_p(int(logits.data_ptr()))
+        out_count[0] = int(logits.numel())
+        return 0
+
+    c_callback = _DS_PREFILL_CALLBACK(callback)
+    session._callback_keepalive.append(c_callback)
+    out = torch.empty((effective_vocab,), dtype=torch.float32)
+    code = session._lib.ds_forward_prefill_f32(
+        session._handle,
+        ctypes.c_void_p(int(token_tensor.data_ptr())),
+        ctypes.c_longlong(int(token_tensor.numel())),
+        c_callback,
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(effective_vocab),
+    )
+    session._tensor_keepalive.extend(keepalive)
+    if code != 0:
+        raise RuntimeError(f"ds_forward_prefill_f32 failed with code {code}")
+    return out
+
+
+def ds_forward_verify(
+    session: "DeepSeekNativeSession",
+    candidate_token_ids: list[int] | torch.Tensor,
+    verify_fn,
+    *,
+    vocab_size: int | None = None,
+) -> torch.Tensor:
+    """Run the DeepSeek speculative verify boundary and copy per-position logits through C."""
+    token_tensor = torch.as_tensor([int(value) for value in candidate_token_ids], dtype=torch.int64).contiguous()
+    if int(token_tensor.numel()) <= 0:
+        raise ValueError("candidate_token_ids must not be empty")
+    flat_first = None
+    if vocab_size is None:
+        first = verify_fn([int(value) for value in token_tensor.tolist()]).detach().cpu().contiguous().to(torch.float32)
+        if first.ndim == 1:
+            first = first.reshape(1, -1)
+        flat_first = first.reshape(-1)
+        effective_vocab = int(first.shape[-1])
+    else:
+        effective_vocab = int(vocab_size)
+    expected_count = int(token_tensor.numel()) * effective_vocab
+    if not native_ds_decode_available():
+        if flat_first is None:
+            first = verify_fn([int(value) for value in token_tensor.tolist()]).detach().cpu().contiguous().to(
+                torch.float32
+            )
+            if first.ndim == 1:
+                first = first.reshape(1, -1)
+            flat_first = first.reshape(-1)
+        if expected_count != int(flat_first.numel()):
+            raise ValueError("verify_fn output must be [k, vocab_size]")
+        return flat_first.reshape(int(token_tensor.numel()), effective_vocab).clone()
+
+    keepalive = [] if flat_first is None else [flat_first]
+
+    def callback(tokens_ptr, k, out_ptr, out_count):  # noqa: ANN001
+        count = int(k)
+        array_type = ctypes.c_longlong * count
+        tokens = [int(value) for value in array_type.from_address(int(tokens_ptr))]
+        logits = verify_fn(tokens).detach().cpu().contiguous().to(torch.float32)
+        if logits.ndim == 1:
+            logits = logits.reshape(1, -1)
+        logits = logits.reshape(-1)
+        if int(logits.numel()) != expected_count:
+            return 21
+        keepalive.append(logits)
+        out_ptr[0] = ctypes.c_void_p(int(logits.data_ptr()))
+        out_count[0] = int(logits.numel())
+        return 0
+
+    c_callback = _DS_VERIFY_CALLBACK(callback)
+    session._callback_keepalive.append(c_callback)
+    out = torch.empty((expected_count,), dtype=torch.float32)
+    code = session._lib.ds_forward_verify_f32(
+        session._handle,
+        ctypes.c_void_p(int(token_tensor.data_ptr())),
+        ctypes.c_longlong(int(token_tensor.numel())),
+        c_callback,
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(effective_vocab),
+    )
+    session._tensor_keepalive.extend(keepalive)
+    if code != 0:
+        raise RuntimeError(f"ds_forward_verify_f32 failed with code {code}")
+    return out.reshape(int(token_tensor.numel()), effective_vocab)
 
 
 def ds_attention_layer_forward(
@@ -841,6 +1068,9 @@ class DeepSeekNativeSession:
 
     def attention_invocation_count(self) -> int:
         return int(self._lib.ds_attention_invocation_count(self._handle))
+
+    def layers_executed_count(self) -> int:
+        return int(self._lib.ds_layers_executed_count(self._handle))
 
     def registered_layer_count(self) -> int:
         return int(self._lib.ds_registered_layer_count(self._handle))

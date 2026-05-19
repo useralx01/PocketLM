@@ -161,3 +161,4 @@ Done: PLM-5 DeepSeek C-side session + FP8 pack interface.
 Done: PLM-6 Native DeepSeek router top-k kernel.
 Done: PLM-7 Native DeepSeek MoE expert dispatch loop.
 Done: PLM-8 C-side attention bridge for DeepSeek.
+Done: PLM-9 DeepSeek monolithic forward boundary.

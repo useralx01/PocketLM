@@ -1595,3 +1595,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Copy callback output into the C-owned destination buffer before returning. Python still owns the callback result lifetime, but the caller receives stable output bytes after the bridge call completes.
 - Count an attention bridge call as one DeepSeek monolithic C call and track `attention_invocations` separately for the anti-cheat gate.
 - Keep `PCKETLM_DISABLE_NATIVE_DS_ATTENTION_BRIDGE=1` scoped to this bridge so attention can fall back directly to the Python MLA function without disabling router or MoE native pieces.
+
+## PLM-9 DeepSeek Monolithic Forward Boundary
+- Implement PLM-9 as the C-owned decode/prefill/verify boundary first, with callback-provided logits copied through C. This gives production routing a stable ABI and honest monolithic counters before the PLM-10 speed gate decides whether the remaining Python orchestration is acceptable.
+- Track `layers_executed` inside the DeepSeek session as configured layers per decode/prefill/verify position. PLM-10 can use this anti-cheat counter when it routes real production decode.
+- Keep full logits generic in the ABI, but allow tests and diagnostics to pass a top-k-sized logits vector. The C contract is count-based and byte-copy based, so the same function works for tiny oracle vocabularies and bounded top-k evidence.
+- Do not claim this removes Python from the hot loop. It is a forward boundary and counter proof; PLM-10 owns the production speed delta and no-Python-hot-loop gate.

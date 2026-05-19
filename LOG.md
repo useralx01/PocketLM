@@ -6135,3 +6135,15 @@ Result: 297 passed in 21.83s
 - Real DeepSeek layer-3 attention bridge comparison called `run_fp8_single_token_attention("deepseek-v3", 3, hidden, dtype=torch.float32)` through the C callback boundary and directly through Python; outputs matched with max abs diff `<=1e-6`.
 - Anti-cheat counters: real bridge row incremented `ds_monolithic_call_counter` to `1` and `attention_invocation_count` to `1`.
 - Full suite: `python -m pytest tests\ -q` -> `454 passed in 30.81s`.
+
+## PLM-9 DeepSeek Monolithic Forward Boundary / Evidence
+- Branch: `plm-9-deepseek-monolithic-forward-function`.
+- Added `ds_forward_decode_f32()`, `ds_forward_prefill_f32()`, and `ds_forward_verify_f32()` to `ds_forward.dll`.
+- Added Python bindings `ds_forward_decode()`, `ds_forward_prefill()`, `ds_forward_verify()`, plus `DeepSeekNativeSession.layers_executed_count()`.
+- Added `tests/test_native_ds_forward.py`.
+- Focused tests: `python -m pytest tests\test_native_ds_forward.py -q` -> `3 passed in 75.62s`.
+- Combined native DeepSeek tests: `python -m pytest tests\test_native_ds_forward.py tests\test_native_ds_attention_bridge.py tests\test_native_ds_moe.py tests\test_native_ds_router.py tests\test_native_ds_session.py -q` -> `15 passed in 79.42s`.
+- Tiny oracle side-by-side: native C-boundary greedy tokens `[3, 5, 7, 0, 2]`; Python oracle greedy tokens `[3, 5, 7, 0, 2]`.
+- Real DeepSeek top-k bridge: `run_fp8_decode_loop("deepseek-v3", [0, 1], layer_count=8, max_new_tokens=1)` executed through the C decode boundary and returned top ids `[0, 20917, 4178, 94986, 43873]`; C copied the same top logits from the callback output.
+- Counter proof: tiny oracle made `5` monolithic decode calls and `10` executed layers for a 2-layer session; real DeepSeek bridge made `1` monolithic decode call and reported `62` executed layers for the configured DeepSeek session.
+- Full suite: `python -m pytest tests\ -q` -> `457 passed in 105.64s`.

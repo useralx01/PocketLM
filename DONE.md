@@ -692,3 +692,4 @@ PLM-5 DeepSeek C-side session + FP8 pack interface: done. Added `ds_forward.dll`
 PLM-6 Native DeepSeek router: done. Added native u16 softmax top-k router, Python fallback switch, synthetic and real DeepSeek expert-id tests.
 PLM-7 Native DeepSeek MoE dispatch: done. Added C dispatch that calls PLM-2 FP8 many-MLP, combines route weights in C, and records expert invocation counters.
 PLM-8 DeepSeek attention bridge: done. Added C-side attention callback bridge, kill switch, real DeepSeek layer-3 output comparison, and attention counters.
+PLM-9 DeepSeek monolithic forward boundary: done. Added decode/prefill/verify C entry points, Python bindings, tiny oracle sequence proof, real DeepSeek top-k bridge proof, and layer counters.

@@ -710,3 +710,4 @@ PLM-5 target met: DeepSeek C-side session and FP8 pack callback bridge landed; f
 PLM-6 target met: native router top-k landed with kill switch, real DeepSeek layer-3 expert-id comparison, and `447 passed`.
 PLM-7 target met: native MoE dispatch boundary calls PLM-2 many-MLP, matches real DeepSeek layer-3 routed output, and `451 passed`.
 PLM-8 target met: C-side attention callback bridge matches real DeepSeek layer-3 Python MLA output, counters increment, kill switch works, and `454 passed`.
+PLM-9 target met as a forward boundary: decode/prefill/verify C entry points copy callback logits, tiny oracle and real DeepSeek top-k bridge pass, counters increment, and `457 passed`.
