@@ -712,3 +712,4 @@ PLM-7 target met: native MoE dispatch boundary calls PLM-2 many-MLP, matches rea
 PLM-8 target met: C-side attention callback bridge matches real DeepSeek layer-3 Python MLA output, counters increment, kill switch works, and `454 passed`.
 PLM-9 target met as a forward boundary: decode/prefill/verify C entry points copy callback logits, tiny oracle and real DeepSeek top-k bridge pass, counters increment, and `457 passed`.
 PLM-10 blocked: PLM-9 boundary gives counters/top-k, but live enabled `60.598s` vs disabled `53.952s` regresses and existing full 62-layer proof is `245.980s`, so the speed gates cannot pass without true native per-layer DeepSeek math.
+PLM-11 blocked: native flash MLA core is correct and opt-in, but full real DeepSeek attention-call speed is tied/regressed (`0.998x` best, cached `0.959x`), so the `>=2x` gate needs fused q/kv/o projection and weight residency, not only online softmax.

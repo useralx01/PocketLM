@@ -24,9 +24,11 @@ from pcketlm.native import (
     fp8_e4m3_dequant_to_fp16,
     fp8_e4m3_block_mlp_f32,
     fp8_e4m3_block_mlp_many_f32,
+    ds_mla_attention_flash_forward,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
+    native_flash_mla_available,
     native_fp8_dual_linear_available,
     native_fp8_dequant_available,
     native_fp8_linear_available,
@@ -2732,6 +2734,12 @@ def _native_lm_head_topk_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_flash_mla_runtime_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _fp8_lm_head_chunk_rows() -> int:
     raw = os.environ.get("PCKETLM_FP8_LM_HEAD_CHUNK_ROWS", "").strip()
     if not raw:
@@ -2873,17 +2881,32 @@ def _run_fp8_single_token_attention_materialized(
                 kv_cache = kv_latent
                 pe_cache = k_pe
             wkv_b = kv_b.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
-            q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
-            scores = (
-                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
-                + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
-            ) * float(deepseek_config["softmax_scale"])
-            if previous_kv_cache is None and seq_len > 1:
-                causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
-                scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
-            probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
-            attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
-            attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
+            if (
+                seq_len == 1
+                and int(hidden_3d.shape[0]) == 1
+                and native_flash_mla_available()
+                and _native_flash_mla_runtime_enabled()
+            ):
+                attention_heads = ds_mla_attention_flash_forward(
+                    q_nope.reshape(n_heads, qk_nope).contiguous(),
+                    q_pe.reshape(n_heads, qk_rope).contiguous(),
+                    kv_cache.reshape(int(kv_cache.shape[1]), kv_lora_rank).contiguous(),
+                    pe_cache.reshape(int(pe_cache.shape[1]), qk_rope).contiguous(),
+                    wkv_b.contiguous(),
+                    softmax_scale=float(deepseek_config["softmax_scale"]),
+                ).view(1, 1, n_heads, v_head_dim)
+            else:
+                q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+                scores = (
+                    torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+                    + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
+                ) * float(deepseek_config["softmax_scale"])
+                if previous_kv_cache is None and seq_len > 1:
+                    causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
+                    scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
+                probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
+                attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
+                attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
             output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
             next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
 

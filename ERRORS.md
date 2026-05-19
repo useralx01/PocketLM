@@ -382,3 +382,11 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 2: measure PLM-9 boundary vs disabled current path on a bounded DeepSeek run. Enabled `60.598s`, disabled `53.952s`, same top ids/logits, `monolithic_calls=1`, `layers_executed=62`. Counter and equivalence pass; timing fails and regresses.
 - Attempt 3: wire production anyway and depend on speculative decoding. Rejected because the existing speculative verifier uses `layer_bridge.py` state, while DeepSeek FP8 product runtime uses `run_fp8_decode_loop`; with a `245.980s` verifier token there is no possible `<=2s/token` effective result without real native verifier math.
 - Resolution: mark PLM-10 blocked. The unblock is a real native DeepSeek decode engine: C-owned FP8 tensor handles, native MLA attention, native dense/shared FFN, native tail/top-k, and KV/verify support inside `ds_forward_decode`.
+
+## PLM-11 Flash MLA Speed Gate Blocker
+- Gate failed: PLM-11 requires real DeepSeek cache-len-512 attention call `>=2x` faster than the existing Python MLA path.
+- Cause: the compressed-KV online-softmax core is correct, but it is not the full-call bottleneck. Real DeepSeek layer attention time is dominated by q_a/q_b/kv_a/o_proj projection and weight materialization around the core.
+- Attempt 1: pure AVX2 online-softmax compressed-KV kernel. Correctness passed with real DeepSeek layer-3 max abs diff `4.19e-09`, but full runtime rows were native `[2280.005, 2253.288, 2051.579, 2179.228, 2249.793] ms` vs Python `[2101.611, 2239.376, 2046.668, 2187.110, 2081.580] ms`.
+- Attempt 2: smaller/effective cached core comparison. With a 1024 MB attention weight cache, native rows `[490.189, 468.220, 313.729] ms` vs Python `[474.413, 301.017, 451.706] ms`; the core is tied when projection weights are resident.
+- Attempt 3: fused latent decompression inside the native kernel. The implementation already fuses q_nope absorption into the inner compressed-KV scoring path and avoids score materialization, but the full-call gate still fails because q/kv/o projections remain outside the kernel.
+- Resolution: mark PLM-11 blocked. The unblock is not more softmax tiling; it is a fused/native attention path that owns FP8 q_a/q_b/kv_a/o_proj projection and persistent weight residency.

@@ -1606,3 +1606,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Do not wire product DeepSeek chat to the PLM-9 boundary as the default because the live enabled row was slower than the disabled current path. A route that only adds a C wrapper around the Python FP8 loop would satisfy a counter but fail the user's speed goal.
 - Treat PLM-10 as blocked until the C function owns real per-layer math instead of callback-provided logits. The next implementation must move MLA attention and dense/shared FFN into native code or there is no path from `245.980s` to `<=10s/token`.
 - Keep the current product route on `run_fp8_decode_loop()` because it is the fastest proven DeepSeek path today, even though it is still ready-slow.
+
+## PLM-11 Native Flash MLA
+- Implement the first flash-style MLA kernel at the compressed-KV attention-core boundary, not at the full FP8 projection boundary. Inputs are q_nope, q_pe, kv_cache, pe_cache, and kv_b projection weights; output is per-head value context before o_proj.
+- Use online softmax in C so scores are not materialized as a `[heads, cache_len]` tensor.
+- Keep runtime use opt-in through `PCKETLM_ENABLE_NATIVE_FLASH_MLA=1` after benchmarking showed no full-call win. The kernel remains available for diagnostics and future fused projection work.
+- Keep `PCKETLM_DISABLE_NATIVE_FLASH_MLA=1` as the direct fallback for tests and diagnostics.
+- The next viable DeepSeek attention speed path must fuse or cache q/kv/o projections and weight residency; the attention softmax core alone is not the measured bottleneck.

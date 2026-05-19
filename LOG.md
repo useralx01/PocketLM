@@ -6155,3 +6155,18 @@ Result: 297 passed in 21.83s
 - Hypothesis 2: route through the PLM-9 `ds_forward_decode()` boundary and compare against `PCKETLM_DISABLE_DS_MONOLITHIC=1`. Bounded 8-layer live check: enabled `60.598s`, disabled `53.952s`; top ids matched `[0, 20917, 4178, 94986, 43873]`; logits matched `[31.752083, 9.981701, 9.811033, 9.53881, 9.474155]`; enabled counters were `monolithic_calls=1`, `layers_executed=62`. This proves the counter/top-k path, but disabled is faster, so the `>=50%` speed gate fails.
 - Hypothesis 3: wire product web/desktop DeepSeek chat through PLM-9 anyway and rely on speculative verify to reach the effective target. Rejected before code change because PLM-9 still calls the current Python FP8 decode loop for logits; speculative code is built around `layer_bridge.py` verifier sessions, not DeepSeek FP8 `run_fp8_decode_loop`, and cannot turn a `245.980s` verifier token into `<=2s/token` without a native no-Python full-layer loop.
 - Outcome: PLM-10 is blocked honestly. The unblock is not a product-routing patch; it is a true native DeepSeek layer loop with C-owned FP8 tensor handles, native MLA attention, native dense/shared FFN, and a full-vocab/tail path inside `ds_forward_decode`.
+
+## PLM-11 Native Flash MLA / Blocker Evidence
+- Branch: `plm-11-flash-attention-style-native-mla`.
+- Added `ds_mla_attention_flash_forward()` to `ds_forward.dll`: compressed-KV MLA core with AVX2 dot products and online softmax, no full score matrix materialization.
+- Added Python bindings `ds_mla_attention_flash_forward()`, `native_flash_mla_available()`, and `PCKETLM_DISABLE_NATIVE_FLASH_MLA=1` fallback. Runtime integration is opt-in via `PCKETLM_ENABLE_NATIVE_FLASH_MLA=1` because the full-call speed gate did not pass.
+- Added `tests/test_native_flash_mla.py`.
+- Focused tests: `python -m pytest tests\test_native_flash_mla.py -q` -> `3 passed in 3.97s`.
+- Focused runtime tests with opt-in: `$env:PCKETLM_ENABLE_NATIVE_FLASH_MLA='1'; python -m pytest tests\test_native_flash_mla.py tests\test_runtime_fp8_source.py -q` -> `28 passed in 2.70s`.
+- Full suite: `python -m pytest tests\ -q` -> `460 passed in 92.42s`.
+- Real DeepSeek layer-3 correctness with cache len `512`: native opt-in output vs Python materialized output max abs diff `4.190951585769653e-09`; sample first values `[-0.000745, -0.000148, -0.000071, -0.000302, 0.00047]`.
+- Core-only probe from the first implementation showed the native core can be fast when projection weights are already resident: native full wrapper with preloaded layer weights `51.219-56.749 ms` vs Python materialized call `2030.321-2360.560 ms`.
+- Full attention-call gate failed once measured through the normal runtime loader/projection path: native opt-in rows `[2280.005, 2253.288, 2051.579, 2179.228, 2249.793] ms`; Python fallback rows `[2101.611, 2239.376, 2046.668, 2187.110, 2081.580] ms`; best speedup `0.998x`, not `>=2x`.
+- Cached-weight pivot also failed: with `PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB=1024`, native rows `[490.189, 468.220, 313.729] ms`; Python rows `[474.413, 301.017, 451.706] ms`; best speedup `0.959x`.
+- Opt-in bounded DeepSeek run: `PCKETLM_ENABLE_NATIVE_FLASH_MLA=1`, `run_fp8_decode_loop("deepseek-v3", [0, 1], layer_count=8, max_new_tokens=1)` ready `True`, elapsed `60.210s`, top ids `[0, 20917, 4178, 94986, 43873]`, logits `[31.752083, 9.981701, 9.811033, 9.53881, 9.474155]`, attention seconds `18.997`.
+- Outcome: PLM-11 is blocked on the `>=2x` full attention-call speed gate. The core kernel is correct, but real wall time is dominated by q/kv/o projection and weight materialization, not the softmax score matrix.

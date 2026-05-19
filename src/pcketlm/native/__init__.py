@@ -115,6 +115,10 @@ def _native_ds_attention_bridge_disabled() -> bool:
     }
 
 
+def _native_flash_mla_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -527,6 +531,23 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.ds_forward_verify_f32.restype = ctypes.c_int
+        if hasattr(lib, "ds_mla_attention_flash_forward"):
+            lib.ds_mla_attention_flash_forward.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_float,
+            ]
+            lib.ds_mla_attention_flash_forward.restype = ctypes.c_int
         lib.ds_moe_layer_forward_fp8_f32.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -641,6 +662,106 @@ def native_ds_attention_bridge_available() -> bool:
 def native_ds_decode_available() -> bool:
     lib = _load_ds_forward_lib()
     return bool(lib is not None and hasattr(lib, "ds_forward_decode_f32"))
+
+
+def native_flash_mla_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(
+        lib is not None
+        and not _native_flash_mla_disabled()
+        and hasattr(lib, "ds_mla_attention_flash_forward")
+    )
+
+
+def _python_mla_attention_flash_reference(
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    wkv_b: torch.Tensor,
+    *,
+    softmax_scale: float,
+) -> torch.Tensor:
+    q_nope_f = q_nope.detach().cpu().contiguous().to(torch.float32)
+    q_pe_f = q_pe.detach().cpu().contiguous().to(torch.float32)
+    kv_f = kv_cache.detach().cpu().contiguous().to(torch.float32)
+    pe_f = pe_cache.detach().cpu().contiguous().to(torch.float32)
+    wkv_f = wkv_b.detach().cpu().contiguous().to(torch.float32)
+    qk_nope = int(q_nope_f.shape[-1])
+    v_head_dim = int(wkv_f.shape[1]) - qk_nope
+    q_abs = torch.einsum("hd,hdc->hc", q_nope_f, wkv_f[:, :qk_nope])
+    scores = (torch.einsum("hc,tc->ht", q_abs, kv_f) + torch.einsum("hr,tr->ht", q_pe_f, pe_f)) * float(
+        softmax_scale
+    )
+    probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
+    latent = torch.einsum("ht,tc->hc", probs, kv_f)
+    return torch.einsum("hc,hdc->hd", latent, wkv_f[:, qk_nope : qk_nope + v_head_dim]).contiguous()
+
+
+def ds_mla_attention_flash_forward(
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    wkv_b: torch.Tensor,
+    *,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """Run DeepSeek compressed-KV MLA attention core with an online-softmax native kernel."""
+    q_nope_cpu = q_nope.detach().cpu().contiguous().to(torch.float32)
+    q_pe_cpu = q_pe.detach().cpu().contiguous().to(torch.float32)
+    kv_cpu = kv_cache.detach().cpu().contiguous().to(torch.float32)
+    pe_cpu = pe_cache.detach().cpu().contiguous().to(torch.float32)
+    wkv_cpu = wkv_b.detach().cpu().contiguous().to(torch.float32)
+    if q_nope_cpu.ndim != 2 or q_pe_cpu.ndim != 2:
+        raise ValueError("q_nope and q_pe must be [heads, dim]")
+    if kv_cpu.ndim != 2 or pe_cpu.ndim != 2:
+        raise ValueError("kv_cache and pe_cache must be [cache_len, dim]")
+    if wkv_cpu.ndim != 3:
+        raise ValueError("wkv_b must be [heads, qk_nope + v_head_dim, kv_lora_rank]")
+    num_heads = int(q_nope_cpu.shape[0])
+    qk_nope_dim = int(q_nope_cpu.shape[1])
+    qk_rope_dim = int(q_pe_cpu.shape[1])
+    cache_len = int(kv_cpu.shape[0])
+    kv_lora_rank = int(kv_cpu.shape[1])
+    if int(q_pe_cpu.shape[0]) != num_heads or int(wkv_cpu.shape[0]) != num_heads:
+        raise ValueError("head count mismatch")
+    if int(pe_cpu.shape[0]) != cache_len or int(pe_cpu.shape[1]) != qk_rope_dim:
+        raise ValueError("pe_cache shape mismatch")
+    if int(wkv_cpu.shape[2]) != kv_lora_rank or int(wkv_cpu.shape[1]) <= qk_nope_dim:
+        raise ValueError("wkv_b shape mismatch")
+    v_head_dim = int(wkv_cpu.shape[1]) - qk_nope_dim
+    if not native_flash_mla_available():
+        return _python_mla_attention_flash_reference(
+            q_nope_cpu,
+            q_pe_cpu,
+            kv_cpu,
+            pe_cpu,
+            wkv_cpu,
+            softmax_scale=float(softmax_scale),
+        )
+
+    out = torch.empty((num_heads, v_head_dim), dtype=torch.float32)
+    lib = _load_ds_forward_lib()
+    assert lib is not None
+    code = lib.ds_mla_attention_flash_forward(
+        ctypes.c_void_p(int(q_nope_cpu.data_ptr())),
+        ctypes.c_void_p(int(q_pe_cpu.data_ptr())),
+        ctypes.c_void_p(int(kv_cpu.data_ptr())),
+        ctypes.c_void_p(int(pe_cpu.data_ptr())),
+        ctypes.c_void_p(int(wkv_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(num_heads),
+        ctypes.c_longlong(cache_len),
+        ctypes.c_longlong(qk_nope_dim),
+        ctypes.c_longlong(qk_rope_dim),
+        ctypes.c_longlong(kv_lora_rank),
+        ctypes.c_longlong(v_head_dim),
+        ctypes.c_float(float(softmax_scale)),
+    )
+    if code != 0:
+        raise RuntimeError(f"ds_mla_attention_flash_forward failed with code {code}")
+    return out
 
 
 def ds_forward_decode(

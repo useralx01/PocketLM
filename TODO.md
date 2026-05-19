@@ -163,3 +163,4 @@ Done: PLM-7 Native DeepSeek MoE expert dispatch loop.
 Done: PLM-8 C-side attention bridge for DeepSeek.
 Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-10 production routing speed gate needs a true native DeepSeek layer loop, not a C wrapper around `run_fp8_decode_loop`.
+- Blocked: PLM-11 flash MLA speed gate needs fused/native q_a/q_b/kv_a/o_proj projection plus persistent attention weight residency; the online-softmax core alone is correct but not faster for the full call.

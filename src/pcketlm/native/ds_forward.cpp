@@ -449,6 +449,105 @@ extern "C" __declspec(dllexport) int ds_forward_verify_f32(
     return 0;
 }
 
+static inline float dot_product_f32(const float* left, const float* right, int64_t count) {
+    __m256 acc = _mm256_setzero_ps();
+    int64_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+        const __m256 a = _mm256_loadu_ps(left + index);
+        const __m256 b = _mm256_loadu_ps(right + index);
+        acc = _mm256_fmadd_ps(a, b, acc);
+    }
+    float tmp[8];
+    _mm256_storeu_ps(tmp, acc);
+    float sum = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    for (; index < count; ++index) {
+        sum += left[index] * right[index];
+    }
+    return sum;
+}
+
+extern "C" __declspec(dllexport) int ds_mla_attention_flash_forward(
+    const float* q_nope,
+    const float* q_pe,
+    const float* kv_cache,
+    const float* pe_cache,
+    const float* wkv_b,
+    float* output_heads,
+    int64_t num_heads,
+    int64_t cache_len,
+    int64_t qk_nope_dim,
+    int64_t qk_rope_dim,
+    int64_t kv_lora_rank,
+    int64_t v_head_dim,
+    float softmax_scale
+) {
+    if (
+        q_nope == nullptr || q_pe == nullptr || kv_cache == nullptr || pe_cache == nullptr ||
+        wkv_b == nullptr || output_heads == nullptr
+    ) {
+        return 1;
+    }
+    if (
+        num_heads <= 0 || cache_len <= 0 || qk_nope_dim < 0 || qk_rope_dim < 0 ||
+        kv_lora_rank <= 0 || v_head_dim <= 0
+    ) {
+        return 2;
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int64_t head = 0; head < num_heads; ++head) {
+        const float* q_nope_head = q_nope + head * qk_nope_dim;
+        const float* q_pe_head = q_pe + head * qk_rope_dim;
+        const float* wkv_head = wkv_b + head * (qk_nope_dim + v_head_dim) * kv_lora_rank;
+
+        std::vector<float> q_abs(static_cast<size_t>(kv_lora_rank), 0.0f);
+        for (int64_t latent = 0; latent < kv_lora_rank; ++latent) {
+            float acc = 0.0f;
+            for (int64_t dim = 0; dim < qk_nope_dim; ++dim) {
+                acc += q_nope_head[dim] * wkv_head[dim * kv_lora_rank + latent];
+            }
+            q_abs[static_cast<size_t>(latent)] = acc;
+        }
+
+        std::vector<float> latent_acc(static_cast<size_t>(kv_lora_rank), 0.0f);
+        float running_max = -INFINITY;
+        float running_sum = 0.0f;
+        for (int64_t pos = 0; pos < cache_len; ++pos) {
+            const float* kv_row = kv_cache + pos * kv_lora_rank;
+            const float* pe_row = pe_cache + pos * qk_rope_dim;
+            float score = dot_product_f32(q_abs.data(), kv_row, kv_lora_rank);
+            if (qk_rope_dim > 0) {
+                score += dot_product_f32(q_pe_head, pe_row, qk_rope_dim);
+            }
+            score *= softmax_scale;
+            const float new_max = running_max > score ? running_max : score;
+            const float old_scale = std::isfinite(running_max) ? std::exp(running_max - new_max) : 0.0f;
+            const float score_scale = std::exp(score - new_max);
+            for (int64_t latent = 0; latent < kv_lora_rank; ++latent) {
+                latent_acc[static_cast<size_t>(latent)] =
+                    latent_acc[static_cast<size_t>(latent)] * old_scale + kv_row[latent] * score_scale;
+            }
+            running_sum = running_sum * old_scale + score_scale;
+            running_max = new_max;
+        }
+        const float inv_sum = running_sum > 0.0f ? (1.0f / running_sum) : 0.0f;
+        for (int64_t latent = 0; latent < kv_lora_rank; ++latent) {
+            latent_acc[static_cast<size_t>(latent)] *= inv_sum;
+        }
+
+        float* out_head = output_heads + head * v_head_dim;
+        const float* value_projection = wkv_head + qk_nope_dim * kv_lora_rank;
+        for (int64_t out_dim = 0; out_dim < v_head_dim; ++out_dim) {
+            out_head[out_dim] = dot_product_f32(
+                latent_acc.data(),
+                value_projection + out_dim * kv_lora_rank,
+                kv_lora_rank
+            );
+        }
+    }
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int ds_moe_layer_forward_fp8_f32(
     void* handle,
     const uint64_t* gate_weight_ptrs,
