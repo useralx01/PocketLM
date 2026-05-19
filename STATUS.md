@@ -703,3 +703,4 @@ Phase FP8 Attention Dequant Hot Cache: warm full DeepSeek bounded `62`-layer tim
 Phase FP8 Session Span Cache: packed MLP process cache is implemented but opt-in (`PCKETLM_FP8_MLP_SPAN_CACHE_MB`) because real DeepSeek short-session tests showed small-cache churn and only tiny FFN improvement at `4096 MB`.
 Phase FP8 Current Default: full DeepSeek bounded proof now runs all `62` layers in `245.980s` with `0` scattered reads, `310/310` attention dequant cache hits, and `432` tests passing.
 Phase DeepSeek FP8 Product Route: web and desktop chat now route `deepseek-v3` through the FP8 packed decode loop; real web Fast-mode smoke passed in `66.27s` with `0` scattered reads, while Quality remains ready-slow until fused MLA attention lands.
+PLM-1 Native FP8 Dequant: target met; native BF16/FP16 dequant passes tests, microbench, real tensor identity, and DeepSeek top-k equivalence.

@@ -154,3 +154,4 @@ Native BF16 next: add exact monolithic prompt prefill/KV handoff for Qwen 14B, t
 - Next DeepSeek speed step: build a fused selected-expert FP8 kernel or batched expert executor; lossless packing plus hot cache passes the 50% timing gate, but `346.815s` for a bounded full-stack token is still not interactive.
 - Next DeepSeek attention step: fuse MLA projection/attention work only where per-layer timing proves it beats the current materialized path.
 - Next DeepSeek speed step after fused experts: attack FP8 MLA attention, now about `155s` of the `260.999s` full bounded run.
+Done: PLM-1 Native FP8 dequant kernel.

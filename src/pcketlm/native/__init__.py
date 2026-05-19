@@ -20,6 +20,7 @@ _FP16_MOE_DLL = _NATIVE_DIR / "fp16_moe.dll"
 _FP16_KV_DLL = _NATIVE_DIR / "fp16_kv_cache.dll"
 _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
+_FP8_DEQUANT_DLL = _NATIVE_DIR / "fp8_dequant.dll"
 _FP8_LINEAR_DLL = _NATIVE_DIR / "fp8_linear.dll"
 _PCKETLM_FORWARD_DLL = _NATIVE_DIR / "pcketlm_forward.dll"
 _Q4_LIB: ctypes.CDLL | None = None
@@ -38,6 +39,8 @@ _FP16_PACKED_GEMV_LIB: ctypes.CDLL | None = None
 _FP16_PACKED_GEMV_ERROR: Exception | None = None
 _ROW8_ARTIFACT_LIB: ctypes.CDLL | None = None
 _ROW8_ARTIFACT_ERROR: Exception | None = None
+_FP8_DEQUANT_LIB: ctypes.CDLL | None = None
+_FP8_DEQUANT_ERROR: Exception | None = None
 _FP8_LINEAR_LIB: ctypes.CDLL | None = None
 _FP8_LINEAR_ERROR: Exception | None = None
 _PCKETLM_FORWARD_LIB: ctypes.CDLL | None = None
@@ -86,6 +89,10 @@ def _native_row8_artifact_disabled() -> bool:
 
 def _native_fp8_linear_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_dequant_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_DEQUANT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _monolithic_disabled() -> bool:
@@ -208,6 +215,58 @@ def native_fp16_loader_available() -> bool:
 def native_fp16_loader_error() -> Exception | None:
     _load_fp16_loader_lib()
     return _FP16_LOADER_ERROR
+
+
+def _load_fp8_dequant_lib() -> ctypes.CDLL | None:
+    global _FP8_DEQUANT_LIB, _FP8_DEQUANT_ERROR
+    if _native_fp8_dequant_disabled():
+        return None
+    if _FP8_DEQUANT_LIB is not None:
+        return _FP8_DEQUANT_LIB
+    if not _FP8_DEQUANT_DLL.exists():
+        _FP8_DEQUANT_ERROR = FileNotFoundError(str(_FP8_DEQUANT_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP8_DEQUANT_DLL))
+        lib.fp8_dequant_cpu_has_avx2_f16c.argtypes = []
+        lib.fp8_dequant_cpu_has_avx2_f16c.restype = ctypes.c_int
+        lib.fp8_e4m3_dequant_to_fp16.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.fp8_e4m3_dequant_to_fp16.restype = ctypes.c_int
+        if hasattr(lib, "fp8_e4m3_dequant_to_bf16"):
+            lib.fp8_e4m3_dequant_to_bf16.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_dequant_to_bf16.restype = ctypes.c_int
+        if lib.fp8_dequant_cpu_has_avx2_f16c() != 1:
+            _FP8_DEQUANT_ERROR = RuntimeError("CPU does not report AVX2+F16C support.")
+            return None
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP8_DEQUANT_ERROR = exc
+        return None
+    _FP8_DEQUANT_LIB = lib
+    _FP8_DEQUANT_ERROR = None
+    return lib
+
+
+def native_fp8_dequant_available() -> bool:
+    return _load_fp8_dequant_lib() is not None
+
+
+def native_fp8_dequant_error() -> Exception | None:
+    _load_fp8_dequant_lib()
+    return _FP8_DEQUANT_ERROR
 
 
 def _load_fp8_linear_lib() -> ctypes.CDLL | None:
@@ -2087,6 +2146,70 @@ def native_copy_tensor_bytes(source: bytes | bytearray | memoryview, out: torch.
     )
     if code != 0:
         raise OSError(f"native_copy_tensor_bytes failed with code {code}")
+
+
+def fp8_e4m3_dequant_to_fp16(fp8_weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp8_dequant_lib()
+    if lib is None:
+        reason = "disabled" if _native_fp8_dequant_disabled() else _FP8_DEQUANT_ERROR
+        raise RuntimeError(f"Native FP8 dequant is unavailable: {reason}")
+    if fp8_weight.ndim != 2:
+        raise ValueError("fp8_weight must have shape [rows, cols]")
+    if scale_inv.ndim != 2:
+        raise ValueError("scale_inv must have shape [scale_rows, scale_cols]")
+    weight_cpu = fp8_weight.detach().cpu().contiguous().to(torch.uint8)
+    scale_cpu = scale_inv.detach().cpu().contiguous().to(torch.float32)
+    rows = int(weight_cpu.shape[0])
+    cols = int(weight_cpu.shape[1])
+    expected_scale_rows = (rows + 127) // 128
+    expected_scale_cols = (cols + 127) // 128
+    if tuple(scale_cpu.shape) != (expected_scale_rows, expected_scale_cols):
+        raise ValueError("scale_inv shape does not match FP8 128x128 block layout")
+
+    out = torch.empty((rows, cols), dtype=torch.float16)
+    code = lib.fp8_e4m3_dequant_to_fp16(
+        ctypes.c_void_p(int(weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(rows),
+        ctypes.c_longlong(cols),
+        ctypes.c_longlong(expected_scale_cols),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_dequant_to_fp16 failed with code {code}")
+    return out
+
+
+def fp8_e4m3_dequant_to_bf16(fp8_weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp8_dequant_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_dequant_to_bf16"):
+        reason = "disabled" if _native_fp8_dequant_disabled() else _FP8_DEQUANT_ERROR
+        raise RuntimeError(f"Native FP8 BF16 dequant is unavailable: {reason}")
+    if fp8_weight.ndim != 2:
+        raise ValueError("fp8_weight must have shape [rows, cols]")
+    if scale_inv.ndim != 2:
+        raise ValueError("scale_inv must have shape [scale_rows, scale_cols]")
+    weight_cpu = fp8_weight.detach().cpu().contiguous().to(torch.uint8)
+    scale_cpu = scale_inv.detach().cpu().contiguous().to(torch.float32)
+    rows = int(weight_cpu.shape[0])
+    cols = int(weight_cpu.shape[1])
+    expected_scale_rows = (rows + 127) // 128
+    expected_scale_cols = (cols + 127) // 128
+    if tuple(scale_cpu.shape) != (expected_scale_rows, expected_scale_cols):
+        raise ValueError("scale_inv shape does not match FP8 128x128 block layout")
+
+    out = torch.empty((rows, cols), dtype=torch.bfloat16)
+    code = lib.fp8_e4m3_dequant_to_bf16(
+        ctypes.c_void_p(int(weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(rows),
+        ctypes.c_longlong(cols),
+        ctypes.c_longlong(expected_scale_cols),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_dequant_to_bf16 failed with code {code}")
+    return out
 
 
 def fp8_e4m3_block_linear_f32(fp8_weight: torch.Tensor, scale_inv: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:

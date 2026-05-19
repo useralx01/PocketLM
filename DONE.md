@@ -676,3 +676,9 @@
 - Added FP8 runtime telemetry and DeepSeek-specific guardrails to the chat payload.
 - Verified real web Fast-mode smoke: `66.27s`, layers `0-7`, `0` scattered reads, generated token `[21133]`.
 - Verified web tests: `47 passed`; desktop tests: `8 passed`.
+## PLM-1 Native FP8 Dequant
+- Native AVX2+F16C FP8 E4M3 128x128 block dequant landed with FP16 and BF16 output paths.
+- Byte-identity/ULP checks passed on synthetic tensors and 5 real DeepSeek tensors.
+- 4096x4096 microbench passed the 3x gate: `3.999 ms` native vs `42.610 ms` Python (`10.655x`).
+- DeepSeek full 62-layer single-token top-k matched the Python fallback exactly after the BF16 native output fix.
+- Full suite passed: `439 passed in 32.76s`.

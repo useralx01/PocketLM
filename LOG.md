@@ -6054,3 +6054,18 @@ Result: 297 passed in 21.83s
 - Web smoke executed layers `0-7`, used pack mode with `237` sequential reads and `0` scattered reads; timing summary was attention `16.825s`, FFN `29.170s`, layer total `48.648s`.
 - Targeted web/desktop tests passed; full `tests/test_web_main.py` passed with `47 passed` and `tests/test_desktop_main.py` passed with `8 passed`.
 
+## PLM-1 Native FP8 Dequant / Evidence
+- Branch: `plm-1-native-fp8-dequant`.
+- Built native DLLs with `python tools\build_native.py --force`; new output includes `src\pcketlm\native\fp8_dequant.dll`.
+- Added `src/pcketlm/native/fp8_dequant.cpp` with AVX2+F16C FP8 E4M3 128x128 block dequant to FP16 plus a BF16 output variant for the default DeepSeek path.
+- Focused tests: `python -m pytest tests\test_native_fp8_dequant.py tests\test_runtime_fp8_source.py -q` -> `30 passed in 4.20s`.
+- Full suite: `python -m pytest tests\ -q` -> `439 passed in 32.76s`.
+- Synthetic/runtime kill-switch coverage: `test_runtime_fp8_dequant_kill_switch_falls_back_to_python` passed with `PCKETLM_DISABLE_NATIVE_FP8_DEQUANT=1`.
+- Microbench, 4096x4096 tile: native `3.999 ms`, Python `42.610 ms`, speedup `10.655x`.
+- Real DeepSeek byte-identity check on 5 tensors: FP16 max u16 delta `0`, FP16 mismatch count `0`, BF16 max u16 delta `0`, BF16 mismatch count `0` for all checked tensors.
+- Checked tensors: `model.layers.0.self_attn.q_a_proj.weight`, `q_b_proj.weight`, `kv_a_proj_with_mqa.weight`, `kv_b_proj.weight`, `o_proj.weight`.
+- First DeepSeek top-k attempt with native FP16 output did not preserve the default BF16 logits ordering. After adding native BF16 output, full 62-layer single-token top-k matches the Python fallback exactly.
+- Extra synthetic coverage now checks all 256 FP8 byte values, including PyTorch's NaN encodings.
+- DeepSeek native BF16 dequant run: layer_count `62`, elapsed `276.226s`, top ids `[0, 261, 223, 65, 18]`, logits `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`, pack scattered reads `0`.
+- DeepSeek Python fallback run with `PCKETLM_DISABLE_NATIVE_FP8_DEQUANT=1`: layer_count `62`, elapsed `304.332s`, top ids `[0, 261, 223, 65, 18]`, logits `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`, pack scattered reads `0`.
+- Real DeepSeek speed delta for this isolated dequant swap: Python fallback / native = `1.102x`.

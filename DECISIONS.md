@@ -1564,3 +1564,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep materialized hot-cache attention as the default. Streamed FP8 attention is available behind `PCKETLM_ENABLE_STREAMED_FP8_ATTENTION=1`, but the measured 8-layer delta was too small to make it the product default.
 - Keep DeepSeek web prompts capped by `max_prompt_tokens` with a default of `16`; this is the practical long-prompt guard until efficient long-context FP8 prefill is faster.
 - Report DeepSeek FP8 as ready-slow, not fast. The pack path is correct and usable for short proof replies, but fused MLA attention remains the next real speed phase.
+## PLM-1 Native FP8 Dequant
+- Implement native DeepSeek FP8 E4M3 dequant as a standalone DLL (`fp8_dequant.dll`) instead of folding it into the existing FP8 linear DLL. The ticket is a dequant kernel phase, and a separate DLL keeps the kill switch and tests isolated.
+- Use 128x128 block scales because this is the DeepSeek V3 physical layout already used by the FP8 source path.
+- Keep FP16 output for tile-level consumers and add BF16 output for the default DeepSeek runtime. The default path compares against BF16 Python dequant, so routing it through FP16 changes the logits tie/order even when values are close.
+- Match PyTorch's FP8 E4M3FN NaN byte behavior in the native LUT/output conversion so synthetic all-byte tests and real tensors share one exact path.
+- `PCKETLM_DISABLE_NATIVE_FP8_DEQUANT=1` is the explicit fallback switch. If the DLL is missing, CPU AVX2+F16C support is not reported, or the native call fails, runtime falls back to the existing Python dequant path.

@@ -20,12 +20,15 @@ import torch.nn.functional as F
 from pcketlm.native import (
     fp8_e4m3_block_dual_linear_f32,
     fp8_e4m3_block_linear_f32,
+    fp8_e4m3_dequant_to_bf16,
+    fp8_e4m3_dequant_to_fp16,
     fp8_e4m3_block_mlp_f32,
     fp8_e4m3_block_mlp_many_f32,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
     native_fp8_dual_linear_available,
+    native_fp8_dequant_available,
     native_fp8_linear_available,
     native_fp8_mlp_available,
     native_fp8_mlp_many_available,
@@ -629,6 +632,13 @@ def dequantize_fp8_block_scaled(
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Dequantize FP8 E4M3 weights with DeepSeek-style 128x128 block scales."""
+    if block_size == 128 and dtype in {torch.float16, torch.bfloat16} and native_fp8_dequant_available():
+        try:
+            if dtype == torch.bfloat16:
+                return fp8_e4m3_dequant_to_bf16(fp8_bytes, scale_inv)
+            return fp8_e4m3_dequant_to_fp16(fp8_bytes, scale_inv)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass
     if not hasattr(torch, "float8_e4m3fn"):
         raise RuntimeError("This PyTorch build does not expose torch.float8_e4m3fn.")
     if fp8_bytes.dtype != torch.uint8:

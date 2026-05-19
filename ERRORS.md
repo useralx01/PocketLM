@@ -359,3 +359,7 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: after exact reads and grouped expert spans, wall time is dominated by broad FP8 layer compute and Python/native per-layer execution, not only random external-disk seeks.
 - Fix: added a byte-identical local FP8 hot cache for used packed MLP spans and process-cached native read handles. The hot-cache full-stack run reached `346.815s` versus current scattered `764.224s`, a `54.62%` win, so Gate B now passes.
 
+## PLM-1 Native FP8 Dequant / FP16 intermediate changed top-k
+- Symptom: first full DeepSeek single-token comparison returned native top ids `[0, 223, 261, 65, 18]` while Python fallback returned `[0, 261, 223, 65, 18]`.
+- Root cause: the first native runtime integration returned FP16 tensors for the default DeepSeek path, while the Python path dequantized to BF16. The two close logits around tokens `223` and `261` changed order.
+- Fix: added `fp8_e4m3_dequant_to_bf16` to the native DLL and routed `dtype=torch.bfloat16` calls through it. Rerun matched top ids and logits exactly: `[0, 261, 223, 65, 18]` and `[24.537437, 10.999223, 10.961984, 10.682106, 10.563382]`.
