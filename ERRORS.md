@@ -374,3 +374,11 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 2: use the relaxed PLM-3 production path and compare default vs `PCKETLM_DISABLE_MONOLITHIC=1`. Bounded 8-layer DeepSeek default was `61.292s`; disabled was `58.142s`; same top ids and same pack reads. The required `>=50%` delta is not present.
 - Attempt 3: count the current C boundary as monolithic telemetry. Fresh `monolithic_call_count("all")` after reset is `0` for the FP8 decode path, so that would be false evidence.
 - Resolution: mark PLM-4 blocked, not done. The unblock is a real monolithic DeepSeek FP8 backend that owns the layer loop and calls native MLP plus a supported attention backend from inside the token call, or a revised PLM-4 scope that explicitly accepts the current Python orchestration as the product path.
+
+## PLM-10 Production Routing Speed Gate Blocker
+- Gate failed: PLM-10 requires enabled vs disabled full 62-layer timing delta `>=50%`, raw `<=10s/token`, and effective speculative `<=2s/token`.
+- Cause: PLM-9 added the C forward boundary and counters, but logits still come from the current Python FP8 decode loop. Routing product calls through that boundary adds a wrapper without removing the actual per-layer attention/FFN work.
+- Attempt 1: reuse the current optimized packed FP8 product path as the basis for PLM-10. Existing full proof is ready and correct, but elapsed `245.980s`, so raw speed is `24.6x` slower than the `<=10s` gate.
+- Attempt 2: measure PLM-9 boundary vs disabled current path on a bounded DeepSeek run. Enabled `60.598s`, disabled `53.952s`, same top ids/logits, `monolithic_calls=1`, `layers_executed=62`. Counter and equivalence pass; timing fails and regresses.
+- Attempt 3: wire production anyway and depend on speculative decoding. Rejected because the existing speculative verifier uses `layer_bridge.py` state, while DeepSeek FP8 product runtime uses `run_fp8_decode_loop`; with a `245.980s` verifier token there is no possible `<=2s/token` effective result without real native verifier math.
+- Resolution: mark PLM-10 blocked. The unblock is a real native DeepSeek decode engine: C-owned FP8 tensor handles, native MLA attention, native dense/shared FFN, native tail/top-k, and KV/verify support inside `ds_forward_decode`.

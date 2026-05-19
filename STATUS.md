@@ -711,3 +711,4 @@ PLM-6 target met: native router top-k landed with kill switch, real DeepSeek lay
 PLM-7 target met: native MoE dispatch boundary calls PLM-2 many-MLP, matches real DeepSeek layer-3 routed output, and `451 passed`.
 PLM-8 target met: C-side attention callback bridge matches real DeepSeek layer-3 Python MLA output, counters increment, kill switch works, and `454 passed`.
 PLM-9 target met as a forward boundary: decode/prefill/verify C entry points copy callback logits, tiny oracle and real DeepSeek top-k bridge pass, counters increment, and `457 passed`.
+PLM-10 blocked: PLM-9 boundary gives counters/top-k, but live enabled `60.598s` vs disabled `53.952s` regresses and existing full 62-layer proof is `245.980s`, so the speed gates cannot pass without true native per-layer DeepSeek math.

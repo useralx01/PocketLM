@@ -1601,3 +1601,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Track `layers_executed` inside the DeepSeek session as configured layers per decode/prefill/verify position. PLM-10 can use this anti-cheat counter when it routes real production decode.
 - Keep full logits generic in the ABI, but allow tests and diagnostics to pass a top-k-sized logits vector. The C contract is count-based and byte-copy based, so the same function works for tiny oracle vocabularies and bounded top-k evidence.
 - Do not claim this removes Python from the hot loop. It is a forward boundary and counter proof; PLM-10 owns the production speed delta and no-Python-hot-loop gate.
+
+## PLM-10 DeepSeek Production Routing
+- Do not wire product DeepSeek chat to the PLM-9 boundary as the default because the live enabled row was slower than the disabled current path. A route that only adds a C wrapper around the Python FP8 loop would satisfy a counter but fail the user's speed goal.
+- Treat PLM-10 as blocked until the C function owns real per-layer math instead of callback-provided logits. The next implementation must move MLA attention and dense/shared FFN into native code or there is no path from `245.980s` to `<=10s/token`.
+- Keep the current product route on `run_fp8_decode_loop()` because it is the fastest proven DeepSeek path today, even though it is still ready-slow.

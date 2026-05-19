@@ -162,3 +162,4 @@ Done: PLM-6 Native DeepSeek router top-k kernel.
 Done: PLM-7 Native DeepSeek MoE expert dispatch loop.
 Done: PLM-8 C-side attention bridge for DeepSeek.
 Done: PLM-9 DeepSeek monolithic forward boundary.
+- Blocked: PLM-10 production routing speed gate needs a true native DeepSeek layer loop, not a C wrapper around `run_fp8_decode_loop`.
