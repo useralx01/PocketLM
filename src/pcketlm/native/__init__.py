@@ -119,6 +119,10 @@ def _native_flash_mla_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_fused_ds_attention_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FUSED_DS_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _monolithic_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_MONOLITHIC", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -466,6 +470,9 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
         lib.ds_expert_invocation_count.restype = ctypes.c_longlong
         lib.ds_attention_invocation_count.argtypes = [ctypes.c_void_p]
         lib.ds_attention_invocation_count.restype = ctypes.c_longlong
+        if hasattr(lib, "ds_fused_attention_invocation_count"):
+            lib.ds_fused_attention_invocation_count.argtypes = [ctypes.c_void_p]
+            lib.ds_fused_attention_invocation_count.restype = ctypes.c_longlong
         lib.ds_layers_executed_count.argtypes = [ctypes.c_void_p]
         lib.ds_layers_executed_count.restype = ctypes.c_longlong
         lib.ds_registered_layer_count.argtypes = [ctypes.c_void_p]
@@ -548,6 +555,36 @@ def _load_ds_forward_lib() -> ctypes.CDLL | None:
                 ctypes.c_float,
             ]
             lib.ds_mla_attention_flash_forward.restype = ctypes.c_int
+        if hasattr(lib, "ds_attention_block_forward_f32"):
+            lib.ds_attention_block_forward_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_float,
+                ctypes.c_float,
+            ]
+            lib.ds_attention_block_forward_f32.restype = ctypes.c_int
         lib.ds_moe_layer_forward_fp8_f32.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -673,6 +710,15 @@ def native_flash_mla_available() -> bool:
     )
 
 
+def native_fused_ds_attention_available() -> bool:
+    lib = _load_ds_forward_lib()
+    return bool(
+        lib is not None
+        and not _native_fused_ds_attention_disabled()
+        and hasattr(lib, "ds_attention_block_forward_f32")
+    )
+
+
 def _python_mla_attention_flash_reference(
     q_nope: torch.Tensor,
     q_pe: torch.Tensor,
@@ -762,6 +808,140 @@ def ds_mla_attention_flash_forward(
     if code != 0:
         raise RuntimeError(f"ds_mla_attention_flash_forward failed with code {code}")
     return out
+
+
+def ds_attention_block_forward(
+    session: "DeepSeekNativeSession",
+    hidden: torch.Tensor,
+    q_a_weight: torch.Tensor,
+    q_b_weight: torch.Tensor,
+    kv_a_weight: torch.Tensor,
+    kv_b_weight: torch.Tensor,
+    o_weight: torch.Tensor,
+    q_norm_weight: torch.Tensor,
+    kv_norm_weight: torch.Tensor,
+    *,
+    previous_kv_cache: torch.Tensor | None,
+    previous_pe_cache: torch.Tensor | None,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    num_heads: int,
+    qk_nope_dim: int,
+    qk_rope_dim: int,
+    v_head_dim: int,
+    rms_eps: float,
+    softmax_scale: float,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    """Run a one-token DeepSeek attention block as one native C call."""
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if int(hidden_cpu.numel()) <= 0:
+        raise ValueError("hidden must not be empty")
+    hidden_dim = int(hidden_cpu.numel())
+    q_a_cpu = q_a_weight.detach().cpu().contiguous().to(torch.float32)
+    q_b_cpu = q_b_weight.detach().cpu().contiguous().to(torch.float32)
+    kv_a_cpu = kv_a_weight.detach().cpu().contiguous().to(torch.float32)
+    kv_b_cpu = kv_b_weight.detach().cpu().contiguous().to(torch.float32)
+    o_cpu = o_weight.detach().cpu().contiguous().to(torch.float32)
+    q_norm_cpu = q_norm_weight.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    kv_norm_cpu = kv_norm_weight.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    cos_cpu = rope_cos.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    sin_cpu = rope_sin.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+
+    q_rank = int(q_lora_rank)
+    kv_rank = int(kv_lora_rank)
+    heads = int(num_heads)
+    qk_nope = int(qk_nope_dim)
+    qk_rope = int(qk_rope_dim)
+    v_dim = int(v_head_dim)
+    if tuple(q_a_cpu.shape) != (q_rank, hidden_dim):
+        raise ValueError("q_a_weight must be [q_lora_rank, hidden_dim]")
+    if tuple(q_b_cpu.shape) != (heads * (qk_nope + qk_rope), q_rank):
+        raise ValueError("q_b_weight shape does not match DeepSeek attention config")
+    if tuple(kv_a_cpu.shape) != (kv_rank + qk_rope, hidden_dim):
+        raise ValueError("kv_a_weight shape does not match DeepSeek attention config")
+    if tuple(kv_b_cpu.shape) != (heads * (qk_nope + v_dim), kv_rank):
+        raise ValueError("kv_b_weight shape does not match DeepSeek attention config")
+    if tuple(o_cpu.shape) != (hidden_dim, heads * v_dim):
+        raise ValueError("o_weight shape does not match DeepSeek attention config")
+    if int(q_norm_cpu.numel()) != q_rank or int(kv_norm_cpu.numel()) != kv_rank:
+        raise ValueError("norm weight sizes do not match ranks")
+    if int(cos_cpu.numel()) != max(0, qk_rope // 2) or int(sin_cpu.numel()) != max(0, qk_rope // 2):
+        raise ValueError("rope cos/sin sizes must be qk_rope_dim / 2")
+
+    if previous_kv_cache is None:
+        prev_kv_cpu = torch.empty((0, kv_rank), dtype=torch.float32)
+    else:
+        prev_kv_cpu = previous_kv_cache.detach().cpu().contiguous().reshape(-1, kv_rank).to(torch.float32)
+    previous_len = int(prev_kv_cpu.shape[0])
+    if previous_pe_cache is None:
+        prev_pe_cpu = torch.empty((0, qk_rope), dtype=torch.float32)
+    else:
+        prev_pe_cpu = previous_pe_cache.detach().cpu().contiguous().reshape(-1, qk_rope).to(torch.float32)
+    if int(prev_pe_cpu.shape[0]) != previous_len:
+        raise ValueError("previous KV and PE cache lengths must match")
+
+    if not native_fused_ds_attention_available():
+        raise RuntimeError("Native fused DeepSeek attention is unavailable")
+
+    next_kv = torch.empty((previous_len + 1, kv_rank), dtype=torch.float32)
+    next_pe = torch.empty((previous_len + 1, qk_rope), dtype=torch.float32)
+    out = torch.empty((hidden_dim,), dtype=torch.float32)
+    lib = _load_ds_forward_lib()
+    assert lib is not None
+    prev_kv_ptr = 0 if previous_len == 0 else int(prev_kv_cpu.data_ptr())
+    prev_pe_ptr = 0 if previous_len == 0 else int(prev_pe_cpu.data_ptr())
+    code = lib.ds_attention_block_forward_f32(
+        session._handle,
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(q_a_cpu.data_ptr())),
+        ctypes.c_void_p(int(q_b_cpu.data_ptr())),
+        ctypes.c_void_p(int(kv_a_cpu.data_ptr())),
+        ctypes.c_void_p(int(kv_b_cpu.data_ptr())),
+        ctypes.c_void_p(int(o_cpu.data_ptr())),
+        ctypes.c_void_p(int(q_norm_cpu.data_ptr())),
+        ctypes.c_void_p(int(kv_norm_cpu.data_ptr())),
+        ctypes.c_void_p(prev_kv_ptr),
+        ctypes.c_void_p(prev_pe_ptr),
+        ctypes.c_void_p(int(cos_cpu.data_ptr())),
+        ctypes.c_void_p(int(sin_cpu.data_ptr())),
+        ctypes.c_void_p(int(next_kv.data_ptr())),
+        ctypes.c_void_p(int(next_pe.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(hidden_dim),
+        ctypes.c_longlong(q_rank),
+        ctypes.c_longlong(kv_rank),
+        ctypes.c_longlong(heads),
+        ctypes.c_longlong(qk_nope),
+        ctypes.c_longlong(qk_rope),
+        ctypes.c_longlong(v_dim),
+        ctypes.c_longlong(previous_len),
+        ctypes.c_float(float(rms_eps)),
+        ctypes.c_float(float(softmax_scale)),
+    )
+    session._tensor_keepalive.extend(
+        [
+            hidden_cpu,
+            q_a_cpu,
+            q_b_cpu,
+            kv_a_cpu,
+            kv_b_cpu,
+            o_cpu,
+            q_norm_cpu,
+            kv_norm_cpu,
+            prev_kv_cpu,
+            prev_pe_cpu,
+            cos_cpu,
+            sin_cpu,
+            next_kv,
+            next_pe,
+            out,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"ds_attention_block_forward_f32 failed with code {code}")
+    return out, (next_kv, next_pe)
 
 
 def ds_forward_decode(
@@ -1189,6 +1369,11 @@ class DeepSeekNativeSession:
 
     def attention_invocation_count(self) -> int:
         return int(self._lib.ds_attention_invocation_count(self._handle))
+
+    def fused_attention_invocation_count(self) -> int:
+        if not hasattr(self._lib, "ds_fused_attention_invocation_count"):
+            return 0
+        return int(self._lib.ds_fused_attention_invocation_count(self._handle))
 
     def layers_executed_count(self) -> int:
         return int(self._lib.ds_layers_executed_count(self._handle))

@@ -80,8 +80,15 @@ struct DsSession {
     int64_t callback_invocations = 0;
     int64_t expert_invocations = 0;
     int64_t attention_invocations = 0;
+    int64_t fused_attention_invocations = 0;
     int64_t layers_executed = 0;
     std::vector<DsLayerRegistration> registrations;
+    std::vector<float> scratch_q_low;
+    std::vector<float> scratch_q;
+    std::vector<float> scratch_kv;
+    std::vector<float> scratch_q_nope;
+    std::vector<float> scratch_q_pe;
+    std::vector<float> scratch_attention_heads;
 };
 
 static inline float fp16_to_fp32(uint16_t value) {
@@ -252,6 +259,14 @@ extern "C" __declspec(dllexport) int64_t ds_attention_invocation_count(void* han
         return -1;
     }
     return session->attention_invocations;
+}
+
+extern "C" __declspec(dllexport) int64_t ds_fused_attention_invocation_count(void* handle) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (session == nullptr) {
+        return -1;
+    }
+    return session->fused_attention_invocations;
 }
 
 extern "C" __declspec(dllexport) int64_t ds_layers_executed_count(void* handle) {
@@ -545,6 +560,191 @@ extern "C" __declspec(dllexport) int ds_mla_attention_flash_forward(
             );
         }
     }
+    return 0;
+}
+
+static void linear_f32_rowmajor(
+    const float* input,
+    const float* weight,
+    float* output,
+    int64_t out_rows,
+    int64_t in_cols
+) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < out_rows; ++row) {
+        output[row] = dot_product_f32(input, weight + row * in_cols, in_cols);
+    }
+}
+
+static void rms_norm_inplace_f32(float* values, const float* norm_weight, int64_t dim, float eps) {
+    float sum_sq = 0.0f;
+    for (int64_t index = 0; index < dim; ++index) {
+        sum_sq += values[index] * values[index];
+    }
+    const float inv_rms = 1.0f / std::sqrt(sum_sq / static_cast<float>(dim) + eps);
+    for (int64_t index = 0; index < dim; ++index) {
+        values[index] = values[index] * inv_rms * norm_weight[index];
+    }
+}
+
+static void apply_rope_groups_inplace_f32(
+    float* values,
+    int64_t group_count,
+    int64_t rope_dim,
+    const float* cos_values,
+    const float* sin_values
+) {
+    if (rope_dim <= 0 || (rope_dim % 2) != 0) {
+        return;
+    }
+    const int64_t pairs = rope_dim / 2;
+    for (int64_t group = 0; group < group_count; ++group) {
+        float* base = values + group * rope_dim;
+        for (int64_t pair = 0; pair < pairs; ++pair) {
+            const float x0 = base[pair * 2];
+            const float x1 = base[pair * 2 + 1];
+            const float c = cos_values[pair];
+            const float s = sin_values[pair];
+            base[pair * 2] = x0 * c - x1 * s;
+            base[pair * 2 + 1] = x0 * s + x1 * c;
+        }
+    }
+}
+
+extern "C" __declspec(dllexport) int ds_attention_block_forward_f32(
+    void* handle,
+    const float* hidden_in,
+    const float* q_a_weight,
+    const float* q_b_weight,
+    const float* kv_a_weight,
+    const float* kv_b_weight,
+    const float* o_weight,
+    const float* q_norm_weight,
+    const float* kv_norm_weight,
+    const float* previous_kv_cache,
+    const float* previous_pe_cache,
+    const float* rope_cos,
+    const float* rope_sin,
+    float* next_kv_cache,
+    float* next_pe_cache,
+    float* hidden_out,
+    int64_t hidden_dim,
+    int64_t q_lora_rank,
+    int64_t kv_lora_rank,
+    int64_t num_heads,
+    int64_t qk_nope_dim,
+    int64_t qk_rope_dim,
+    int64_t v_head_dim,
+    int64_t previous_len,
+    float rms_eps,
+    float softmax_scale
+) {
+    DsSession* session = reinterpret_cast<DsSession*>(handle);
+    if (
+        session == nullptr || hidden_in == nullptr || q_a_weight == nullptr || q_b_weight == nullptr ||
+        kv_a_weight == nullptr || kv_b_weight == nullptr || o_weight == nullptr ||
+        q_norm_weight == nullptr || kv_norm_weight == nullptr || rope_cos == nullptr || rope_sin == nullptr ||
+        next_kv_cache == nullptr || next_pe_cache == nullptr || hidden_out == nullptr
+    ) {
+        return 1;
+    }
+    if (
+        hidden_dim <= 0 || q_lora_rank <= 0 || kv_lora_rank <= 0 || num_heads <= 0 ||
+        qk_nope_dim < 0 || qk_rope_dim < 0 || v_head_dim <= 0 || previous_len < 0
+    ) {
+        return 2;
+    }
+    if (previous_len > 0 && (previous_kv_cache == nullptr || previous_pe_cache == nullptr)) {
+        return 3;
+    }
+
+    const int64_t head_q_width = qk_nope_dim + qk_rope_dim;
+    const int64_t q_rows = num_heads * head_q_width;
+    const int64_t kv_rows = kv_lora_rank + qk_rope_dim;
+    const int64_t attention_width = num_heads * v_head_dim;
+    const int64_t cache_len = previous_len + 1;
+
+    std::vector<float>& q_low = session->scratch_q_low;
+    std::vector<float>& q_nope = session->scratch_q_nope;
+    std::vector<float>& q_pe = session->scratch_q_pe;
+    std::vector<float>& attention_heads = session->scratch_attention_heads;
+    q_low.assign(static_cast<size_t>(q_lora_rank), 0.0f);
+    q_nope.assign(static_cast<size_t>(num_heads * qk_nope_dim), 0.0f);
+    q_pe.assign(static_cast<size_t>(num_heads * qk_rope_dim), 0.0f);
+    attention_heads.assign(static_cast<size_t>(attention_width), 0.0f);
+
+    linear_f32_rowmajor(hidden_in, q_a_weight, q_low.data(), q_lora_rank, hidden_dim);
+    rms_norm_inplace_f32(q_low.data(), q_norm_weight, q_lora_rank, rms_eps);
+
+    #pragma omp parallel for schedule(static)
+    for (int64_t head = 0; head < num_heads; ++head) {
+        for (int64_t dim = 0; dim < qk_nope_dim; ++dim) {
+            const int64_t row = head * head_q_width + dim;
+            q_nope[static_cast<size_t>(head * qk_nope_dim + dim)] =
+                dot_product_f32(q_low.data(), q_b_weight + row * q_lora_rank, q_lora_rank);
+        }
+        for (int64_t dim = 0; dim < qk_rope_dim; ++dim) {
+            const int64_t row = head * head_q_width + qk_nope_dim + dim;
+            q_pe[static_cast<size_t>(head * qk_rope_dim + dim)] =
+                dot_product_f32(q_low.data(), q_b_weight + row * q_lora_rank, q_lora_rank);
+        }
+    }
+    if (qk_rope_dim > 0) {
+        apply_rope_groups_inplace_f32(q_pe.data(), num_heads, qk_rope_dim, rope_cos, rope_sin);
+    }
+
+    float* new_kv = next_kv_cache + previous_len * kv_lora_rank;
+    float* new_pe = next_pe_cache + previous_len * qk_rope_dim;
+    if (previous_len > 0) {
+        std::memcpy(
+            next_kv_cache,
+            previous_kv_cache,
+            static_cast<size_t>(previous_len * kv_lora_rank) * sizeof(float)
+        );
+        if (qk_rope_dim > 0) {
+            std::memcpy(
+                next_pe_cache,
+                previous_pe_cache,
+                static_cast<size_t>(previous_len * qk_rope_dim) * sizeof(float)
+            );
+        }
+    }
+    #pragma omp parallel for schedule(static)
+    for (int64_t row = 0; row < kv_lora_rank; ++row) {
+        new_kv[row] = dot_product_f32(hidden_in, kv_a_weight + row * hidden_dim, hidden_dim);
+    }
+    rms_norm_inplace_f32(new_kv, kv_norm_weight, kv_lora_rank, rms_eps);
+    if (qk_rope_dim > 0) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < qk_rope_dim; ++row) {
+            new_pe[row] = dot_product_f32(hidden_in, kv_a_weight + (kv_lora_rank + row) * hidden_dim, hidden_dim);
+        }
+        apply_rope_groups_inplace_f32(new_pe, 1, qk_rope_dim, rope_cos, rope_sin);
+    }
+
+    const int flash_code = ds_mla_attention_flash_forward(
+        q_nope.data(),
+        q_pe.data(),
+        next_kv_cache,
+        next_pe_cache,
+        kv_b_weight,
+        attention_heads.data(),
+        num_heads,
+        cache_len,
+        qk_nope_dim,
+        qk_rope_dim,
+        kv_lora_rank,
+        v_head_dim,
+        softmax_scale
+    );
+    if (flash_code != 0) {
+        return 100 + flash_code;
+    }
+
+    linear_f32_rowmajor(attention_heads.data(), o_weight, hidden_out, hidden_dim, attention_width);
+    session->monolithic_calls += 1;
+    session->attention_invocations += 1;
+    session->fused_attention_invocations += 1;
     return 0;
 }
 

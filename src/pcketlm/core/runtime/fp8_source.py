@@ -18,16 +18,19 @@ import torch
 import torch.nn.functional as F
 
 from pcketlm.native import (
+    DeepSeekNativeSession,
     fp8_e4m3_block_dual_linear_f32,
     fp8_e4m3_block_linear_f32,
     fp8_e4m3_dequant_to_bf16,
     fp8_e4m3_dequant_to_fp16,
     fp8_e4m3_block_mlp_f32,
     fp8_e4m3_block_mlp_many_f32,
+    ds_attention_block_forward,
     ds_mla_attention_flash_forward,
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
+    native_fused_ds_attention_available,
     native_flash_mla_available,
     native_fp8_dual_linear_available,
     native_fp8_dequant_available,
@@ -46,6 +49,8 @@ _FP8_DEQUANT_HOT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "read_error
 _FP8_MLP_SPAN_CACHE: "OrderedDict[str, tuple[torch.Tensor, dict[str, tuple[int, int]]]]" = OrderedDict()
 _FP8_MLP_SPAN_CACHE_BYTES = 0
 _FP8_MLP_SPAN_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FUSED_DS_ATTENTION_SESSIONS: dict[tuple[str, int, int, int], DeepSeekNativeSession] = {}
+_FUSED_DS_ATTENTION_STATS = {"calls": 0, "fallbacks": 0, "errors": 0}
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -2740,6 +2745,38 @@ def _native_flash_mla_runtime_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _fused_ds_attention_runtime_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_FUSED_DS_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_FUSED_DS_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def fused_ds_attention_stats() -> dict[str, int]:
+    return {key: int(value) for key, value in _FUSED_DS_ATTENTION_STATS.items()}
+
+
+def _fused_ds_attention_session(model_id: str, hidden_dim: int, num_layers: int, num_experts: int, top_k: int) -> DeepSeekNativeSession:
+    key = (str(model_id), int(hidden_dim), int(num_experts), int(top_k))
+    session = _FUSED_DS_ATTENTION_SESSIONS.get(key)
+    if session is None:
+        session = DeepSeekNativeSession(
+            num_layers=max(1, int(num_layers)),
+            hidden_dim=int(hidden_dim),
+            num_experts=int(num_experts),
+            top_k=int(top_k),
+        )
+        _FUSED_DS_ATTENTION_SESSIONS[key] = session
+    return session
+
+
+def _rope_cos_sin_for_position(config: dict, *, start_pos: int, qk_rope: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if qk_rope <= 0:
+        return torch.empty((0,), dtype=torch.float32), torch.empty((0,), dtype=torch.float32)
+    freqs = 1.0 / (float(config["rope_theta"]) ** (torch.arange(0, qk_rope, 2, dtype=torch.float32) / qk_rope))
+    angles = float(start_pos) * freqs
+    return angles.cos().contiguous(), angles.sin().contiguous()
+
+
 def _fp8_lm_head_chunk_rows() -> int:
     raw = os.environ.get("PCKETLM_FP8_LM_HEAD_CHUNK_ROWS", "").strip()
     if not raw:
@@ -2857,58 +2894,112 @@ def _run_fp8_single_token_attention_materialized(
             blockers.append("One or more attention weights failed to materialize.")
         else:
             working = hidden_3d.float()
-            q_low = F.linear(working, q_a.float())
-            q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
-            q = F.linear(q_low, q_b.float())
             n_heads = int(deepseek_config["num_attention_heads"])
             qk_nope = int(deepseek_config["qk_nope_head_dim"])
             qk_rope = int(deepseek_config["qk_rope_head_dim"])
             v_head_dim = int(deepseek_config["v_head_dim"])
             kv_lora_rank = int(deepseek_config["kv_lora_rank"])
             seq_len = int(hidden_3d.shape[1])
-            q = q.view(int(hidden_3d.shape[0]), seq_len, n_heads, qk_nope + qk_rope)
-            q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
-            kv = F.linear(working, kv_a.float())
-            kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
-            q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
-            k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
-            kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
-            if previous_kv_cache is not None:
-                previous_kv, previous_pe = previous_kv_cache
-                kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
-                pe_cache = torch.cat([previous_pe.to(k_pe.dtype), k_pe], dim=1)
-            else:
-                kv_cache = kv_latent
-                pe_cache = k_pe
-            wkv_b = kv_b.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
             if (
+                seq_len == 1
+                and int(hidden_3d.shape[0]) == 1
+                and native_fused_ds_attention_available()
+                and _fused_ds_attention_runtime_enabled()
+            ):
+                try:
+                    catalog = load_tensor_catalog(model_id)
+                    route_config = _load_deepseek_route_config(model_id)
+                    cos, sin = _rope_cos_sin_for_position(deepseek_config, start_pos=int(start_pos), qk_rope=qk_rope)
+                    session = _fused_ds_attention_session(
+                        model_id,
+                        int(hidden_3d.shape[-1]),
+                        int(deepseek_config["num_hidden_layers"]),
+                        int(catalog.num_experts or 0),
+                        int(route_config["top_k"]),
+                    )
+                    output_flat, next_cache_flat = ds_attention_block_forward(
+                        session,
+                        working.reshape(-1),
+                        q_a.float(),
+                        q_b.float(),
+                        kv_a.float(),
+                        kv_b.float(),
+                        o_proj.float(),
+                        q_norm[0].float(),
+                        kv_norm[0].float(),
+                        previous_kv_cache=None if previous_kv_cache is None else previous_kv_cache[0],
+                        previous_pe_cache=None if previous_kv_cache is None else previous_kv_cache[1],
+                        rope_cos=cos,
+                        rope_sin=sin,
+                        q_lora_rank=int(q_a.shape[0]),
+                        kv_lora_rank=kv_lora_rank,
+                        num_heads=n_heads,
+                        qk_nope_dim=qk_nope,
+                        qk_rope_dim=qk_rope,
+                        v_head_dim=v_head_dim,
+                        rms_eps=float(deepseek_config["rms_norm_eps"]),
+                        softmax_scale=float(deepseek_config["softmax_scale"]),
+                    )
+                    output = output_flat.reshape(1, 1, -1).to(dtype=dtype).contiguous()
+                    next_cache = (
+                        next_cache_flat[0].reshape(1, -1, kv_lora_rank).detach().contiguous(),
+                        next_cache_flat[1].reshape(1, -1, qk_rope).detach().contiguous(),
+                    )
+                    _FUSED_DS_ATTENTION_STATS["calls"] += 1
+                except Exception:
+                    _FUSED_DS_ATTENTION_STATS["errors"] += 1
+                    output = None
+                    next_cache = None
+
+            if output is None:
+                q_low = F.linear(working, q_a.float())
+                q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+                q = F.linear(q_low, q_b.float())
+                q = q.view(int(hidden_3d.shape[0]), seq_len, n_heads, qk_nope + qk_rope)
+                q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+                kv = F.linear(working, kv_a.float())
+                kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
+                q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
+                k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
+                kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+                if previous_kv_cache is not None:
+                    previous_kv, previous_pe = previous_kv_cache
+                    kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
+                    pe_cache = torch.cat([previous_pe.to(k_pe.dtype), k_pe], dim=1)
+                else:
+                    kv_cache = kv_latent
+                    pe_cache = k_pe
+                wkv_b = kv_b.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
+                if (
                 seq_len == 1
                 and int(hidden_3d.shape[0]) == 1
                 and native_flash_mla_available()
                 and _native_flash_mla_runtime_enabled()
-            ):
-                attention_heads = ds_mla_attention_flash_forward(
-                    q_nope.reshape(n_heads, qk_nope).contiguous(),
-                    q_pe.reshape(n_heads, qk_rope).contiguous(),
-                    kv_cache.reshape(int(kv_cache.shape[1]), kv_lora_rank).contiguous(),
-                    pe_cache.reshape(int(pe_cache.shape[1]), qk_rope).contiguous(),
-                    wkv_b.contiguous(),
-                    softmax_scale=float(deepseek_config["softmax_scale"]),
-                ).view(1, 1, n_heads, v_head_dim)
-            else:
-                q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
-                scores = (
-                    torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
-                    + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
-                ) * float(deepseek_config["softmax_scale"])
-                if previous_kv_cache is None and seq_len > 1:
-                    causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
-                    scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
-                probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
-                attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
-                attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
-            output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
-            next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
+                ):
+                    attention_heads = ds_mla_attention_flash_forward(
+                        q_nope.reshape(n_heads, qk_nope).contiguous(),
+                        q_pe.reshape(n_heads, qk_rope).contiguous(),
+                        kv_cache.reshape(int(kv_cache.shape[1]), kv_lora_rank).contiguous(),
+                        pe_cache.reshape(int(pe_cache.shape[1]), qk_rope).contiguous(),
+                        wkv_b.contiguous(),
+                        softmax_scale=float(deepseek_config["softmax_scale"]),
+                    ).view(1, 1, n_heads, v_head_dim)
+                else:
+                    q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+                    scores = (
+                        torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+                        + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
+                    ) * float(deepseek_config["softmax_scale"])
+                    if previous_kv_cache is None and seq_len > 1:
+                        causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
+                        scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
+                    probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
+                    attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
+                    attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
+                output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
+                next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
+                if _fused_ds_attention_runtime_enabled():
+                    _FUSED_DS_ATTENTION_STATS["fallbacks"] += 1
 
     dequantized_bytes = sum(
         0 if item.tensor is None else item.tensor.nelement() * item.tensor.element_size()

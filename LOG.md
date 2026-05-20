@@ -6170,3 +6170,18 @@ Result: 297 passed in 21.83s
 - Cached-weight pivot also failed: with `PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB=1024`, native rows `[490.189, 468.220, 313.729] ms`; Python rows `[474.413, 301.017, 451.706] ms`; best speedup `0.959x`.
 - Opt-in bounded DeepSeek run: `PCKETLM_ENABLE_NATIVE_FLASH_MLA=1`, `run_fp8_decode_loop("deepseek-v3", [0, 1], layer_count=8, max_new_tokens=1)` ready `True`, elapsed `60.210s`, top ids `[0, 20917, 4178, 94986, 43873]`, logits `[31.752083, 9.981701, 9.811033, 9.53881, 9.474155]`, attention seconds `18.997`.
 - Outcome: PLM-11 is blocked on the `>=2x` full attention-call speed gate. The core kernel is correct, but real wall time is dominated by q/kv/o projection and weight materialization, not the softmax score matrix.
+
+## PLM-12 Fused Native DeepSeek Attention Block / Blocker Evidence
+- Branch: `plm-12-fused-native-deepseek-attention-block`.
+- Added `ds_attention_block_forward_f32()` to `ds_forward.dll`: one C call for q_a projection, q norm, q_b projection, kv_a projection, RoPE, KV append, PLM-11 flash MLA core, and o_proj.
+- Added Python binding `ds_attention_block_forward()`, `native_fused_ds_attention_available()`, `DeepSeekNativeSession.fused_attention_invocation_count()`, and kill switch `PCKETLM_DISABLE_FUSED_DS_ATTENTION=1`. Runtime use is opt-in through `PCKETLM_ENABLE_FUSED_DS_ATTENTION=1` because the speed gate failed.
+- Added `tests/test_native_ds_fused_attention.py`.
+- Focused tests: `python -m pytest tests\test_native_ds_fused_attention.py -q` -> `3 passed in 1.86s`.
+- Focused runtime tests with opt-in: `$env:PCKETLM_ENABLE_FUSED_DS_ATTENTION='1'; python -m pytest tests\test_native_ds_fused_attention.py tests\test_runtime_fp8_source.py -q` -> `28 passed in 2.94s`.
+- Full suite: `python -m pytest tests\ -q` -> `463 passed in 103.45s`.
+- Real DeepSeek layer-3 correctness with cache len `512`: fused C attention block vs current Python+flash-core path max abs diff `2.3283064365386963e-10`, mean abs diff `3.248195508680392e-14`, counters `calls=1`, `fallbacks=0`, `errors=0`.
+- Attempt 1 speed gate, full runtime attention block with warm attention weight cache: Python+flash rows `[692.958, 496.448, 673.873, 465.259, 438.926] ms`; fused rows `[1189.435, 1421.669, 1353.33, 1899.975, 1617.578] ms`; best speedup `0.369x`, not `>=2x`.
+- Attempt 2 reused C-side scratch buffers and computed q/kv split outputs directly instead of materializing full q/kv vectors. Real rows: Python+flash `[582.29, 422.275, 623.882] ms`; fused direct-split `[1264.215, 1139.023, 1272.824] ms`; best speedup `0.3707x`.
+- Attempt 3 component timing on the current Python+flash-core path showed PyTorch/MKL projection calls are already fast: q_a `2.896-3.718 ms`, q_b `8.083-13.403 ms`, kv_a `1.035-1.327 ms`, flash core `8.144-12.752 ms`, o_proj `30.829-36.308 ms`. The hand-rolled native projection loops cannot beat those GEMV/GEMM kernels on this CPU.
+- Bounded DeepSeek 8-layer decode gate with prompt prefill disabled so the fused one-token path actually ran: current path `90.272s`, fused path `115.913s`, speedup `0.7788x`; fused counters `calls=16`, `fallbacks=0`, `errors=0`; top ids matched `[0, 20917, 4178, 94986, 43873]`.
+- Outcome: PLM-12 is blocked on both speed gates. The fused block is correct and truly runs, but CPU hand-rolled projection math loses to the current PyTorch/MKL projection path. The practical unblock is GPU offload or a BLAS-backed/batched native projection strategy, not more scalar/OpenMP C fusion.

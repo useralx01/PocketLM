@@ -390,3 +390,11 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 2: smaller/effective cached core comparison. With a 1024 MB attention weight cache, native rows `[490.189, 468.220, 313.729] ms` vs Python `[474.413, 301.017, 451.706] ms`; the core is tied when projection weights are resident.
 - Attempt 3: fused latent decompression inside the native kernel. The implementation already fuses q_nope absorption into the inner compressed-KV scoring path and avoids score materialization, but the full-call gate still fails because q/kv/o projections remain outside the kernel.
 - Resolution: mark PLM-11 blocked. The unblock is not more softmax tiling; it is a fused/native attention path that owns FP8 q_a/q_b/kv_a/o_proj projection and persistent weight residency.
+
+## PLM-12 Fused Attention Block Speed Gate Blocker
+- Gate failed: PLM-12 requires cache-len-512 fused native attention block `>=2x` faster than the current Python+flash-core path and bounded 8-layer decode `>=30%` faster.
+- Cause: the C fused block is correct and runs, but its hand-rolled projection loops are slower than the current PyTorch/MKL projections. The one-call boundary removes Python orchestration, but not enough to offset slower q_a/q_b/kv_a/o_proj math.
+- Attempt 1: one C call with q_a, q_b, kv_a, RoPE, KV append, flash MLA, and o_proj. Correctness passed with real DeepSeek layer-3 max abs diff `2.3283064365386963e-10`, but speed regressed: Python+flash best `438.926 ms`, fused best `1189.435 ms`.
+- Attempt 2: reuse C-side scratch buffers and avoid full q/kv intermediate materialization by computing q_nope/q_pe and KV split rows directly. Speed still regressed: Python+flash best `422.275 ms`, fused direct-split best `1139.023 ms`.
+- Attempt 3: profile the current path and attack the dominant component. The profile showed PyTorch/MKL projections are already fast (`o_proj` about `30.829-36.308 ms`, q_b about `8.083-13.403 ms`, flash core about `8.144-12.752 ms`), while the C projection loops remain slower. Bounded 8-layer decode with fused path engaged `16` calls and took `115.913s` vs current `90.272s`.
+- Resolution: mark PLM-12 blocked. The unblock is a BLAS-backed/batched native projection strategy or GPU offload; a scalar/OpenMP C fusion does not reach the CPU speed gate.

@@ -1613,3 +1613,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep runtime use opt-in through `PCKETLM_ENABLE_NATIVE_FLASH_MLA=1` after benchmarking showed no full-call win. The kernel remains available for diagnostics and future fused projection work.
 - Keep `PCKETLM_DISABLE_NATIVE_FLASH_MLA=1` as the direct fallback for tests and diagnostics.
 - The next viable DeepSeek attention speed path must fuse or cache q/kv/o projections and weight residency; the attention softmax core alone is not the measured bottleneck.
+
+## PLM-12 Fused DeepSeek Attention Block
+- Implement PLM-12 as an opt-in C attention-block boundary (`PCKETLM_ENABLE_FUSED_DS_ATTENTION=1`) instead of making it default. Real timing regressed, so the fastest proven product path remains the current Python/PyTorch projection path.
+- Keep `PCKETLM_DISABLE_FUSED_DS_ATTENTION=1` as the kill switch. If the fused path is disabled, unavailable, or not applicable to multi-token prompt prefill, runtime falls back to the existing Python attention path.
+- Use the PLM-11 flash MLA core unchanged inside the fused block, but keep projection inputs as materialized f32 tensors for this phase. This proves the one-call math boundary without rewriting the whole FP8 raw-weight registration layer.
+- Reuse C-side scratch buffers and direct q/kv split projection outputs inside the session. This reduces allocation/materialization overhead, but measured wall time still loses to PyTorch/MKL projections.
+- Treat the PLM-12 miss as evidence that CPU OpenMP scalar projection loops are the wrong next speed direction. Future work should use GPU offload or BLAS-backed/batched native projection kernels before retrying production routing.
