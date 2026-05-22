@@ -166,6 +166,4 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-11 flash MLA speed gate needs fused/native q_a/q_b/kv_a/o_proj projection plus persistent attention weight residency; the online-softmax core alone is correct but not faster for the full call.
 - Blocked: PLM-12 fused attention block speed gate needs BLAS-backed/batched native projection or GPU offload; the one-call C fusion is correct but slower than PyTorch/MKL on CPU.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
-- Operator step for PLM-14: open the pushed `notebooks/gpu_test.ipynb` from `https://github.com/iamlicht1f1-maker/pcketlm`, run it on a free Colab/Kaggle GPU, and paste the smoke JSON plus `tests/gpu` pytest output into Linear.
-- Better PLM-14 operator step: create a Kaggle API token once and save it to `C:\Users\isale\.kaggle\kaggle.json`; after that Codex can run `python tools\kaggle_gpu_smoke.py` autonomously.
-- PLM-14 remaining gate: Kaggle account `lichtnicht` must actually receive a GPU worker; current API submissions run CPU-only despite GPU metadata and exact T4/P100 accelerator requests.
+- PLM-14 follow-up only if Kaggle changes its API worker image: rerun `python tools\kaggle_gpu_smoke.py`; until then, use the browser Colab/Kaggle notebook for GPU validation.

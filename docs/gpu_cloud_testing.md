@@ -1,8 +1,43 @@
 # GPU Cloud Testing
 
-PLM-14 adds two GPU checks for pcketlm.
+PLM-14 adds a manual browser GPU validation path for pcketlm, plus a diagnostic Kaggle API runner.
 
-The preferred recurring loop is Kaggle API because Codex can launch and poll it from the terminal:
+## Current Validation Path
+
+Use the browser notebook path for real GPU validation. This is the path that has been manually verified on Kaggle with a T4 and CUDA-capable Torch.
+
+1. Push this repo to GitHub.
+2. Open `notebooks/gpu_test.ipynb` in Google Colab or Kaggle.
+3. Set the runtime to a free GPU.
+4. Run all cells.
+5. Paste the final JSON and pytest line back into the Linear ticket.
+
+The notebook installs pcketlm with `pip install --no-deps -e .` so it does not replace Kaggle or Colab's preinstalled CUDA Torch wheel.
+
+## Kaggle API Runner Status
+
+`tools\kaggle_gpu_smoke.py` now submits a private Kaggle notebook kernel, not a script kernel:
+
+- `kernel_type` is `notebook`.
+- The generated code file is `gpu_smoke_kaggle.ipynb`.
+- `enable_gpu` stays true.
+- The default accelerator is `NvidiaTeslaT4`.
+- The runner probes multiple Python interpreters and uses the first CUDA-capable one if Kaggle exposes it.
+
+The API runner is useful for diagnostics, but it is not the accepted GPU gate right now. The latest autonomous Kaggle API runs reported T4 metadata while exposing only CPU Torch:
+
+```json
+{
+  "cuda_available": false,
+  "device": "cpu",
+  "passed": false,
+  "torch_version": "2.10.0+cpu"
+}
+```
+
+The same worker also failed DNS when trying to repair Torch from `https://download.pytorch.org/whl/cu121`. That cannot be fixed inside the job. If Kaggle later changes the API notebook image, this runner may start passing without code changes.
+
+To run the diagnostic API path:
 
 1. Add a Kaggle API token once at `C:\Users\isale\.kaggle\kaggle.json`.
 2. Run:
@@ -12,8 +47,6 @@ python tools\kaggle_gpu_smoke.py
 ```
 
 Codex can then submit the private Kaggle GPU kernel, poll status, download output, and write `state\kaggle_gpu_smoke\latest.json`.
-
-The Kaggle runner checks the remote torch wheel before running the smoke. If Kaggle starts with a CPU-only torch wheel, it repairs torch from the CUDA wheel index before importing pcketlm smoke code. The notebook fallback installs pcketlm with `--no-deps` so it does not replace Kaggle's CUDA torch.
 
 ## One-Time Kaggle Token Setup
 
@@ -26,17 +59,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.kaggle"
 Move-Item "$env:USERPROFILE\Downloads\kaggle.json" "$env:USERPROFILE\.kaggle\kaggle.json"
 ```
 
-After that, Codex can run the GPU smoke autonomously from this repo.
-
-## Colab Fallback
-
-The Colab loop still works, but it requires clicking Run all:
-
-1. Push this repo to GitHub.
-2. Open `notebooks/gpu_test.ipynb` in Google Colab or Kaggle.
-3. Set the runtime to a free GPU.
-4. Run all cells.
-5. Paste the final JSON and pytest line back into the Linear ticket.
+After that, Codex can run the diagnostic Kaggle API smoke from this repo.
 
 ## GitHub Setup
 

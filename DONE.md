@@ -693,3 +693,4 @@ PLM-6 Native DeepSeek router: done. Added native u16 softmax top-k router, Pytho
 PLM-7 Native DeepSeek MoE dispatch: done. Added C dispatch that calls PLM-2 FP8 many-MLP, combines route weights in C, and records expert invocation counters.
 PLM-8 DeepSeek attention bridge: done. Added C-side attention callback bridge, kill switch, real DeepSeek layer-3 output comparison, and attention counters.
 PLM-9 DeepSeek monolithic forward boundary: done. Added decode/prefill/verify C entry points, Python bindings, tiny oracle sequence proof, real DeepSeek top-k bridge proof, and layer counters.
+PLM-14 GPU testing pipeline: done with constraint. The repo/notebook/GPU smoke path is in place, local tests pass, the Kaggle API runner now generates a notebook kernel with T4 metadata, and the accepted validation path is the manual browser Colab/Kaggle notebook because Kaggle API workers still expose CPU Torch only.
