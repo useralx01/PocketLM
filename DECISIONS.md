@@ -1650,3 +1650,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Measure multi-layer residency before building a full scheduler. The 3-layer Kaggle row uses `5.64 GB` resident weight memory and still projects under `2s/token`, so the next product path is an active-window/paged GPU residency engine rather than trying to keep all DeepSeek layers resident at once.
 - Implement the first paging proof as a validation-time resident layer pager, not as default product routing. It keeps the active layer protected, evicts least-recently-used resident layers after each layer forward, and reports cold load/dequant time separately from the earlier resident benchmark rows.
 - Keep prefetch optional and default it to `0` for free Kaggle T4 validation. A one-layer prefetch can improve overlap later, but the first gate should prove load/evict correctness without increasing transient VRAM pressure.
+
+## PLM-15 Watchdog
+- Replace interval-based PLM-13 resume automation with a continuous watchdog loop. The loop checks PLM-13 in Linear, exits on Done/Canceled/blocked, otherwise launches `codex exec` with the PLM-13 resume prompt and immediately loops again after Codex exits.
+- Use a lock file and PID file under `state\auto_resume` so a second watchdog process exits instead of launching a parallel resume loop.
+- Use a stop file plus stop script as the single-command operator stop: `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\isale\Documents\pcketlm\tools\stop_auto_resume_plm13_watchdog.ps1"`.
+- Try `schtasks /Create /TN PocketLM-PLM13-Watchdog /SC ONLOGON /TR <watchdog command> /F` first. On this machine Windows returns `Access is denied`, so install a Startup-folder command instead at `C:\Users\isale\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PocketLM-PLM13-Watchdog.cmd`.

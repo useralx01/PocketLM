@@ -6275,3 +6275,11 @@ Result: 297 passed in 21.83s
 - Local syntax: `python -m py_compile src\pcketlm\core\runtime\deepseek_remote_gpu.py tools\deepseek_gpu_validate.py` -> passed.
 - Focused tests: `python -m pytest tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `8 passed in 2.38s`.
 - Full suite: `python -m pytest tests\ -q` -> `478 passed, 2 skipped in 100.70s`.
+
+## PLM-15 Watchdog Loop
+- Replaced the old interval auto-resume shape with a continuous watchdog script: `tools\auto_resume_plm13_watchdog.ps1`.
+- Added installer and stop scripts: `tools\install_auto_resume_plm13_watchdog.ps1` and `tools\stop_auto_resume_plm13_watchdog.ps1`.
+- Dry-run live Linear check: PLM-13 `In Progress/started`, labels `autonomous,integration,speed`, and the watchdog would launch Codex.
+- Safety stop checks: `-StateOverride Done` exits before launch; `-LabelOverride blocked` exits before launch.
+- Windows denied registering an `ONLOGON` scheduled task with `Access is denied`, so installer fell back to the user Startup folder: `C:\Users\isale\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PocketLM-PLM13-Watchdog.cmd`.
+- Watchdog started directly and is alive as PID `40260`; it launched Codex with `codex exec --dangerously-bypass-approvals-and-sandbox -C C:\Users\isale\Documents\pcketlm <resume-prompt>`.

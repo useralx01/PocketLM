@@ -722,3 +722,4 @@ PLM-14 final: target met with a documented constraint. Browser Colab/Kaggle note
 PLM-13 GPU attempt 1: branch `plm-13-gpu-effective-speed` adds a DeepSeek-shaped FP8 CUDA timing probe to the browser notebook; local focused tests pass, and GPU validation is now requested from the operator.
 PLM-13 GPU attempt 3: real DeepSeek V3 resident layer on Kaggle T4 projects `1.753s/token` over `61` layers after an `18.18s` cold load; next product work is the GPU paging/residency engine.
 PLM-13 GPU attempt 4: real DeepSeek V3 layers `3-5` resident on Kaggle T4 project `1.764s/token` over `61` layers with `5.64 GB` resident weights; cold load is still the product blocker.
+PLM-15 watchdog: running. The interval cron was replaced with a continuous Startup-folder watchdog loop that checks PLM-13 safety state, launches Codex, waits for exit, and immediately loops.
