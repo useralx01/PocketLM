@@ -6314,3 +6314,12 @@ Result: 297 passed in 21.83s
 - Added `tools\deepseek_gpu_validate.py --local-max-new-tokens N`. Local CPU diagnostics use float32 while CUDA diagnostics keep fp16.
 - Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `41 passed in 2.80s`.
 - Full suite: `python -m pytest tests\ -q` -> `486 passed, 2 skipped in 101.11s`.
+
+## PLM-13 Online GPU Validation / Kaggle
+- Fresh Kaggle notebook slug `lichtnicht/pocketlm-gpu-smoke-0522` ran with CUDA: Torch `2.10.0+cu128`, `cuda_available=true`, smoke passed with checksum `0.08184617757797241`.
+- Added `tools\kaggle_deepseek_gpu_validate.py`, which embeds `deepseek_remote_gpu.py` directly into a private Kaggle notebook. This avoids GitHub clone/auth failures for the private repo.
+- Real DeepSeek remote validator slug `lichtnicht/pocketlm-deepseek-remote-0522` passed on Tesla T4. Layer 3 cold remote range: elapsed `18.548s`, downloaded `587,586,128` bytes, selected experts `[15,123,196,209,213,236,242,252]`. Resident layer hot path: `0.028589s/layer`, projected `1.743944s/token`. Resident layers `3-5`: `0.029523s/layer`, projected `1.800904s/token`, resident bytes `5,636,852,736`.
+- Paged validator slug `lichtnicht/pocketlm-deepseek-paged-0522` passed on Tesla T4. Paged layers `3-6` under `6 GB` budget loaded `4` layers, evicted `1`, peak resident bytes `7,515,803,648`, final resident bytes `5,636,852,736`, elapsed `35.740s` including cold HTTP/dequant, and selected real routed experts for all four layers.
+- Interpretation: online GPU confirms the resident math target is real (`~1.7-1.8s/token` projected), and paging/eviction semantics work. The remaining product gap is giving the online/local CUDA worker fast access to the full local FP8 pack/source instead of HTTP range cold-loading every layer.
+- Focused tests: `python -m pytest tests\test_kaggle_gpu_smoke.py tests\test_gpu_smoke.py tests\test_deepseek_remote_gpu.py tests\test_deepseek_gpu_residency.py -q` -> `21 passed in 3.53s`.
+- Full suite: `python -m pytest tests\ -q` -> `487 passed, 2 skipped in 98.43s`.

@@ -728,3 +728,4 @@ PLM-13 local prefetch: resident pager can prefetch upcoming layers in a backgrou
 PLM-13 local tail: resident pager validation can now stream final norm + lm_head top-k and report token ids/logits; full suite is `484 passed, 2 skipped`.
 PLM-13 local KV cache: resident layers now expose cache-carrying forwards and pager results report cache sequence lengths; full suite is `485 passed, 2 skipped`.
 PLM-13 local decode loop: resident pager now has a small greedy multi-token loop with prompt processing, generated token ids, KV cache carry, streamed tail, and pager telemetry; full suite is `486 passed, 2 skipped`.
+PLM-13 online GPU: Kaggle notebook CUDA works; real DeepSeek V3 resident layer projects `1.743944s/token`, resident layers `3-5` project `1.800904s/token`, and paged layers `3-6` pass with `1` eviction under a `6 GB` budget; full suite is `487 passed, 2 skipped`.

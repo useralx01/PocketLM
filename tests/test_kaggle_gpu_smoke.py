@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from tools.kaggle_gpu_smoke import kaggle_credentials, kernel_id_from_submit_output, prepare_kernel
+from tools.kaggle_deepseek_gpu_validate import prepare_kernel as prepare_deepseek_kernel
 
 
 def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
@@ -39,6 +40,33 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
     assert "download.pytorch.org/whl/cu121" in script
     assert "from __future__ import annotations" not in script
     assert "raise SystemExit(main())" not in script
+
+
+def test_prepare_deepseek_gpu_validate_kernel_embeds_remote_validator(tmp_path) -> None:
+    kernel_dir = prepare_deepseek_kernel(
+        username="tester",
+        slug="pcketlm-deepseek-test",
+        title="pcketlm-deepseek-test",
+        out_dir=tmp_path,
+        resident_layers=3,
+        resident_iterations=2,
+        paged_layers=4,
+        paged_budget_gb=6.0,
+    )
+
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    notebook = json.loads((kernel_dir / "deepseek_gpu_validate.ipynb").read_text(encoding="utf-8"))
+    script = "".join(notebook["cells"][0]["source"])
+
+    assert metadata["id"] == "tester/pcketlm-deepseek-test"
+    assert metadata["kernel_type"] == "notebook"
+    assert metadata["enable_gpu"] == "true"
+    assert "deepseek_remote_gpu_embedded.py" in script
+    assert "run_remote_deepseek_resident_decode_probe" in script
+    assert "run_remote_deepseek_paged_decode_probe" in script
+    assert "PCKETLM_DEEPSEEK_VALIDATE_OUTPUT_START" in script
+    assert "layer_count=3" in script
+    assert "layer_count=4" in script
 
 
 def test_kaggle_credentials_reports_missing_without_secret(monkeypatch, tmp_path) -> None:
