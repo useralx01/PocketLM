@@ -31,6 +31,7 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
 def test_kaggle_credentials_reports_missing_without_secret(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     creds = kaggle_credentials()
@@ -38,3 +39,19 @@ def test_kaggle_credentials_reports_missing_without_secret(monkeypatch, tmp_path
     assert creds.available is False
     assert creds.username is None
     assert "missing" in creds.message.lower()
+
+
+def test_kaggle_credentials_accepts_access_token(monkeypatch, tmp_path) -> None:
+    token_dir = tmp_path / ".kaggle"
+    token_dir.mkdir()
+    (token_dir / "access_token").write_text("KGAT_test", encoding="utf-8")
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    creds = kaggle_credentials()
+
+    assert creds.available is True
+    assert creds.username == "api-token"
+    assert creds.source.endswith("access_token")

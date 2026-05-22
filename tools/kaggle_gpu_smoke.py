@@ -34,6 +34,19 @@ class KaggleCredentials:
 
 
 def kaggle_credentials() -> KaggleCredentials:
+    api_token = os.environ.get("KAGGLE_API_TOKEN")
+    if api_token:
+        return KaggleCredentials(_kaggle_config_username() or "api-token", True, "environment", "KAGGLE_API_TOKEN is set.")
+
+    access_token = Path.home() / ".kaggle" / "access_token"
+    if access_token.exists() and access_token.read_text(encoding="utf-8").strip():
+        return KaggleCredentials(
+            _kaggle_config_username() or "api-token",
+            True,
+            str(access_token),
+            "Kaggle access_token is present.",
+        )
+
     env_user = os.environ.get("KAGGLE_USERNAME")
     env_key = os.environ.get("KAGGLE_KEY")
     if env_user and env_key:
@@ -68,6 +81,38 @@ def _git_value(args: list[str], fallback: str) -> str:
         return _run(["git", *args], cwd=ROOT).stdout.strip() or fallback
     except (subprocess.CalledProcessError, FileNotFoundError):
         return fallback
+
+
+def _kaggle_executable_command() -> list[str]:
+    executable = shutil.which("kaggle")
+    if executable:
+        return [executable]
+    scripts = (
+        Path.home()
+        / "AppData"
+        / "Roaming"
+        / "Python"
+        / f"Python{sys.version_info.major}{sys.version_info.minor}"
+        / "Scripts"
+        / "kaggle.exe"
+    )
+    if scripts.exists():
+        return [str(scripts)]
+    return [sys.executable, "-m", "kaggle"]
+
+
+def _kaggle_config_username() -> str | None:
+    try:
+        completed = _run([*_kaggle_executable_command(), "config", "view"], check=False)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- username:"):
+            value = stripped.split(":", 1)[1].strip()
+            if value and value.lower() != "none":
+                return value
+    return None
 
 
 def _repo_url() -> str:
@@ -145,17 +190,15 @@ def prepare_kernel(
 
 
 def ensure_kaggle_package() -> None:
-    if shutil.which("kaggle"):
+    command = _kaggle_executable_command()
+    if len(command) == 1 and Path(command[0]).exists():
         return
     _run([sys.executable, "-m", "pip", "install", "--user", "kaggle"])
 
 
 def _kaggle_command(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     ensure_kaggle_package()
-    executable = shutil.which("kaggle")
-    if executable:
-        return _run([executable, *args], check=check)
-    return _run([sys.executable, "-m", "kaggle", *args], check=check)
+    return _run([*_kaggle_executable_command(), *args], check=check)
 
 
 def submit_kernel(kernel_dir: Path) -> str:
