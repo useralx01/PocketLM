@@ -6323,3 +6323,12 @@ Result: 297 passed in 21.83s
 - Interpretation: online GPU confirms the resident math target is real (`~1.7-1.8s/token` projected), and paging/eviction semantics work. The remaining product gap is giving the online/local CUDA worker fast access to the full local FP8 pack/source instead of HTTP range cold-loading every layer.
 - Focused tests: `python -m pytest tests\test_kaggle_gpu_smoke.py tests\test_gpu_smoke.py tests\test_deepseek_remote_gpu.py tests\test_deepseek_gpu_residency.py -q` -> `21 passed in 3.53s`.
 - Full suite: `python -m pytest tests\ -q` -> `487 passed, 2 skipped in 98.43s`.
+
+## PLM-13 GPU Ready Gate
+- Added `tools\deepseek_gpu_ready.py`, a single local readiness command for the final DeepSeek GPU worker. It checks CUDA, the tensor catalog, the lossless FP8 pack, the resident-window estimate, and can optionally run the local resident-pager decode loop.
+- Real local command: `python tools\deepseek_gpu_ready.py --model-id deepseek-v3 --layer 3 --layers 3 --budget-gb 12`.
+- Real local result: `ready=false` only because `CUDA is not available on this machine`; catalog is ready with `91,991` tensors and `163` shards from `D:\PocketLM\sources\deepseek-v3`.
+- Real pack result: manifest exists at `D:\PocketLM\sources\deepseek-v3\artifacts\fp8_pack\pack_manifest.json`, with `41` pack files and `688,574,839,360` bytes.
+- Real estimate: `61` config layers, layer-3 active source bytes `587,313,376`, dequantized active-layer bytes `1,170,637,824`, `12 GB` budget fits `11` active layers by dequantized bytes, projected hot resident speed `1.7642177491108302s/token`.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_ready.py tests\test_deepseek_gpu_residency.py -q` -> `11 passed in 2.95s`.
+- Full suite: `python -m pytest tests\ -q` -> `490 passed, 2 skipped in 115.06s`.

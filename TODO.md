@@ -173,5 +173,6 @@ Done: PLM-13 streamed local lm_head tail for resident-pager token decisions.
 Done: PLM-13 local resident-layer KV cache carry.
 Done: PLM-13 small local resident-pager multi-token decode loop.
 Done: PLM-13 online Kaggle CUDA smoke and real DeepSeek remote resident/paged validation.
+Done: PLM-13 GPU readiness gate for CUDA + local DeepSeek catalog + local FP8 pack.
 - PLM-13 next: provide a CUDA worker with direct access to the `688 GB` local FP8 pack/source, then run the local resident-pager decode loop there.
 - PLM-13 next: validate whether local pager prefetch overlaps pack/source reads with CUDA compute on that direct-access worker.
