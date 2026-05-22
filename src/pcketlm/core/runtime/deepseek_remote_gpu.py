@@ -52,6 +52,37 @@ class RemoteDeepSeekLayerProbeResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RemoteDeepSeekResidentLayerProbeResult:
+    passed: bool
+    speed_target_met: bool
+    cuda_available: bool
+    device: str
+    device_name: str
+    torch_version: str
+    repo_id: str
+    revision: str
+    layer_index: int
+    token_id: int
+    config_hidden_layers: int
+    layers_executed: int
+    iterations: int
+    selected_experts: list[int]
+    output_shape: list[int]
+    checksum: float
+    max_abs_value: float
+    bytes_downloaded: int
+    tensors_downloaded: int
+    cold_load_seconds: float
+    benchmark_seconds: float
+    seconds_per_resident_layer: float
+    projected_config_layers_seconds_per_token: float
+    note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class RemoteSafeTensorShard:
     def __init__(self, *, repo_id: str, revision: str, filename: str) -> None:
         self.repo_id = repo_id
@@ -319,6 +350,293 @@ def _attention_layer(
     return _fp8_linear(store, f"{prefix}.o_proj.weight", heads_out.flatten(2), dtype=dtype)
 
 
+def run_remote_deepseek_resident_layer_probe(
+    *,
+    repo_id: str = DEFAULT_REPO_ID,
+    revision: str = DEFAULT_REVISION,
+    layer_index: int = 3,
+    token_id: int = 0,
+    iterations: int = 8,
+    require_cuda: bool = True,
+    device: str | None = None,
+    dtype: torch.dtype = torch.bfloat16,
+) -> RemoteDeepSeekResidentLayerProbeResult:
+    """Benchmark one real DeepSeek V3 layer after its FP8 weights are resident on GPU."""
+    cuda_available = torch.cuda.is_available()
+    if device is None:
+        if cuda_available:
+            device = "cuda"
+        elif require_cuda:
+            return _failed_resident_probe(
+                repo_id=repo_id,
+                revision=revision,
+                layer_index=layer_index,
+                token_id=token_id,
+                torch_version=torch.__version__,
+                note="CUDA is required but is not available.",
+            )
+        else:
+            device = "cpu"
+    torch_device = torch.device(device)
+    device_name = torch.cuda.get_device_name(torch_device) if torch_device.type == "cuda" else "cpu"
+    store = RemoteDeepSeekStore(repo_id, revision, device=torch_device)
+    config = store.config
+    layer_count = int(config.get("num_hidden_layers", 0) or 0)
+    iterations = max(1, int(iterations))
+    cold_started = time.perf_counter()
+    selected: list[int] = []
+
+    try:
+        hidden = store.rows("model.embed_tokens.weight", int(token_id), int(token_id) + 1).reshape(
+            1, 1, int(config["hidden_size"])
+        )
+        resident = _ResidentRemoteDeepSeekLayer(store, int(layer_index), config=config, dtype=dtype)
+        first = resident.forward(hidden)
+        selected = list(resident.selected_experts)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        cold_load = time.perf_counter() - cold_started
+
+        # Warm once after the load/dequant path so the benchmark reflects resident execution.
+        _ = resident.forward(hidden)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        bench_started = time.perf_counter()
+        out = first
+        for _index in range(iterations):
+            out = resident.forward(hidden)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        benchmark = time.perf_counter() - bench_started
+        seconds_per_layer = benchmark / float(iterations)
+        projected = seconds_per_layer * max(1, layer_count)
+        checksum = float(out.float().sum().detach().cpu().item())
+        max_abs = float(out.float().abs().max().detach().cpu().item())
+        passed = bool(torch.isfinite(out).all().item() and out.shape == (1, 1, int(config["hidden_size"])))
+        return RemoteDeepSeekResidentLayerProbeResult(
+            passed=passed,
+            speed_target_met=bool(projected <= 2.0),
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            layer_index=int(layer_index),
+            token_id=int(token_id),
+            config_hidden_layers=layer_count,
+            layers_executed=1,
+            iterations=iterations,
+            selected_experts=selected,
+            output_shape=[int(v) for v in out.shape],
+            checksum=checksum,
+            max_abs_value=max_abs,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            cold_load_seconds=float(cold_load),
+            benchmark_seconds=float(benchmark),
+            seconds_per_resident_layer=float(seconds_per_layer),
+            projected_config_layers_seconds_per_token=float(projected),
+            note=(
+                "Real DeepSeek V3 FP8 weights streamed once, dequantized to resident GPU tensors, "
+                "then benchmarked without HTTP or per-token dequant. This measures the target resident execution path."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - validation JSON should carry the exact remote failure.
+        return RemoteDeepSeekResidentLayerProbeResult(
+            passed=False,
+            speed_target_met=False,
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            layer_index=int(layer_index),
+            token_id=int(token_id),
+            config_hidden_layers=layer_count,
+            layers_executed=0,
+            iterations=iterations,
+            selected_experts=selected,
+            output_shape=[],
+            checksum=0.0,
+            max_abs_value=0.0,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            cold_load_seconds=float(time.perf_counter() - cold_started),
+            benchmark_seconds=0.0,
+            seconds_per_resident_layer=0.0,
+            projected_config_layers_seconds_per_token=0.0,
+            note=f"Resident DeepSeek layer probe failed: {type(exc).__name__}: {exc}",
+        )
+
+
+class _ResidentRemoteDeepSeekLayer:
+    def __init__(self, store: RemoteDeepSeekStore, layer_index: int, *, config: dict[str, Any], dtype: torch.dtype) -> None:
+        self.store = store
+        self.layer_index = int(layer_index)
+        self.config = config
+        self.dtype = dtype
+        self.weights: dict[str, torch.Tensor] = {}
+        self.regular: dict[str, torch.Tensor] = {}
+        self.selected_experts: list[int] = []
+        self._expert_gate: torch.Tensor | None = None
+        self._expert_up: torch.Tensor | None = None
+        self._expert_down: torch.Tensor | None = None
+        self._load_attention_and_router()
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        input_norm = self.regular[f"model.layers.{self.layer_index}.input_layernorm.weight"]
+        post_norm = self.regular[f"model.layers.{self.layer_index}.post_attention_layernorm.weight"]
+        normed = _rms_norm(hidden.to(dtype=self.dtype), input_norm, float(self.config["rms_norm_eps"]))
+        attn_out = self._attention(normed)
+        hidden_after_attn = hidden.to(dtype=self.dtype) + attn_out.to(dtype=self.dtype)
+        ffn_input = _rms_norm(hidden_after_attn, post_norm, float(self.config["rms_norm_eps"]))
+        route_weights, route_indices = self._route(ffn_input)
+        selected = sorted({int(value) for value in route_indices.reshape(-1).tolist()})
+        if selected != self.selected_experts:
+            self._load_moe(selected)
+        ffn_out = self._moe(ffn_input, route_weights, route_indices)
+        return (hidden_after_attn + ffn_out.to(dtype=self.dtype)).contiguous()
+
+    def _load_attention_and_router(self) -> None:
+        layer = self.layer_index
+        self.regular[f"model.layers.{layer}.input_layernorm.weight"] = self.store.tensor(
+            f"model.layers.{layer}.input_layernorm.weight"
+        )
+        self.regular[f"model.layers.{layer}.post_attention_layernorm.weight"] = self.store.tensor(
+            f"model.layers.{layer}.post_attention_layernorm.weight"
+        )
+        prefix = f"model.layers.{layer}.self_attn"
+        for role in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
+            name = f"{prefix}.{role}.weight"
+            self.weights[name] = _dequant_pair(self.store, name, dtype=self.dtype)
+        self.regular[f"{prefix}.q_a_layernorm.weight"] = self.store.tensor(f"{prefix}.q_a_layernorm.weight")
+        self.regular[f"{prefix}.kv_a_layernorm.weight"] = self.store.tensor(f"{prefix}.kv_a_layernorm.weight")
+        router_name = f"model.layers.{layer}.mlp.gate.weight"
+        self.regular[router_name] = self.store.tensor(router_name).float()
+        bias_name = f"model.layers.{layer}.mlp.gate.e_score_correction_bias"
+        if bias_name in self.store.weight_map:
+            self.regular[bias_name] = self.store.tensor(bias_name).float()
+
+    def _load_moe(self, selected: list[int]) -> None:
+        layer = self.layer_index
+        for expert_index in selected:
+            prefix = f"model.layers.{layer}.mlp.experts.{expert_index}"
+            for role in ("gate_proj", "up_proj", "down_proj"):
+                name = f"{prefix}.{role}.weight"
+                self.weights.setdefault(name, _dequant_pair(self.store, name, dtype=self.dtype))
+        if int(self.config.get("n_shared_experts", 0) or 0) > 0:
+            prefix = f"model.layers.{layer}.mlp.shared_experts"
+            for role in ("gate_proj", "up_proj", "down_proj"):
+                name = f"{prefix}.{role}.weight"
+                self.weights.setdefault(name, _dequant_pair(self.store, name, dtype=self.dtype))
+        self._expert_gate = torch.stack(
+            [self.weights[f"model.layers.{layer}.mlp.experts.{idx}.gate_proj.weight"] for idx in selected]
+        ).contiguous()
+        self._expert_up = torch.stack(
+            [self.weights[f"model.layers.{layer}.mlp.experts.{idx}.up_proj.weight"] for idx in selected]
+        ).contiguous()
+        self._expert_down = torch.stack(
+            [self.weights[f"model.layers.{layer}.mlp.experts.{idx}.down_proj.weight"] for idx in selected]
+        ).contiguous()
+        self.selected_experts = list(selected)
+
+    def _attention(self, hidden: torch.Tensor) -> torch.Tensor:
+        prefix = f"model.layers.{self.layer_index}.self_attn"
+        q_a = self._linear(f"{prefix}.q_a_proj.weight", hidden)
+        q_a_norm = _rms_norm(q_a, self.regular[f"{prefix}.q_a_layernorm.weight"], float(self.config["rms_norm_eps"]))
+        q = self._linear(f"{prefix}.q_b_proj.weight", q_a_norm).float()
+        kv = self._linear(f"{prefix}.kv_a_proj_with_mqa.weight", hidden).float()
+
+        heads = int(self.config["num_attention_heads"])
+        qk_nope = int(self.config["qk_nope_head_dim"])
+        qk_rope = int(self.config["qk_rope_head_dim"])
+        v_head_dim = int(self.config["v_head_dim"])
+        kv_lora_rank = int(self.config["kv_lora_rank"])
+        q = q.view(1, 1, heads, qk_nope + qk_rope)
+        q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+        kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
+        kv_latent = _rms_norm(kv_latent, self.regular[f"{prefix}.kv_a_layernorm.weight"], float(self.config["rms_norm_eps"]))
+        kv_b = self.weights[f"{prefix}.kv_b_proj.weight"].float()
+        wkv_b = kv_b.view(heads, qk_nope + v_head_dim, kv_lora_rank)
+
+        # A single token with no previous cache has a length-1 softmax, so q only affects shape checks.
+        if int(hidden.shape[1]) == 1:
+            attention_heads = torch.einsum("btc,hdc->bthd", kv_latent, wkv_b[:, -v_head_dim:])
+        else:
+            q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+            q_pe = _apply_rope(q_pe, config=self.config)
+            k_pe = _apply_rope(k_pe.unsqueeze(2), config=self.config).squeeze(2)
+            scores = (
+                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_latent)
+                + torch.einsum("bshr,btr->bsht", q_pe, k_pe)
+            ) * _softmax_scale(self.config)
+            probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=hidden.dtype)
+            latent = torch.einsum("bsht,btc->bshc", probs, kv_latent)
+            attention_heads = torch.einsum("bshc,hdc->bshd", latent, wkv_b[:, -v_head_dim:])
+        return self._linear(f"{prefix}.o_proj.weight", attention_heads.flatten(2))
+
+    def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        layer = self.layer_index
+        router = self.regular[f"model.layers.{layer}.mlp.gate.weight"]
+        bias = self.regular.get(f"model.layers.{layer}.mlp.gate.e_score_correction_bias")
+        scores = F.linear(hidden.reshape(-1, hidden.shape[-1]).float(), router)
+        scoring = str(self.config.get("scoring_func", "sigmoid"))
+        scores = scores.sigmoid() if scoring == "sigmoid" else scores.softmax(dim=-1, dtype=torch.float32)
+        choice_scores = scores + bias if bias is not None else scores
+        n_groups = int(self.config.get("n_group", 1) or 1)
+        topk_groups = int(self.config.get("topk_group", 1) or 1)
+        if n_groups > 1:
+            grouped = choice_scores.view(choice_scores.shape[0], n_groups, -1)
+            group_scores = grouped.topk(2, dim=-1)[0].sum(dim=-1) if bias is not None else grouped.amax(dim=-1)
+            keep_groups = group_scores.topk(max(1, min(topk_groups, n_groups)), dim=-1)[1]
+            mask = grouped.new_ones(choice_scores.shape[0], n_groups, dtype=torch.bool).scatter_(1, keep_groups, False)
+            choice_scores = grouped.masked_fill(mask.unsqueeze(-1), float("-inf")).flatten(1)
+        top_k = max(1, min(int(self.config.get("num_experts_per_tok", 1) or 1), choice_scores.shape[-1]))
+        indices = torch.topk(choice_scores, top_k, dim=-1)[1]
+        weights = scores.gather(1, indices)
+        if scoring == "sigmoid":
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        weights = weights * float(self.config.get("routed_scaling_factor", 1.0) or 1.0)
+        return weights, indices
+
+    def _moe(self, hidden: torch.Tensor, route_weights: torch.Tensor, route_indices: torch.Tensor) -> torch.Tensor:
+        if int(self.layer_index) < int(self.config.get("first_k_dense_replace", 0)):
+            return self._mlp(f"model.layers.{self.layer_index}.mlp", hidden)
+        h = hidden.reshape(-1, hidden.shape[-1]).float()
+        selected = list(self.selected_experts)
+        if self._expert_gate is None or self._expert_up is None or self._expert_down is None:
+            self._load_moe(selected)
+        if self._expert_gate is None or self._expert_up is None or self._expert_down is None:
+            raise RuntimeError("Resident expert stacks did not materialize.")
+        gate = self._expert_gate.float()
+        up = self._expert_up.float()
+        down = self._expert_down.float()
+        expert_hidden = h[0]
+        gate_out = torch.einsum("eih,h->ei", gate, expert_hidden)
+        up_out = torch.einsum("eih,h->ei", up, expert_hidden)
+        act = F.silu(gate_out) * up_out
+        down_out = torch.einsum("ehi,ei->eh", down, act)
+        by_expert = {int(route_indices[0, pos].item()): float(route_weights[0, pos].item()) for pos in range(route_indices.shape[1])}
+        weight_vec = torch.tensor([by_expert[idx] for idx in selected], device=hidden.device, dtype=down_out.dtype).view(-1, 1)
+        out = (down_out * weight_vec).sum(dim=0)
+        if int(self.config.get("n_shared_experts", 0) or 0) > 0:
+            out = out + self._mlp(f"model.layers.{self.layer_index}.mlp.shared_experts", hidden).reshape(-1).float()
+        return out.reshape_as(h).to(dtype=self.dtype).reshape_as(hidden).contiguous()
+
+    def _mlp(self, prefix: str, hidden: torch.Tensor) -> torch.Tensor:
+        gate = self._linear(f"{prefix}.gate_proj.weight", hidden)
+        up = self._linear(f"{prefix}.up_proj.weight", hidden)
+        act = F.silu(gate.float()) * up.float()
+        return self._linear(f"{prefix}.down_proj.weight", act)
+
+    def _linear(self, name: str, hidden: torch.Tensor) -> torch.Tensor:
+        weight = self.weights[name]
+        out = F.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
+        return out.reshape(*hidden.shape[:-1], weight.shape[0]).to(dtype=self.dtype).contiguous()
+
+
 def _route_layer(
     store: RemoteDeepSeekStore,
     layer_index: int,
@@ -500,6 +818,43 @@ def _failed_remote_probe(
         attention_elapsed_seconds=0.0,
         router_elapsed_seconds=0.0,
         moe_elapsed_seconds=0.0,
+        projected_config_layers_seconds_per_token=0.0,
+        note=note,
+    )
+
+
+def _failed_resident_probe(
+    *,
+    repo_id: str,
+    revision: str,
+    layer_index: int,
+    token_id: int,
+    torch_version: str,
+    note: str,
+) -> RemoteDeepSeekResidentLayerProbeResult:
+    return RemoteDeepSeekResidentLayerProbeResult(
+        passed=False,
+        speed_target_met=False,
+        cuda_available=False,
+        device="cpu",
+        device_name="cpu",
+        torch_version=torch_version,
+        repo_id=repo_id,
+        revision=revision,
+        layer_index=int(layer_index),
+        token_id=int(token_id),
+        config_hidden_layers=0,
+        layers_executed=0,
+        iterations=0,
+        selected_experts=[],
+        output_shape=[],
+        checksum=0.0,
+        max_abs_value=0.0,
+        bytes_downloaded=0,
+        tensors_downloaded=0,
+        cold_load_seconds=0.0,
+        benchmark_seconds=0.0,
+        seconds_per_resident_layer=0.0,
         projected_config_layers_seconds_per_token=0.0,
         note=note,
     )

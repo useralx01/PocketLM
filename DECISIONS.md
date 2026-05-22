@@ -1644,3 +1644,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the first real GPU gate to one routed layer (`layer=3`) because it proves actual FP8 DeepSeek attention, router, selected experts, and shared expert math on CUDA without exceeding free notebook disk.
 - Keep local CPU behavior unchanged by making CUDA opt-in through `PCKETLM_ENABLE_CUDA_FP8=1` or `PCKETLM_FP8_DEVICE=cuda`. CPU native C paths are not called with CUDA tensors.
 - Treat the remote-layer validator as an iteration gate, not the PLM-13 done gate. Done still requires coherent full/effective DeepSeek decode at `<=2s/token`.
+- Separate cold remote-range timing from resident GPU timing. Cold HTTP range + per-call dequant proves availability and correctness, but the target architecture must keep the active layer weights resident or paged into GPU memory before decode.
+- Use FP16 compute for the Kaggle T4 path. T4 is fast at FP16 but not BF16; BF16 remains useful as a quality/reference dtype on hardware that supports it well.
+- Cache selected expert gate/up/down stacks after the resident layer chooses experts. Re-stacking those tensors every token would turn a good CUDA matmul path back into a memory-copy benchmark.

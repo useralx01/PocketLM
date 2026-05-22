@@ -6251,3 +6251,10 @@ Result: 297 passed in 21.83s
 - Local syntax: `python -m py_compile src\pcketlm\core\runtime\fp8_source.py src\pcketlm\core\runtime\deepseek_remote_gpu.py tools\deepseek_gpu_validate.py` -> passed.
 - Focused tests: `python -m pytest tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py tests\test_runtime_fp8_source.py -q` -> `32 passed`.
 - Full suite after notebook test fix: `python -m pytest tests\ -q` -> `477 passed, 2 skipped in 82.13s`.
+
+## PLM-13 GPU Effective Speed / Attempt 3
+- Kaggle browser notebook on account `lichtnicht` ran real DeepSeek V3 layer 3 with GPU T4 x2 and internet on.
+- Cold remote-range result, real FP8 bytes: `cuda_available=true`, `device_name=Tesla T4`, `torch_version=2.10.0+cu128`, `bytes_downloaded=587586128`, `tensors_downloaded=71`, `elapsed_seconds=39.58030807`, `attention_elapsed_seconds=9.154994192999993`, `router_elapsed_seconds=1.1382017210000868`, `moe_elapsed_seconds=27.40171312199982`, projected full config-layer time `2414.39879227s`. This proved real CUDA + real FP8 weights, but also proved per-token HTTP/dequant is not the production path.
+- Added a resident real-layer probe: stream needed FP8 tensors once, dequantize to resident GPU tensors, cache selected-expert stacks, run FP16 CUDA resident math, and report the projected full-layer speed separately from cold load.
+- Resident Kaggle result: `passed=true`, `speed_target_met=true`, `cold_load_seconds=18.17926852400001`, `benchmark_seconds=0.22990756600006534` over `8` iterations, `seconds_per_resident_layer=0.028738445750008168`, projected `61` config layers `1.7530451907504983s/token`, selected experts `[15, 123, 196, 209, 213, 236, 242, 252]`, checksum `41.05815887451172`.
+- Evidence posted to PLM-13. The win is real but scoped: a bounded real layer meets the <=2s/token projection only when weights are resident on GPU. Full product still needs a paging/residency engine, not HTTP range reads in the hot loop.
