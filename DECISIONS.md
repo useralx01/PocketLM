@@ -1656,3 +1656,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use a lock file and PID file under `state\auto_resume` so a second watchdog process exits instead of launching a parallel resume loop.
 - Use a stop file plus stop script as the single-command operator stop: `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\isale\Documents\pcketlm\tools\stop_auto_resume_plm13_watchdog.ps1"`.
 - Try `schtasks /Create /TN PocketLM-PLM13-Watchdog /SC ONLOGON /TR <watchdog command> /F` first. On this machine Windows returns `Access is denied`, so install a Startup-folder command instead at `C:\Users\isale\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PocketLM-PLM13-Watchdog.cmd`.
+
+## PLM-13 Local GPU Residency
+- Move the next DeepSeek speed work from remote HTTP-range validation into a local resident-layer pager that reads the existing local FP8 source or FP8 pack through the tensor catalog.
+- Keep the local pager bounded and opt-in through diagnostics for now. It is product-shaped, but it must not become the default chat route until full/effective decode timing proves the resident-window path on a real CUDA worker.
+- Estimate resident GPU memory from headers before payload loads. For DeepSeek V3 layer 3 with 8 selected experts, the real catalog reports about `587.31 MB` source bytes and `1.17 GB` dequantized resident bytes; a `12 GB` budget fits about `11` dequantized active layers by this estimate.
+- Use the resident Kaggle multi-layer measurement `0.0289216s/layer` as a labeled projection only. It is valid evidence for the hot resident math shape, not a claim that local product decode is already `<=2s/token`.

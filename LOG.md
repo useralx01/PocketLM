@@ -6283,3 +6283,11 @@ Result: 297 passed in 21.83s
 - Safety stop checks: `-StateOverride Done` exits before launch; `-LabelOverride blocked` exits before launch.
 - Windows denied registering an `ONLOGON` scheduled task with `Access is denied`, so installer fell back to the user Startup folder: `C:\Users\isale\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PocketLM-PLM13-Watchdog.cmd`.
 - Watchdog started directly and is alive as PID `40260`; it launched Codex with `codex exec --dangerously-bypass-approvals-and-sandbox -C C:\Users\isale\Documents\pcketlm <resume-prompt>`.
+
+## PLM-13 Local GPU Residency / Attempt 6
+- Added `pcketlm.core.runtime.deepseek_gpu_residency`: a local FP8 resident-layer loader, LRU resident-layer pager, bounded local decode probe, and header-only GPU residency estimator.
+- Added local-only validator flags to `tools\deepseek_gpu_validate.py`: `--skip-remote`, `--local-model-id`, `--local-paged-decode-layers`, and `--local-paged-budget-gb`.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `37 passed in 2.71s`.
+- Full suite: `python -m pytest tests\ -q` -> `482 passed, 2 skipped in 100.45s`.
+- Real DeepSeek V3 header-only estimate: `python tools\deepseek_gpu_validate.py --skip-synthetic --skip-remote --local-model-id deepseek-v3 --layer 3 --local-paged-decode-layers 0 --local-paged-budget-gb 12 --json` -> ready `true`, config layers `61`, source bytes for layer 3 active set `587,313,376`, estimated dequantized resident bytes `1,170,637,824`, 12 GB budget fits `11` dequantized active layers, projected hot resident speed `1.7642177491108302s/token` using the prior Kaggle T4 resident measurement.
+- This is a real product-direction step, not the finish line: it proves the local scheduler can plan/run against the tensor catalog, while full `<=2s/token` still needs a CUDA validation run with the local pager and full/effective decode.

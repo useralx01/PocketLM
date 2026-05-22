@@ -723,3 +723,4 @@ PLM-13 GPU attempt 1: branch `plm-13-gpu-effective-speed` adds a DeepSeek-shaped
 PLM-13 GPU attempt 3: real DeepSeek V3 resident layer on Kaggle T4 projects `1.753s/token` over `61` layers after an `18.18s` cold load; next product work is the GPU paging/residency engine.
 PLM-13 GPU attempt 4: real DeepSeek V3 layers `3-5` resident on Kaggle T4 project `1.764s/token` over `61` layers with `5.64 GB` resident weights; cold load is still the product blocker.
 PLM-15 watchdog: running. The interval cron was replaced with a continuous Startup-folder watchdog loop that checks PLM-13 safety state, launches Codex, waits for exit, and immediately loops.
+PLM-13 local GPU residency: local DeepSeek FP8 resident-layer pager and header-only estimator landed; real DeepSeek V3 layer-3 active set estimates at `1.17 GB` dequantized, fitting about `11` active layers in a `12 GB` GPU budget.
