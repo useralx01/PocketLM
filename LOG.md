@@ -6242,3 +6242,12 @@ Result: 297 passed in 21.83s
 - Updated `notebooks/gpu_test.ipynb` to use branch `plm-13-gpu-effective-speed` and run `tools/gpu_smoke.py --require-cuda --deepseek-probe --json`.
 - Local focused validation: `python -m pytest tests\test_gpu_smoke.py tests\test_gpu_notebook.py tests\gpu -q` -> `5 passed, 2 skipped in 1.39s`.
 - Local CPU diagnostic run with `--deepseek-probe` completed and emitted both `smoke` and `deepseek_gpu_probe` JSON; cloud CUDA run is required before any speed claim.
+
+## PLM-13 GPU Effective Speed / Attempt 2
+- Branch: `plm-13-gpu-effective-speed`.
+- Added CUDA-safe handling in the FP8 source runtime: CPU native paths remain CPU-only, while CUDA tensors use Torch FP8 dequant and matmul on the active device. The opt-in controls are `PCKETLM_ENABLE_CUDA_FP8=1`, `PCKETLM_FP8_DEVICE=cuda`, and kill switch `PCKETLM_DISABLE_CUDA_FP8=1`.
+- Added `pcketlm.core.runtime.deepseek_remote_gpu` and `tools/deepseek_gpu_validate.py`. The validator streams actual `deepseek-ai/DeepSeek-V3` safetensors tensor byte ranges from HuggingFace, executes one real FP8 layer on CUDA, reports selected experts, timing, checksum, downloaded bytes, and a full-layer projection. It does not download the full 688GB+ model.
+- Updated `notebooks/gpu_test.ipynb` to run `tools/deepseek_gpu_validate.py --require-cuda --json` before `tests/gpu`.
+- Local syntax: `python -m py_compile src\pcketlm\core\runtime\fp8_source.py src\pcketlm\core\runtime\deepseek_remote_gpu.py tools\deepseek_gpu_validate.py` -> passed.
+- Focused tests: `python -m pytest tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py tests\test_runtime_fp8_source.py -q` -> `32 passed`.
+- Full suite after notebook test fix: `python -m pytest tests\ -q` -> `477 passed, 2 skipped in 82.13s`.

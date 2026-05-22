@@ -669,7 +669,13 @@ def dequantize_fp8_block_scaled(
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Dequantize FP8 E4M3 weights with DeepSeek-style 128x128 block scales."""
-    if block_size == 128 and dtype in {torch.float16, torch.bfloat16} and native_fp8_dequant_available():
+    if (
+        fp8_bytes.device.type == "cpu"
+        and scale_inv.device.type == "cpu"
+        and block_size == 128
+        and dtype in {torch.float16, torch.bfloat16}
+        and native_fp8_dequant_available()
+    ):
         try:
             if dtype == torch.bfloat16:
                 return fp8_e4m3_dequant_to_bf16(fp8_bytes, scale_inv)
@@ -697,11 +703,29 @@ def dequantize_fp8_block_scaled(
 
     fp8_values = fp8_bytes.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
     expanded_scale = (
-        scale_inv.to(torch.float32)
+        scale_inv.to(device=fp8_values.device, dtype=torch.float32)
         .repeat_interleave(block_size, dim=0)
         .repeat_interleave(block_size, dim=1)[:rows, :cols]
     )
     return (fp8_values * expanded_scale).to(dtype=dtype).contiguous()
+
+
+def _fp8_cuda_runtime_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_CUDA_FP8", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_CUDA_FP8", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fp8_runtime_device() -> torch.device:
+    requested = os.environ.get("PCKETLM_FP8_DEVICE", "").strip()
+    if requested:
+        device = torch.device(requested)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            return torch.device("cpu")
+        return device
+    if _fp8_cuda_runtime_enabled() and torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
 def dequantize_fp8_weight_pair(
@@ -1028,6 +1052,9 @@ def run_fp8_router(
     if router_tensor is None:
         blockers.append(f"Router tensor {router_name} did not materialize.")
     if not blockers and router_tensor is not None:
+        router_tensor = router_tensor.to(device=hidden.device)
+        if bias_tensor is not None:
+            bias_tensor = bias_tensor.to(device=hidden.device)
         flat_hidden = hidden.reshape(-1, hidden.shape[-1]).float()
         scores = F.linear(flat_hidden, router_tensor.float())
         if route_config["scoring_func"] == "softmax":
@@ -1281,7 +1308,9 @@ def run_fp8_single_token_attention(
     loaded_bytes = int(kv_b_loaded.loaded_nbytes)
     dequantized_bytes = 0 if kv_b_loaded.tensor is None else int(kv_b_loaded.tensor.nelement() * kv_b_loaded.tensor.element_size())
     if not blockers and kv_b_loaded.tensor is not None and q_norm[0] is not None and kv_norm[0] is not None:
-        kv_b = kv_b_loaded.tensor
+        kv_b = kv_b_loaded.tensor.to(device=hidden_3d.device)
+        q_norm_weight = q_norm[0].to(device=hidden_3d.device)
+        kv_norm_weight = kv_norm[0].to(device=hidden_3d.device)
         if kv_b is None:
             blockers.append("Attention kv_b weight failed to materialize.")
         else:
@@ -1293,7 +1322,7 @@ def run_fp8_single_token_attention(
             dequantized_bytes += q_a_dequant
             blockers.extend(q_a_blockers)
         if not blockers and q_low is not None:
-            q_low = _rms_norm_any(q_low.float(), q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            q_low = _rms_norm_any(q_low.float(), q_norm_weight.float(), float(deepseek_config["rms_norm_eps"]))
             q, q_b_loaded_nbytes, q_b_dequant, q_b_blockers = _run_fp8_linear_streamed(
                 model_id, weight_names["q_b"], q_low, dtype=dtype
             )
@@ -1321,7 +1350,7 @@ def run_fp8_single_token_attention(
             kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
             q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
             k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
-            kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+            kv_latent = _rms_norm_any(kv_latent, kv_norm_weight.float(), float(deepseek_config["rms_norm_eps"]))
             if previous_kv_cache is not None:
                 previous_kv, previous_pe = previous_kv_cache
                 kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
@@ -1392,7 +1421,9 @@ def run_fp8_single_token_block(
     if post_norm[0] is None:
         blockers.append("Post-attention layer norm did not materialize.")
     if not blockers and input_norm[0] is not None and post_norm[0] is not None:
-        normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0].float(), float(config["rms_norm_eps"]))
+        input_norm_weight = input_norm[0].to(device=hidden_3d.device)
+        post_norm_weight = post_norm[0].to(device=hidden_3d.device)
+        normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm_weight.float(), float(config["rms_norm_eps"]))
         attention_start = time.perf_counter()
         attention = run_fp8_single_token_attention(
             model_id,
@@ -1406,7 +1437,7 @@ def run_fp8_single_token_block(
         blockers.extend(attention.blockers)
         if attention.output_tensor is not None:
             after_attention = hidden_3d.to(dtype=dtype) + attention.output_tensor
-            ffn_input = _rms_norm_any(after_attention, post_norm[0].float(), float(config["rms_norm_eps"]))
+            ffn_input = _rms_norm_any(after_attention, post_norm_weight.float(), float(config["rms_norm_eps"]))
             ffn_start = time.perf_counter()
             if int(layer_index) < int(config["first_k_dense_replace"]):
                 dense_mlp = run_fp8_dense_mlp(model_id, layer_index, ffn_input, dtype=dtype)
@@ -1478,7 +1509,8 @@ def run_fp8_decode_tail_topk(
                 weight = _read_tensor_rows(lm_head_entry, start, end)
                 loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
                 if (
-                    _native_lm_head_topk_enabled()
+                    normalized.device.type == "cpu"
+                    and _native_lm_head_topk_enabled()
                     and lm_head_entry.dtype in {"BF16", "F16"}
                     and native_fp16_matmul_available()
                 ):
@@ -1490,9 +1522,11 @@ def run_fp8_decode_tail_topk(
                         token_offset=start,
                     )
                 else:
+                    weight = weight.to(device=normalized.device)
                     chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
                     values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
-                    indices = indices + start
+                    values = values.cpu()
+                    indices = indices.cpu() + start
                 if top_values is None or top_indices is None:
                     top_values = values
                     top_indices = indices
@@ -1546,6 +1580,7 @@ def run_fp8_decode_tail_topk_batch(
         blockers.append(f"lm_head.weight has unsupported dtype {lm_head_entry.dtype}.")
 
     if not blockers and norm_tensor is not None and lm_head_entry is not None:
+        norm_tensor = norm_tensor.to(device=hidden_2d.device)
         normalized_u16 = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"]))
         normalized = normalized_u16.float()
         vocab_size = int(lm_head_entry.shape[0])
@@ -1558,6 +1593,7 @@ def run_fp8_decode_tail_topk_batch(
                 end = min(vocab_size, start + rows_per_chunk)
                 weight = _read_tensor_rows(lm_head_entry, start, end)
                 loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
+                weight = weight.to(device=normalized.device)
                 chunk_logits = F.linear(normalized, weight.float())
                 values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
                 indices = indices + start
@@ -1574,8 +1610,8 @@ def run_fp8_decode_tail_topk_batch(
     token_rows: list[list[int]] = []
     logit_rows: list[list[float]] = []
     if top_indices is not None and top_values is not None:
-        token_rows = [[int(value) for value in row] for row in top_indices.tolist()]
-        logit_rows = [[float(value) for value in row] for row in top_values.tolist()]
+        token_rows = [[int(value) for value in row] for row in top_indices.cpu().tolist()]
+        logit_rows = [[float(value) for value in row] for row in top_values.cpu().tolist()]
     return FP8DecodeTailBatchResult(
         model_id=model_id,
         input_shape=[int(value) for value in hidden.shape],
@@ -1592,6 +1628,7 @@ def run_fp8_decode_tail_topk_batch(
 
 def load_fp8_token_embedding(model_id: str, token_id: int) -> FP8TokenEmbeddingResult:
     """Load a single embedding row for one token id."""
+    device = _fp8_runtime_device()
     entry = find_tensor_catalog_entry(model_id, "model.embed_tokens.weight")
     blockers: list[str] = []
     tensor = None
@@ -1607,7 +1644,7 @@ def load_fp8_token_embedding(model_id: str, token_id: int) -> FP8TokenEmbeddingR
     else:
         row = _read_tensor_rows(entry, int(token_id), int(token_id) + 1)
         loaded_bytes = int(entry.shape[1]) * _dtype_element_size(entry.dtype)
-        tensor = row.reshape(1, 1, int(entry.shape[1])).contiguous()
+        tensor = row.reshape(1, 1, int(entry.shape[1])).to(device=device).contiguous()
 
     return FP8TokenEmbeddingResult(
         model_id=model_id,
@@ -1654,7 +1691,9 @@ def _run_fp8_prefill_block(
     output = None
     next_cache = None
     if not blockers and input_norm[0] is not None and post_norm[0] is not None:
-        normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm[0], float(config["rms_norm_eps"]))
+        input_norm_weight = input_norm[0].to(device=hidden_3d.device)
+        post_norm_weight = post_norm[0].to(device=hidden_3d.device)
+        normed = _rms_norm_any(hidden_3d.to(dtype=dtype), input_norm_weight, float(config["rms_norm_eps"]))
         attention_start = time.perf_counter()
         attention = _run_fp8_single_token_attention_materialized(
             model_id,
@@ -1668,7 +1707,7 @@ def _run_fp8_prefill_block(
         blockers.extend(attention.blockers)
         if attention.output_tensor is not None:
             hidden_after_attn = hidden_3d.to(dtype=dtype) + attention.output_tensor.to(dtype=dtype)
-            post_normed = _rms_norm_any(hidden_after_attn, post_norm[0], float(config["rms_norm_eps"]))
+            post_normed = _rms_norm_any(hidden_after_attn, post_norm_weight, float(config["rms_norm_eps"]))
             ffn_start = time.perf_counter()
             if int(layer_index) < int(config["first_k_dense_replace"]):
                 dense_mlp = run_fp8_dense_mlp(model_id, layer_index, post_normed, dtype=dtype)
@@ -2407,7 +2446,7 @@ def _run_fp8_native_mlp_full(
     dtype: torch.dtype,
     preloaded_mlp: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor | None, int, int, list[str], bool]:
-    if not (_native_fp8_linear_enabled() and native_fp8_mlp_available()):
+    if hidden.device.type != "cpu" or not (_native_fp8_linear_enabled() and native_fp8_mlp_available()):
         return None, 0, 0, [], False
 
     gate = find_tensor_catalog_entry(model_id, f"{prefix}.gate_proj.weight")
@@ -2540,7 +2579,7 @@ def _run_fp8_dual_linear_streamed(
     dtype: torch.dtype,
     chunk_rows: int = 2048,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, int, int, list[str]]:
-    if not (_native_fp8_linear_enabled() and native_fp8_dual_linear_available()):
+    if hidden.device.type != "cpu" or not (_native_fp8_linear_enabled() and native_fp8_dual_linear_available()):
         output_a, loaded_a, dequant_a, blockers_a = _run_fp8_linear_streamed(
             model_id, weight_name_a, hidden, dtype=dtype, chunk_rows=chunk_rows
         )
@@ -2588,8 +2627,8 @@ def _run_fp8_dual_linear_streamed(
     rows_per_chunk = max(128, int(chunk_rows))
     if rows_per_chunk % 128 != 0:
         rows_per_chunk = ((rows_per_chunk + 127) // 128) * 128
-    output_a = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
-    output_b = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
+    output_a = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype, device=flat_hidden.device)
+    output_b = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype, device=flat_hidden.device)
     loaded_bytes = 0
     dequantized_bytes = 0
     for start in range(0, out_rows, rows_per_chunk):
@@ -2653,7 +2692,7 @@ def _run_fp8_linear_streamed(
     rows_per_chunk = max(128, int(chunk_rows))
     if rows_per_chunk % 128 != 0:
         rows_per_chunk = ((rows_per_chunk + 127) // 128) * 128
-    output = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype)
+    output = torch.empty((flat_hidden.shape[0], out_rows), dtype=dtype, device=flat_hidden.device)
     loaded_bytes = 0
     dequantized_bytes = 0
     for start in range(0, out_rows, rows_per_chunk):
@@ -2663,11 +2702,13 @@ def _run_fp8_linear_streamed(
         loaded_bytes += int(fp8_rows.nelement() * fp8_rows.element_size()) + int(
             scale_rows.nelement() * scale_rows.element_size()
         )
-        if _native_fp8_linear_enabled() and native_fp8_linear_available():
+        if flat_hidden.device.type == "cpu" and _native_fp8_linear_enabled() and native_fp8_linear_available():
             native_out = fp8_e4m3_block_linear_f32(fp8_rows, scale_rows, flat_hidden)
             dequantized_bytes += int(fp8_rows.shape[0] * fp8_rows.shape[1] * torch.empty((), dtype=dtype).element_size())
             output[:, start:end] = native_out.to(dtype=dtype)
         else:
+            fp8_rows = fp8_rows.to(device=flat_hidden.device)
+            scale_rows = scale_rows.to(device=flat_hidden.device)
             dequantized = dequantize_fp8_block_scaled(fp8_rows, scale_rows, dtype=dtype)
             dequantized_bytes += int(dequantized.nelement() * dequantized.element_size())
             output[:, start:end] = F.linear(flat_hidden, dequantized.float()).to(dtype=dtype)

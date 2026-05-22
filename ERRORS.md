@@ -429,3 +429,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 3: switch the autonomous Kaggle submission from script to notebook execution, because the operator verified a manual browser notebook on the same account reports CUDA on T4.
 - Attempt 4: notebook execution still used CPU Torch under `/usr/bin/python3`. Added interpreter probing so the notebook can select `/opt/conda/bin/python` if that interpreter has CUDA Torch.
 - Result: the Kaggle API worker had no `/opt/conda/bin/python` or `/opt/conda/bin/python3`; only `/usr/bin/python3` and `/usr/local/bin/python` were present, both with Torch `2.10.0+cpu`. With DNS blocked for `download.pytorch.org`, the autonomous Kaggle API path cannot produce CUDA evidence in this environment even though the manual browser notebook can.
+
+## PLM-13 Notebook Test Drift
+- Symptom: full test suite failed after the notebook switched from `tools/gpu_smoke.py` to `tools/deepseek_gpu_validate.py`.
+- Cause: `tests/test_gpu_notebook.py` still asserted the old smoke-only command.
+- Fix: update the notebook test to require the new real DeepSeek validator command. Rerun full suite passed: `477 passed, 2 skipped`.

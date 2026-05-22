@@ -10,9 +10,8 @@ def test_gpu_notebook_runs_repo_smoke_commands() -> None:
 
     assert "REPO_URL" in source
     assert "git" in source
-    assert "tools/gpu_smoke.py" in source
+    assert "tools/deepseek_gpu_validate.py" in source
     assert "--require-cuda" in source
-    assert "--deepseek-probe" in source
     assert "plm-13-gpu-effective-speed" in source
     assert "pytest" in source
     assert "tests/gpu" in source

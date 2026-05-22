@@ -1638,3 +1638,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Generate the Kaggle kernel as a private notebook by default after the script worker started with CPU Torch even while Kaggle reported `NvidiaTeslaT4`. Manual browser verification proved Kaggle notebooks can see CUDA on this account, so the autonomous runner should use the same execution shape.
 - Keep CUDA Torch repair in the generated Kaggle code, but treat repair failure as evidence and continue to emit the smoke JSON instead of crashing before the result markers.
 - Probe multiple Python interpreters inside the generated Kaggle notebook and run the smoke payload under the first CUDA-capable one. This covers Kaggle images where the notebook launcher uses `/usr/bin/python3` with CPU Torch while CUDA Torch may live under `/opt/conda/bin/python`.
+
+## PLM-13 Real DeepSeek GPU Validation
+- Use HuggingFace HTTP range reads for the cloud real-weight gate instead of trying to clone or store the full DeepSeek V3 source in Kaggle. The validator reads safetensors headers plus only the tensor ranges required for a bounded layer.
+- Keep the first real GPU gate to one routed layer (`layer=3`) because it proves actual FP8 DeepSeek attention, router, selected experts, and shared expert math on CUDA without exceeding free notebook disk.
+- Keep local CPU behavior unchanged by making CUDA opt-in through `PCKETLM_ENABLE_CUDA_FP8=1` or `PCKETLM_FP8_DEVICE=cuda`. CPU native C paths are not called with CUDA tensors.
+- Treat the remote-layer validator as an iteration gate, not the PLM-13 done gate. Done still requires coherent full/effective DeepSeek decode at `<=2s/token`.
