@@ -1647,3 +1647,16 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Separate cold remote-range timing from resident GPU timing. Cold HTTP range + per-call dequant proves availability and correctness, but the target architecture must keep the active layer weights resident or paged into GPU memory before decode.
 - Use FP16 compute for the Kaggle T4 path. T4 is fast at FP16 but not BF16; BF16 remains useful as a quality/reference dtype on hardware that supports it well.
 - Cache selected expert gate/up/down stacks after the resident layer chooses experts. Re-stacking those tensors every token would turn a good CUDA matmul path back into a memory-copy benchmark.
+
+## PLM-15 Auto Resume
+- Use a repo-local PowerShell guard script at `tools/auto_resume_plm13.ps1` and keep all logs under `state/auto_resume/`.
+- The script checks Linear directly through `LINEAR_API_KEY` before launching Codex. It exits without launching when PLM-13 is `Done`, `Canceled`, or has label `blocked`.
+- Use `codex -a never exec --cd C:\Users\isale\Documents\pcketlm --sandbox danger-full-access <resume prompt>` for the non-interactive resume command. The approval flag is placed before `exec` because this Codex CLI build treats it as a global option.
+- The exact Windows task registration command used by the fallback path is:
+  `schtasks.exe /Create /TN PocketLM-PLM13-AutoResume /SC HOURLY /MO 2 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\isale\Documents\pcketlm\tools\auto_resume_plm13.ps1" /F`
+- Attempted S4U XML registration so the task can run logged out, but Windows returned `Access is denied` for the current non-admin context. The installed Windows task is therefore `Interactive only`; Codex app cron automation `pocketlm-plm-13-auto-resume` was also created every 2 hours as the logged-out/autonomous backup.
+- Operator commands:
+  `schtasks /Query /TN PocketLM-PLM13-AutoResume /FO LIST /V`
+  `schtasks /Change /TN PocketLM-PLM13-AutoResume /DISABLE`
+  `schtasks /Change /TN PocketLM-PLM13-AutoResume /ENABLE`
+  `schtasks /Run /TN PocketLM-PLM13-AutoResume`

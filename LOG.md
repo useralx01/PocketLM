@@ -6258,3 +6258,15 @@ Result: 297 passed in 21.83s
 - Added a resident real-layer probe: stream needed FP8 tensors once, dequantize to resident GPU tensors, cache selected-expert stacks, run FP16 CUDA resident math, and report the projected full-layer speed separately from cold load.
 - Resident Kaggle result: `passed=true`, `speed_target_met=true`, `cold_load_seconds=18.17926852400001`, `benchmark_seconds=0.22990756600006534` over `8` iterations, `seconds_per_resident_layer=0.028738445750008168`, projected `61` config layers `1.7530451907504983s/token`, selected experts `[15, 123, 196, 209, 213, 236, 242, 252]`, checksum `41.05815887451172`.
 - Evidence posted to PLM-13. The win is real but scoped: a bounded real layer meets the <=2s/token projection only when weights are resident on GPU. Full product still needs a paging/residency engine, not HTTP range reads in the hot loop.
+
+## PLM-15 Auto Resume / Setup
+- Branch: `plm-15-auto-resume`.
+- Added `tools/auto_resume_plm13.ps1`: checks PLM-13 via Linear GraphQL using `LINEAR_API_KEY`, exits for Done/Canceled/blocked, holds an exclusive lock in `state/auto_resume/`, and launches `codex exec` with the PLM-13 hard-autonomy resume prompt.
+- Added `tools/install_auto_resume_plm13_task.ps1`: writes task XML to `state/auto_resume/PocketLM-PLM13-AutoResume.xml`, tries S4U registration, and falls back to current-user interactive `schtasks.exe` registration when S4U is denied.
+- Dry-run live Linear check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\auto_resume_plm13.ps1 -DryRun` -> PLM-13 state `In Progress/started`, labels `autonomous,integration,speed`, and would launch Codex.
+- Safety-stop dry-run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\auto_resume_plm13.ps1 -DryRun -StateOverride Done` -> exited without launch.
+- Safety-stop dry-run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\auto_resume_plm13.ps1 -DryRun -StateOverride Todo -LabelOverride blocked` -> exited without launch.
+- Windows S4U registration attempt failed with `Access is denied`; fallback task registered successfully as `PocketLM-PLM13-AutoResume`, logon mode `Interactive only`, every `2` hours.
+- Created Codex app cron automation `pocketlm-plm-13-auto-resume`, every `2` hours, as the logged-out/autonomous backup.
+- First manual `schtasks /Run /TN PocketLM-PLM13-AutoResume` reached the script and Linear safety check, but Codex CLI rejected `--ask-for-approval` after `exec`; fixed the launcher to use global `-a never` before `exec`.
+- Full suite after PLM-15 scripts/docs: `python -m pytest tests\ -q` -> `477 passed, 2 skipped in 100.33s`.
