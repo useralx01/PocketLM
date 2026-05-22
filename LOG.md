@@ -6296,3 +6296,9 @@ Result: 297 passed in 21.83s
 - Added local pager prefetch plumbing with a background layer-load executor, counters for submitted/completed prefetches, and `tools\deepseek_gpu_validate.py --local-paged-prefetch-window`.
 - Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `38 passed in 3.28s`.
 - Full suite: `python -m pytest tests\ -q` -> `483 passed, 2 skipped in 103.39s`.
+
+## PLM-13 Local GPU Residency / Streamed Tail
+- Added optional streamed local final-norm plus `lm_head` top-k for the resident pager path. The validator can now emit top token ids/logits after a bounded local resident-layer decode without loading the full vocab head at once.
+- Added `tools\deepseek_gpu_validate.py --local-include-tail --local-tail-chunk-rows N`.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `39 passed in 3.26s`.
+- Full suite: `python -m pytest tests\ -q` -> `484 passed, 2 skipped in 99.43s`.

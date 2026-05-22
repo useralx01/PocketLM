@@ -73,6 +73,31 @@ def test_local_paged_decode_probe_runs_fixture_on_cpu(tmp_path, monkeypatch) -> 
     assert result.pager_loads == 1
     assert result.pager_cache_misses == 1
     assert result.peak_resident_bytes > 0
+    assert result.tail_top_token_ids == []
+    assert result.blockers == []
+
+
+def test_local_paged_decode_probe_can_stream_tail_topk(tmp_path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    result = run_local_deepseek_paged_decode_probe(
+        model_id,
+        token_id=1,
+        layer_count=1,
+        resident_budget_bytes=1024 * 1024,
+        device="cpu",
+        require_cuda=False,
+        dtype=torch.float32,
+        include_tail=True,
+        tail_top_k=2,
+        tail_chunk_rows=2,
+    )
+
+    assert result.passed is True
+    assert len(result.tail_top_token_ids) == 2
+    assert len(result.tail_top_logits) == 2
+    assert result.tail_elapsed_seconds > 0
     assert result.blockers == []
 
 
@@ -135,6 +160,7 @@ def test_deepseek_gpu_validator_can_run_local_only(tmp_path, monkeypatch, capsys
             "0",
             "--local-paged-decode-layers",
             "1",
+            "--local-include-tail",
             "--json",
         ]
     )
@@ -143,3 +169,4 @@ def test_deepseek_gpu_validator_can_run_local_only(tmp_path, monkeypatch, capsys
     assert exit_code == 0
     assert '"local_deepseek_gpu_residency_estimate"' in captured
     assert '"local_deepseek_paged_decode_probe"' in captured
+    assert '"tail_top_token_ids"' in captured

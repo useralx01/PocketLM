@@ -18,7 +18,7 @@ from pcketlm.core.runtime.fp8_source import (
     load_fp8_weight_pair,
     plan_fp8_layer_working_set,
 )
-from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+from pcketlm.core.runtime.tensor_catalog import find_tensor_catalog_entry, load_tensor_catalog
 
 
 DEFAULT_T4_RESIDENT_SECONDS_PER_LAYER = 0.02892160244443984
@@ -66,6 +66,8 @@ class LocalDeepSeekPagedDecodeResult:
     config_hidden_layers: int
     executed_layers: list[int]
     selected_experts_by_layer: dict[int, list[int]]
+    tail_top_token_ids: list[int]
+    tail_top_logits: list[float]
     output_shape: list[int]
     checksum: float
     max_abs_value: float
@@ -78,6 +80,7 @@ class LocalDeepSeekPagedDecodeResult:
     pager_cache_misses: int
     pager_prefetch_submitted: int
     pager_prefetch_completed: int
+    tail_elapsed_seconds: float
     elapsed_seconds: float
     seconds_per_layer: float
     projected_config_layers_seconds_per_token: float
@@ -488,6 +491,9 @@ def run_local_deepseek_paged_decode_probe(
     resident_budget_bytes: int = 12 * 1024**3,
     prefetch_window: int = 0,
     prefetch_workers: int = 1,
+    include_tail: bool = False,
+    tail_top_k: int = 5,
+    tail_chunk_rows: int = 8192,
     device: str | None = None,
     require_cuda: bool = False,
     dtype: torch.dtype = torch.float16,
@@ -538,6 +544,19 @@ def run_local_deepseek_paged_decode_probe(
             out = resident.forward(out)
             selected[layer_index] = list(resident.selected_experts)
             pager.enforce_budget(protected_layer=layer_index)
+        tail_ids: list[int] = []
+        tail_logits: list[float] = []
+        tail_elapsed = 0.0
+        if include_tail:
+            tail_started = time.perf_counter()
+            tail_ids, tail_logits = _run_tail_topk(
+                model_id,
+                out,
+                device=torch_device,
+                top_k=tail_top_k,
+                chunk_rows=tail_chunk_rows,
+            )
+            tail_elapsed = time.perf_counter() - tail_started
         if torch_device.type == "cuda":
             torch.cuda.synchronize(torch_device)
         elapsed = time.perf_counter() - started
@@ -558,6 +577,8 @@ def run_local_deepseek_paged_decode_probe(
             config_hidden_layers=int(config_layers),
             executed_layers=executed,
             selected_experts_by_layer=selected,
+            tail_top_token_ids=tail_ids,
+            tail_top_logits=tail_logits,
             output_shape=[int(value) for value in out.shape],
             checksum=float(out.float().sum().detach().cpu().item()),
             max_abs_value=float(out.float().abs().max().detach().cpu().item()),
@@ -570,6 +591,7 @@ def run_local_deepseek_paged_decode_probe(
             pager_cache_misses=int(pager.cache_misses),
             pager_prefetch_submitted=int(pager.prefetch_submitted),
             pager_prefetch_completed=int(pager.prefetch_completed),
+            tail_elapsed_seconds=float(tail_elapsed),
             elapsed_seconds=float(elapsed),
             seconds_per_layer=float(seconds_per_layer),
             projected_config_layers_seconds_per_token=float(projected),
@@ -591,6 +613,8 @@ def run_local_deepseek_paged_decode_probe(
             config_hidden_layers=int(config_layers),
             executed_layers=[],
             selected_experts_by_layer=selected,
+            tail_top_token_ids=[],
+            tail_top_logits=[],
             output_shape=[],
             checksum=0.0,
             max_abs_value=0.0,
@@ -603,6 +627,7 @@ def run_local_deepseek_paged_decode_probe(
             pager_cache_misses=int(pager.cache_misses),
             pager_prefetch_submitted=int(pager.prefetch_submitted),
             pager_prefetch_completed=int(pager.prefetch_completed),
+            tail_elapsed_seconds=0.0,
             elapsed_seconds=float(time.perf_counter() - started),
             seconds_per_layer=0.0,
             projected_config_layers_seconds_per_token=0.0,
@@ -621,6 +646,53 @@ def _load_dequantized_weight(model_id: str, name: str, *, dtype: torch.dtype, de
     if not loaded.ready or loaded.tensor is None:
         raise KeyError("; ".join(loaded.blockers) or f"Could not load {name}.")
     return loaded.tensor.to(device=device, dtype=dtype).contiguous()
+
+
+def _run_tail_topk(
+    model_id: str,
+    hidden: torch.Tensor,
+    *,
+    device: torch.device,
+    top_k: int,
+    chunk_rows: int,
+) -> tuple[list[int], list[float]]:
+    from pcketlm.core.runtime.fp8_source import _read_tensor_rows
+
+    lm_head = find_tensor_catalog_entry(model_id, "lm_head.weight")
+    if lm_head is None:
+        raise KeyError("lm_head.weight is not present in the tensor catalog.")
+    norm = _load_regular_tensor(model_id, "model.norm.weight", device=device)
+    config = _load_config(load_tensor_catalog(model_id).model_dir)
+    hidden_2d = hidden.reshape(-1, hidden.shape[-1])[-1:].to(device=device, dtype=torch.float16)
+    normalized = _rms_norm(hidden_2d, norm, float(config["rms_norm_eps"])).float()
+    vocab_size = int(lm_head.shape[0])
+    hidden_size = int(lm_head.shape[1])
+    if int(normalized.shape[-1]) != hidden_size:
+        raise ValueError(f"Hidden size {int(normalized.shape[-1])} does not match lm_head hidden size {hidden_size}.")
+    keep_k = max(1, min(int(top_k), vocab_size))
+    rows = max(1, int(chunk_rows))
+    best_values: torch.Tensor | None = None
+    best_indices: torch.Tensor | None = None
+    for start in range(0, vocab_size, rows):
+        end = min(vocab_size, start + rows)
+        weight = _read_tensor_rows(lm_head, start, end).to(device=device)
+        logits = F.linear(normalized, weight.float()).reshape(-1)
+        values, indices = torch.topk(logits, min(keep_k, int(logits.numel())))
+        indices = indices + int(start)
+        if best_values is None or best_indices is None:
+            best_values = values
+            best_indices = indices
+            continue
+        merged_values = torch.cat([best_values, values])
+        merged_indices = torch.cat([best_indices, indices])
+        next_values, next_positions = torch.topk(merged_values, min(keep_k, int(merged_values.numel())))
+        best_values = next_values
+        best_indices = merged_indices[next_positions]
+    if best_values is None or best_indices is None:
+        return [], []
+    return [int(value) for value in best_indices.detach().cpu().tolist()], [
+        float(value) for value in best_values.detach().cpu().tolist()
+    ]
 
 
 def _load_regular_tensor(model_id: str, name: str, *, device: torch.device) -> torch.Tensor:
@@ -678,6 +750,8 @@ def _failed_decode(
         config_hidden_layers=0,
         executed_layers=[],
         selected_experts_by_layer={},
+        tail_top_token_ids=[],
+        tail_top_logits=[],
         output_shape=[],
         checksum=0.0,
         max_abs_value=0.0,
@@ -690,6 +764,7 @@ def _failed_decode(
         pager_cache_misses=0,
         pager_prefetch_submitted=0,
         pager_prefetch_completed=0,
+        tail_elapsed_seconds=0.0,
         elapsed_seconds=0.0,
         seconds_per_layer=0.0,
         projected_config_layers_seconds_per_token=0.0,

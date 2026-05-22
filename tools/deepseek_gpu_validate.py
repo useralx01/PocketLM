@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--local-paged-decode-layers", type=int, default=0)
     parser.add_argument("--local-paged-budget-gb", type=float, default=12.0)
     parser.add_argument("--local-paged-prefetch-window", type=int, default=0)
+    parser.add_argument("--local-include-tail", action="store_true")
+    parser.add_argument("--local-tail-chunk-rows", type=int, default=8192)
     args = parser.parse_args(argv)
 
     smoke = None
@@ -131,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
                 layer_count=args.local_paged_decode_layers,
                 resident_budget_bytes=int(float(args.local_paged_budget_gb) * 1024**3),
                 prefetch_window=args.local_paged_prefetch_window,
+                include_tail=args.local_include_tail,
+                tail_chunk_rows=args.local_tail_chunk_rows,
                 require_cuda=args.require_cuda,
                 device=args.device,
                 dtype=torch.float16,
