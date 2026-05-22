@@ -411,3 +411,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Previous remote blocker is resolved: repo `https://github.com/iamlicht1f1-maker/pcketlm` exists and branch `plm-14-gpu-testing-pipeline` is pushed.
 - Remaining gate: PLM-14 requires an operator-run free GPU notebook result. This cannot be completed from the local CPU-only shell.
 - Resolution: operator opens `notebooks/gpu_test.ipynb` from the pushed branch in Colab/Kaggle, selects GPU runtime, runs all cells, and pastes the JSON/pytest result into PLM-14.
+
+## PLM-14 Kaggle Credential Pending
+- Gate blocked: fully autonomous free-GPU launch requires Kaggle API credentials.
+- Cause: `C:\Users\isale\.kaggle\kaggle.json` is missing and `KAGGLE_USERNAME`/`KAGGLE_KEY` are not set.
+- Resolution: `tools\kaggle_gpu_smoke.py` is ready and prepares the private GPU kernel, but it cannot submit until the operator downloads a Kaggle API token once. After that Codex can run `python tools\kaggle_gpu_smoke.py` and poll/download without manual notebook clicking.

@@ -1,6 +1,34 @@
 # GPU Cloud Testing
 
-PLM-14 adds a no-file-shuffling GPU check for pcketlm. The loop is:
+PLM-14 adds two GPU checks for pcketlm.
+
+The preferred recurring loop is Kaggle API because Codex can launch and poll it from the terminal:
+
+1. Add a Kaggle API token once at `C:\Users\isale\.kaggle\kaggle.json`.
+2. Run:
+
+```powershell
+python tools\kaggle_gpu_smoke.py
+```
+
+Codex can then submit the private Kaggle GPU kernel, poll status, download output, and write `state\kaggle_gpu_smoke\latest.json`.
+
+## One-Time Kaggle Token Setup
+
+1. Open Kaggle account settings.
+2. Create API token. This downloads `kaggle.json`.
+3. Put it here:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.kaggle"
+Move-Item "$env:USERPROFILE\Downloads\kaggle.json" "$env:USERPROFILE\.kaggle\kaggle.json"
+```
+
+After that, Codex can run the GPU smoke autonomously from this repo.
+
+## Colab Fallback
+
+The Colab loop still works, but it requires clicking Run all:
 
 1. Push this repo to GitHub.
 2. Open `notebooks/gpu_test.ipynb` in Google Colab or Kaggle.

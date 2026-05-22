@@ -6219,3 +6219,7 @@ Result: 297 passed in 21.83s
 - GitHub repo created and pushed: `https://github.com/iamlicht1f1-maker/pcketlm`, branch `plm-14-gpu-testing-pipeline`.
 - Follow-up commit `4149428` set the real repo URL in `notebooks/gpu_test.ipynb` and `docs/gpu_cloud_testing.md`.
 - Remaining operator gate: open the notebook in Colab/Kaggle on a free GPU runtime, run all cells, and paste the JSON plus `tests/gpu` pytest result into PLM-14.
+- Added an autonomous Kaggle API path in `tools/kaggle_gpu_smoke.py` so future GPU smokes can be submitted, polled, and downloaded from the terminal instead of requiring Colab Run all each time.
+- Kaggle runner evidence: `python tools\kaggle_gpu_smoke.py --prepare-only` writes `build\kaggle_gpu_smoke\kernel-metadata.json` and `gpu_smoke_kaggle.py`; `python tools\kaggle_gpu_smoke.py` currently blocks cleanly with `blocked_missing_kaggle_credentials` because `C:\Users\isale\.kaggle\kaggle.json` is missing.
+- Focused Kaggle runner tests: `python -m pytest tests\test_kaggle_gpu_smoke.py tests\test_gpu_notebook.py tests\test_gpu_smoke.py tests\gpu -q` -> `5 passed, 1 skipped in 1.56s`.
+- Full suite after Kaggle runner: `python -m pytest tests\ -q` -> `470 passed, 1 skipped in 87.35s`.

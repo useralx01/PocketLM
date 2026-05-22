@@ -1633,3 +1633,5 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the GPU path opt-in through device detection and `--require-cuda`; local CPU behavior remains unchanged and the CPU fallback smoke verifies deterministic math.
 - Put the reusable implementation under `pcketlm.core.runtime.gpu_smoke` and keep `tools/gpu_smoke.py` as a thin wrapper so the notebook, tests, and terminal use the same code.
 - Make the notebook clone/pull from GitHub rather than requiring file upload. Because this checkout has no configured remote, the operator-owned step is creating/providing the repo URL and token once.
+- Add Kaggle API as the preferred recurring runner because free Colab does not provide a clean unattended run API for this local shell. Kaggle still needs one-time `kaggle.json`, but after that Codex can submit, poll, and download results.
+- Generate the Kaggle kernel as a private script that embeds the current `gpu_smoke.py` source and source commit. This avoids putting GitHub tokens inside Kaggle and avoids requiring DeepSeek downloads for the smoke.
