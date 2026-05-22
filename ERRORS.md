@@ -421,3 +421,9 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Gate blocked: autonomous Kaggle submissions run and logs download, but the remote worker starts CPU-only.
 - Evidence: Kaggle pulled metadata shows `enable_gpu: true` and `machine_shape: "Gpu"`, and CLI submissions with `gpu`, `GPU`, `NvidiaTeslaT4`, `nvidiaTeslaT4`, and `NvidiaTeslaP100` all ran. Each downloaded log reports `cuda_available: false`, `device: "cpu"`, Torch `2.10.0+cpu`, and `CUDA is required for this smoke run but is not available.`
 - Resolution: local automation is working; Kaggle/account GPU availability needs to be enabled or verified before the smoke can pass. The runner now defaults to exact `NvidiaTeslaT4`.
+
+## PLM-14 Kaggle CPU Torch despite T4 metadata
+- Symptom: submitted kernel metadata reports `enable_gpu: true`, `enable_internet: true`, and `machine_shape: "NvidiaTeslaT4"`, but the worker imports Torch `2.10.0+cpu` and reports `cuda_available: false`.
+- Attempt 1: preserve Kaggle's preinstalled Torch by avoiding repo dependency installs. The generated Kaggle smoke already embeds the smoke code and does not run `pip install -e .`; notebook setup was changed to `pip install --no-deps -e .` for the manual path.
+- Attempt 2: repair Torch inside the worker using `pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121`. The worker failed DNS resolution against `download.pytorch.org` despite `enable_internet: true`.
+- Attempt 3: switch the autonomous Kaggle submission from script to notebook execution, because the operator verified a manual browser notebook on the same account reports CUDA on T4.

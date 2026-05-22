@@ -24,6 +24,7 @@ SMOKE_MODULE = ROOT / "src" / "pcketlm" / "core" / "runtime" / "gpu_smoke.py"
 DEFAULT_BUILD_DIR = ROOT / "build" / "kaggle_gpu_smoke"
 DEFAULT_STATE_DIR = ROOT / "state" / "kaggle_gpu_smoke"
 CUDA_TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu121"
+DEFAULT_KERNEL_TYPE = "notebook"
 
 
 @dataclass(frozen=True)
@@ -155,9 +156,14 @@ def _kernel_script(*, repo_url: str, branch: str, commit: str) -> str:
             "_pcketlm_probe = _pcketlm_cuda_torch_probe()",
             "if not _pcketlm_probe.get('cuda_available', False):",
             "    print('PCKETLM_TORCH_REPAIR_START')",
-            f"    _pcketlm_subprocess.check_call([_pcketlm_sys.executable, '-m', 'pip', 'install', '-q', '--force-reinstall', 'torch', '--index-url', {CUDA_TORCH_INDEX_URL!r}])",
+            "    try:",
+            f"        _pcketlm_subprocess.check_call([_pcketlm_sys.executable, '-m', 'pip', 'install', '-q', '--force-reinstall', 'torch', '--index-url', {CUDA_TORCH_INDEX_URL!r}])",
+            "    except Exception as exc:",
+            "        print('PCKETLM_TORCH_REPAIR_FAILED', repr(exc))",
+            "    else:",
+            "        _pcketlm_probe = _pcketlm_cuda_torch_probe()",
+            "        print('PCKETLM_TORCH_REPAIR_DONE')",
             "    _pcketlm_probe = _pcketlm_cuda_torch_probe()",
-            "    print('PCKETLM_TORCH_REPAIR_DONE')",
             "",
         ]
     )
@@ -185,6 +191,33 @@ def _kernel_script(*, repo_url: str, branch: str, commit: str) -> str:
     )
 
 
+def _notebook_payload(source: str) -> dict[str, Any]:
+    return {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [f"{line}\n" for line in source.splitlines()],
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {
+                "name": "python",
+                "pygments_lexer": "ipython3",
+            },
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
 def prepare_kernel(
     *,
     username: str,
@@ -194,9 +227,12 @@ def prepare_kernel(
     repo_url: str | None = None,
     branch: str | None = None,
     commit: str | None = None,
+    kernel_type: str = DEFAULT_KERNEL_TYPE,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    script_name = "gpu_smoke_kaggle.py"
+    if kernel_type not in {"notebook", "script"}:
+        raise ValueError(f"Unsupported Kaggle kernel type: {kernel_type}")
+    code_name = "gpu_smoke_kaggle.ipynb" if kernel_type == "notebook" else "gpu_smoke_kaggle.py"
     repo_url = repo_url or _repo_url()
     branch = branch or _branch_name()
     commit = commit or _commit_sha()
@@ -204,9 +240,9 @@ def prepare_kernel(
     metadata: dict[str, Any] = {
         "id": f"{username}/{slug}",
         "title": title,
-        "code_file": script_name,
+        "code_file": code_name,
         "language": "python",
-        "kernel_type": "script",
+        "kernel_type": kernel_type,
         "is_private": "true",
         "enable_gpu": "true",
         "enable_tpu": "false",
@@ -217,10 +253,17 @@ def prepare_kernel(
         "model_sources": [],
     }
     (out_dir / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out_dir / script_name).write_text(
-        _kernel_script(repo_url=repo_url, branch=branch, commit=commit),
-        encoding="utf-8",
-    )
+    source = _kernel_script(repo_url=repo_url, branch=branch, commit=commit)
+    if kernel_type == "notebook":
+        (out_dir / code_name).write_text(json.dumps(_notebook_payload(source), indent=2) + "\n", encoding="utf-8")
+        stale_script = out_dir / "gpu_smoke_kaggle.py"
+        if stale_script.exists():
+            stale_script.unlink()
+    else:
+        (out_dir / code_name).write_text(source, encoding="utf-8")
+        stale_notebook = out_dir / "gpu_smoke_kaggle.ipynb"
+        if stale_notebook.exists():
+            stale_notebook.unlink()
     return out_dir
 
 
@@ -271,13 +314,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title", default="PocketLM GPU Smoke", help="Kaggle kernel title.")
     parser.add_argument("--prepare-only", action="store_true", help="Only write the Kaggle kernel folder.")
     parser.add_argument("--accelerator", default="NvidiaTeslaT4", help="Kaggle machine shape, for example NvidiaTeslaT4.")
+    parser.add_argument(
+        "--kernel-type",
+        choices=("notebook", "script"),
+        default=DEFAULT_KERNEL_TYPE,
+        help="Kaggle execution format. Notebook is the default because browser notebooks keep Kaggle's CUDA torch image.",
+    )
     parser.add_argument("--poll-interval", type=int, default=30, help="Poll interval in seconds.")
     parser.add_argument("--timeout", type=int, default=900, help="Poll timeout in seconds.")
     args = parser.parse_args(argv)
 
     creds = kaggle_credentials()
     username = creds.username or "missing-kaggle-user"
-    kernel_dir = prepare_kernel(username=username, slug=args.slug, title=args.title)
+    kernel_dir = prepare_kernel(username=username, slug=args.slug, title=args.title, kernel_type=args.kernel_type)
     kernel_id = f"{username}/{args.slug}"
     payload: dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),

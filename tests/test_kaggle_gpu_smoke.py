@@ -17,17 +17,20 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
     )
 
     metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
-    script = (kernel_dir / "gpu_smoke_kaggle.py").read_text(encoding="utf-8")
+    notebook = json.loads((kernel_dir / "gpu_smoke_kaggle.ipynb").read_text(encoding="utf-8"))
+    script = "".join(notebook["cells"][0]["source"])
 
     assert metadata["id"] == "tester/pcketlm-gpu-smoke-test"
     assert metadata["enable_gpu"] == "true"
     assert metadata["enable_internet"] == "true"
     assert metadata["is_private"] == "true"
-    assert metadata["code_file"] == "gpu_smoke_kaggle.py"
+    assert metadata["kernel_type"] == "notebook"
+    assert metadata["code_file"] == "gpu_smoke_kaggle.ipynb"
     assert "run_gpu_smoke(require_cuda=True)" in script
     assert "SOURCE_COMMIT = 'abc1234'" in script
     assert "PCKETLM_GPU_SMOKE_JSON_START" in script
     assert "PCKETLM_TORCH_PROBE" in script
+    assert "PCKETLM_TORCH_REPAIR_FAILED" in script
     assert "download.pytorch.org/whl/cu121" in script
     assert "from __future__ import annotations" not in script
     assert "raise SystemExit(main())" not in script
