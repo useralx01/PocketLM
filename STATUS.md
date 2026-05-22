@@ -726,3 +726,4 @@ PLM-15 watchdog: running. The interval cron was replaced with a continuous Start
 PLM-13 local GPU residency: local DeepSeek FP8 resident-layer pager and header-only estimator landed; real DeepSeek V3 layer-3 active set estimates at `1.17 GB` dequantized, fitting about `11` active layers in a `12 GB` GPU budget.
 PLM-13 local prefetch: resident pager can prefetch upcoming layers in a background loader and reports prefetch counters; full suite is `483 passed, 2 skipped`.
 PLM-13 local tail: resident pager validation can now stream final norm + lm_head top-k and report token ids/logits; full suite is `484 passed, 2 skipped`.
+PLM-13 local KV cache: resident layers now expose cache-carrying forwards and pager results report cache sequence lengths; full suite is `485 passed, 2 skipped`.

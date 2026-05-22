@@ -12,7 +12,7 @@ from typing import Any, Callable
 import torch
 import torch.nn.functional as F
 
-from pcketlm.core.runtime.deepseek_remote_gpu import _apply_rope, _rms_norm, _softmax_scale
+from pcketlm.core.runtime.deepseek_remote_gpu import _rms_norm, _softmax_scale
 from pcketlm.core.runtime.fp8_source import (
     dequantize_fp8_weight_pair,
     load_fp8_weight_pair,
@@ -69,6 +69,7 @@ class LocalDeepSeekPagedDecodeResult:
     tail_top_token_ids: list[int]
     tail_top_logits: list[float]
     output_shape: list[int]
+    cache_sequence_lengths: dict[int, int]
     checksum: float
     max_abs_value: float
     resident_budget_bytes: int
@@ -109,11 +110,21 @@ class LocalDeepSeekResidentLayer:
         self._load_attention_and_router()
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        output, _cache = self.forward_with_cache(hidden)
+        return output
+
+    def forward_with_cache(
+        self,
+        hidden: torch.Tensor,
+        *,
+        start_pos: int = 0,
+        previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         hidden = hidden.to(device=self.device, dtype=self.dtype)
         input_norm = self.regular[f"model.layers.{self.layer_index}.input_layernorm.weight"]
         post_norm = self.regular[f"model.layers.{self.layer_index}.post_attention_layernorm.weight"]
         normed = _rms_norm(hidden, input_norm, float(self.config["rms_norm_eps"]))
-        attn_out = self._attention(normed)
+        attn_out, next_cache = self._attention(normed, start_pos=int(start_pos), previous_kv_cache=previous_kv_cache)
         hidden_after_attn = hidden + attn_out.to(dtype=self.dtype)
         ffn_input = _rms_norm(hidden_after_attn, post_norm, float(self.config["rms_norm_eps"]))
         if int(self.layer_index) < int(self.config.get("first_k_dense_replace", 0) or 0):
@@ -124,7 +135,7 @@ class LocalDeepSeekResidentLayer:
             if selected != self.selected_experts:
                 self._load_moe(selected)
             ffn_out = self._moe(ffn_input, route_weights, route_indices)
-        return (hidden_after_attn + ffn_out.to(dtype=self.dtype)).contiguous()
+        return (hidden_after_attn + ffn_out.to(dtype=self.dtype)).contiguous(), next_cache
 
     def resident_nbytes(self) -> int:
         seen: set[int] = set()
@@ -197,7 +208,15 @@ class LocalDeepSeekResidentLayer:
         ).contiguous()
         self.selected_experts = list(selected)
 
-    def _attention(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _attention(
+        self,
+        hidden: torch.Tensor,
+        *,
+        start_pos: int,
+        previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        from pcketlm.core.runtime.fp8_source import _apply_rope_real
+
         prefix = f"model.layers.{self.layer_index}.self_attn"
         q_a = self._linear(f"{prefix}.q_a_proj.weight", hidden)
         q_a_norm = _rms_norm(q_a, self.regular[f"{prefix}.q_a_layernorm.weight"], float(self.config["rms_norm_eps"]))
@@ -215,20 +234,31 @@ class LocalDeepSeekResidentLayer:
         kv_latent = _rms_norm(kv_latent, self.regular[f"{prefix}.kv_a_layernorm.weight"], float(self.config["rms_norm_eps"]))
         kv_b = self.weights[f"{prefix}.kv_b_proj.weight"].float()
         wkv_b = kv_b.view(heads, qk_nope + v_head_dim, kv_lora_rank)
-        if int(hidden.shape[1]) == 1:
-            attention_heads = torch.einsum("btc,hdc->bthd", kv_latent, wkv_b[:, -v_head_dim:])
+        q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+        q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=self.config)
+        k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=self.config).squeeze(2)
+        if previous_kv_cache is not None:
+            previous_kv, previous_pe = previous_kv_cache
+            kv_cache = torch.cat([previous_kv.to(device=hidden.device, dtype=kv_latent.dtype), kv_latent], dim=1)
+            pe_cache = torch.cat([previous_pe.to(device=hidden.device, dtype=k_pe.dtype), k_pe], dim=1)
         else:
-            q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
-            q_pe = _apply_rope(q_pe, config=self.config)
-            k_pe = _apply_rope(k_pe.unsqueeze(2), config=self.config).squeeze(2)
-            scores = (
-                torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_latent)
-                + torch.einsum("bshr,btr->bsht", q_pe, k_pe)
-            ) * _softmax_scale(self.config)
-            probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=hidden.dtype)
-            latent = torch.einsum("bsht,btc->bshc", probs, kv_latent)
-            attention_heads = torch.einsum("bshc,hdc->bshd", latent, wkv_b[:, -v_head_dim:])
-        return self._linear(f"{prefix}.o_proj.weight", attention_heads.flatten(2))
+            kv_cache = kv_latent
+            pe_cache = k_pe
+        scores = (
+            torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+            + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
+        ) * _softmax_scale(self.config)
+        if previous_kv_cache is None and int(hidden.shape[1]) > 1:
+            seq_len = int(hidden.shape[1])
+            causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=hidden.device).triu(1)
+            scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
+        probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=hidden.dtype)
+        latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
+        attention_heads = torch.einsum("bshc,hdc->bshd", latent, wkv_b[:, -v_head_dim:])
+        return self._linear(f"{prefix}.o_proj.weight", attention_heads.flatten(2)), (
+            kv_cache.detach().contiguous(),
+            pe_cache.detach().contiguous(),
+        )
 
     def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         layer = self.layer_index
@@ -528,6 +558,7 @@ def run_local_deepseek_paged_decode_probe(
     )
     executed = list(range(start_layer, start_layer + layer_count))
     selected: dict[int, list[int]] = {}
+    caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     blockers: list[str] = []
     started = time.perf_counter()
     try:
@@ -541,7 +572,8 @@ def run_local_deepseek_paged_decode_probe(
                     break
                 pager.prefetch(executed[prefetch_index])
             resident = pager.get(layer_index)
-            out = resident.forward(out)
+            out, next_cache = resident.forward_with_cache(out, start_pos=0, previous_kv_cache=caches.get(layer_index))
+            caches[layer_index] = next_cache
             selected[layer_index] = list(resident.selected_experts)
             pager.enforce_budget(protected_layer=layer_index)
         tail_ids: list[int] = []
@@ -580,6 +612,7 @@ def run_local_deepseek_paged_decode_probe(
             tail_top_token_ids=tail_ids,
             tail_top_logits=tail_logits,
             output_shape=[int(value) for value in out.shape],
+            cache_sequence_lengths={int(key): int(value[0].shape[1]) for key, value in caches.items()},
             checksum=float(out.float().sum().detach().cpu().item()),
             max_abs_value=float(out.float().abs().max().detach().cpu().item()),
             resident_budget_bytes=int(resident_budget_bytes),
@@ -616,6 +649,7 @@ def run_local_deepseek_paged_decode_probe(
             tail_top_token_ids=[],
             tail_top_logits=[],
             output_shape=[],
+            cache_sequence_lengths={int(key): int(value[0].shape[1]) for key, value in caches.items()},
             checksum=0.0,
             max_abs_value=0.0,
             resident_budget_bytes=int(resident_budget_bytes),
@@ -723,6 +757,9 @@ def _load_config(model_dir: Path) -> dict[str, Any]:
     payload.setdefault("scoring_func", payload.get("score_func", "sigmoid"))
     payload.setdefault("routed_scaling_factor", payload.get("route_scale", 1.0))
     payload.setdefault("n_shared_experts", payload.get("num_shared_experts", 0))
+    payload.setdefault("rope_theta", 10000.0)
+    payload.setdefault("original_max_position_embeddings", payload.get("max_position_embeddings", 4096))
+    payload.setdefault("max_position_embeddings", payload.get("original_max_position_embeddings", 4096))
     return payload
 
 
@@ -753,6 +790,7 @@ def _failed_decode(
         tail_top_token_ids=[],
         tail_top_logits=[],
         output_shape=[],
+        cache_sequence_lengths={},
         checksum=0.0,
         max_abs_value=0.0,
         resident_budget_bytes=0,

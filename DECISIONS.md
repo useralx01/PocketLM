@@ -1664,3 +1664,4 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use the resident Kaggle multi-layer measurement `0.0289216s/layer` as a labeled projection only. It is valid evidence for the hot resident math shape, not a claim that local product decode is already `<=2s/token`.
 - Add prefetch as an explicit diagnostic option, not a default assumption. The first correctness gate is resident-window semantics; the speed gate then checks whether background layer loads overlap with CUDA compute on the real worker.
 - Stream the local `lm_head` tail in row chunks for resident-pager validation. This keeps the token-decision proof bounded in memory and avoids treating a hidden-state-only layer probe as a complete decode.
+- Carry MLA KV cache through the local resident layer API before attempting multi-token decode timing. A fast no-cache loop would be misleading because it would ignore previous context.

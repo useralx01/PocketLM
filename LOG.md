@@ -6302,3 +6302,9 @@ Result: 297 passed in 21.83s
 - Added `tools\deepseek_gpu_validate.py --local-include-tail --local-tail-chunk-rows N`.
 - Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `39 passed in 3.26s`.
 - Full suite: `python -m pytest tests\ -q` -> `484 passed, 2 skipped in 99.43s`.
+
+## PLM-13 Local GPU Residency / KV Cache
+- Added `LocalDeepSeekResidentLayer.forward_with_cache()` so the local resident path carries DeepSeek MLA latent and RoPE caches across token positions instead of being hidden-state-only.
+- The bounded local pager result now reports per-layer cache sequence lengths.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `40 passed in 2.90s`.
+- Full suite: `python -m pytest tests\ -q` -> `485 passed, 2 skipped in 101.22s`.

@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 
 from pcketlm.core.runtime.deepseek_gpu_residency import (
+    LocalDeepSeekResidentLayer,
     LocalDeepSeekResidentLayerPager,
     estimate_deepseek_gpu_residency,
     run_local_deepseek_paged_decode_probe,
@@ -70,11 +71,51 @@ def test_local_paged_decode_probe_runs_fixture_on_cpu(tmp_path, monkeypatch) -> 
     assert result.device == "cpu"
     assert result.executed_layers == [0]
     assert result.output_shape == [1, 1, 4]
+    assert result.cache_sequence_lengths == {0: 1}
     assert result.pager_loads == 1
     assert result.pager_cache_misses == 1
     assert result.peak_resident_bytes > 0
     assert result.tail_top_token_ids == []
     assert result.blockers == []
+
+
+def test_local_resident_layer_carries_kv_cache(tmp_path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    config = {
+        "hidden_size": 4,
+        "num_attention_heads": 1,
+        "qk_nope_head_dim": 1,
+        "qk_rope_head_dim": 2,
+        "v_head_dim": 1,
+        "kv_lora_rank": 1,
+        "rms_norm_eps": 1e-6,
+        "first_k_dense_replace": 1,
+        "num_experts_per_tok": 1,
+        "n_group": 1,
+        "topk_group": 1,
+        "scoring_func": "sigmoid",
+        "routed_scaling_factor": 2.5,
+        "n_shared_experts": 0,
+        "rope_theta": 10000.0,
+    }
+    layer = LocalDeepSeekResidentLayer(
+        model_id,
+        0,
+        config=config,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    first, first_cache = layer.forward_with_cache(hidden, start_pos=0)
+    second, second_cache = layer.forward_with_cache(hidden, start_pos=1, previous_kv_cache=first_cache)
+
+    assert first.shape == second.shape == (1, 1, 4)
+    assert first_cache is not None
+    assert second_cache is not None
+    assert first_cache[0].shape[1] == 1
+    assert second_cache[0].shape[1] == 2
 
 
 def test_local_paged_decode_probe_can_stream_tail_topk(tmp_path, monkeypatch) -> None:
