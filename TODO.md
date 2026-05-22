@@ -168,3 +168,4 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
 - PLM-14 follow-up only if Kaggle changes its API worker image: rerun `python tools\kaggle_gpu_smoke.py`; until then, use the browser Colab/Kaggle notebook for GPU validation.
 - PLM-13 next: build the GPU paging/residency engine so the resident-layer win becomes a real product path instead of a single-layer Kaggle proof.
+- PLM-13 next: turn the resident multi-layer proof into an active-window GPU pager that preloads upcoming layer weights and evicts old layers under a VRAM budget.

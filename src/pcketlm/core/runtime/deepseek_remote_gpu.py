@@ -83,6 +83,39 @@ class RemoteDeepSeekResidentLayerProbeResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RemoteDeepSeekResidentDecodeProbeResult:
+    passed: bool
+    speed_target_met: bool
+    cuda_available: bool
+    device: str
+    device_name: str
+    torch_version: str
+    repo_id: str
+    revision: str
+    token_id: int
+    start_layer: int
+    layer_count: int
+    config_hidden_layers: int
+    executed_layers: list[int]
+    selected_experts_by_layer: dict[int, list[int]]
+    output_shape: list[int]
+    checksum: float
+    max_abs_value: float
+    bytes_downloaded: int
+    tensors_downloaded: int
+    resident_weight_bytes: int
+    cold_load_seconds: float
+    benchmark_iterations: int
+    benchmark_seconds: float
+    seconds_per_resident_layer: float
+    projected_config_layers_seconds_per_token: float
+    note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class RemoteSafeTensorShard:
     def __init__(self, *, repo_id: str, revision: str, filename: str) -> None:
         self.repo_id = repo_id
@@ -471,6 +504,150 @@ def run_remote_deepseek_resident_layer_probe(
         )
 
 
+def run_remote_deepseek_resident_decode_probe(
+    *,
+    repo_id: str = DEFAULT_REPO_ID,
+    revision: str = DEFAULT_REVISION,
+    token_id: int = 0,
+    start_layer: int = 3,
+    layer_count: int = 3,
+    benchmark_iterations: int = 3,
+    require_cuda: bool = True,
+    device: str | None = None,
+    dtype: torch.dtype = torch.float16,
+) -> RemoteDeepSeekResidentDecodeProbeResult:
+    """Run a bounded real DeepSeek decode slice with resident GPU layer weights."""
+    cuda_available = torch.cuda.is_available()
+    if device is None:
+        if cuda_available:
+            device = "cuda"
+        elif require_cuda:
+            return _failed_resident_decode_probe(
+                repo_id=repo_id,
+                revision=revision,
+                token_id=token_id,
+                start_layer=start_layer,
+                layer_count=layer_count,
+                torch_version=torch.__version__,
+                note="CUDA is required but is not available.",
+            )
+        else:
+            device = "cpu"
+    torch_device = torch.device(device)
+    device_name = torch.cuda.get_device_name(torch_device) if torch_device.type == "cuda" else "cpu"
+    store = RemoteDeepSeekStore(repo_id, revision, device=torch_device)
+    config = store.config
+    config_layers = int(config.get("num_hidden_layers", 0) or 0)
+    start_layer = max(0, int(start_layer))
+    layer_count = max(1, min(int(layer_count), max(1, config_layers - start_layer)))
+    benchmark_iterations = max(0, int(benchmark_iterations))
+    executed = list(range(start_layer, start_layer + layer_count))
+    residents: list[_ResidentRemoteDeepSeekLayer] = []
+    selected: dict[int, list[int]] = {}
+    resident_bytes = 0
+    cold_started = time.perf_counter()
+
+    try:
+        seed_hidden = store.rows("model.embed_tokens.weight", int(token_id), int(token_id) + 1).reshape(
+            1, 1, int(config["hidden_size"])
+        )
+        hidden = seed_hidden
+        for layer_index in executed:
+            resident = _ResidentRemoteDeepSeekLayer(store, layer_index, config=config, dtype=dtype)
+            hidden = resident.forward(hidden)
+            residents.append(resident)
+            selected[layer_index] = list(resident.selected_experts)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        cold_load = time.perf_counter() - cold_started
+        resident_bytes = sum(layer.resident_nbytes() for layer in residents)
+
+        out = hidden
+        benchmark = 0.0
+        if benchmark_iterations:
+            # Warm one pass over the resident layers before measuring.
+            warm_hidden = seed_hidden
+            for resident in residents:
+                warm_hidden = resident.forward(warm_hidden)
+            if torch_device.type == "cuda":
+                torch.cuda.synchronize(torch_device)
+            bench_started = time.perf_counter()
+            for _index in range(benchmark_iterations):
+                out = seed_hidden
+                for resident in residents:
+                    out = resident.forward(out)
+            if torch_device.type == "cuda":
+                torch.cuda.synchronize(torch_device)
+            benchmark = time.perf_counter() - bench_started
+
+        divisor = float(max(1, benchmark_iterations * layer_count))
+        seconds_per_layer = (benchmark / divisor) if benchmark_iterations else (cold_load / float(layer_count))
+        projected = seconds_per_layer * max(1, config_layers)
+        checksum = float(out.float().sum().detach().cpu().item())
+        max_abs = float(out.float().abs().max().detach().cpu().item())
+        passed = bool(torch.isfinite(out).all().item() and out.shape == (1, 1, int(config["hidden_size"])))
+        return RemoteDeepSeekResidentDecodeProbeResult(
+            passed=passed,
+            speed_target_met=bool(projected <= 2.0),
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            token_id=int(token_id),
+            start_layer=start_layer,
+            layer_count=layer_count,
+            config_hidden_layers=config_layers,
+            executed_layers=executed,
+            selected_experts_by_layer=selected,
+            output_shape=[int(v) for v in out.shape],
+            checksum=checksum,
+            max_abs_value=max_abs,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            resident_weight_bytes=int(resident_bytes),
+            cold_load_seconds=float(cold_load),
+            benchmark_iterations=benchmark_iterations,
+            benchmark_seconds=float(benchmark),
+            seconds_per_resident_layer=float(seconds_per_layer),
+            projected_config_layers_seconds_per_token=float(projected),
+            note=(
+                "Bounded real DeepSeek V3 decode slice with layer weights resident on GPU. "
+                "This is the paging/residency target shape; it does not include final lm_head decode."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - validation JSON should carry the exact remote failure.
+        return RemoteDeepSeekResidentDecodeProbeResult(
+            passed=False,
+            speed_target_met=False,
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            token_id=int(token_id),
+            start_layer=start_layer,
+            layer_count=layer_count,
+            config_hidden_layers=config_layers,
+            executed_layers=[],
+            selected_experts_by_layer=selected,
+            output_shape=[],
+            checksum=0.0,
+            max_abs_value=0.0,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            resident_weight_bytes=int(resident_bytes),
+            cold_load_seconds=float(time.perf_counter() - cold_started),
+            benchmark_iterations=benchmark_iterations,
+            benchmark_seconds=0.0,
+            seconds_per_resident_layer=0.0,
+            projected_config_layers_seconds_per_token=0.0,
+            note=f"Resident DeepSeek decode probe failed: {type(exc).__name__}: {exc}",
+        )
+
+
 class _ResidentRemoteDeepSeekLayer:
     def __init__(self, store: RemoteDeepSeekStore, layer_index: int, *, config: dict[str, Any], dtype: torch.dtype) -> None:
         self.store = store
@@ -635,6 +812,60 @@ class _ResidentRemoteDeepSeekLayer:
         weight = self.weights[name]
         out = F.linear(hidden.reshape(-1, hidden.shape[-1]).float(), weight.float())
         return out.reshape(*hidden.shape[:-1], weight.shape[0]).to(dtype=self.dtype).contiguous()
+
+    def resident_nbytes(self) -> int:
+        seen: set[int] = set()
+        total = 0
+        for tensor in list(self.weights.values()) + list(self.regular.values()):
+            ident = id(tensor)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            total += int(tensor.nelement() * tensor.element_size())
+        for tensor in (self._expert_gate, self._expert_up, self._expert_down):
+            if tensor is not None:
+                total += int(tensor.nelement() * tensor.element_size())
+        return total
+
+
+def _failed_resident_decode_probe(
+    *,
+    repo_id: str,
+    revision: str,
+    token_id: int,
+    start_layer: int,
+    layer_count: int,
+    torch_version: str,
+    note: str,
+) -> RemoteDeepSeekResidentDecodeProbeResult:
+    return RemoteDeepSeekResidentDecodeProbeResult(
+        passed=False,
+        speed_target_met=False,
+        cuda_available=False,
+        device="cpu",
+        device_name="cpu",
+        torch_version=torch_version,
+        repo_id=repo_id,
+        revision=revision,
+        token_id=int(token_id),
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        config_hidden_layers=0,
+        executed_layers=[],
+        selected_experts_by_layer={},
+        output_shape=[],
+        checksum=0.0,
+        max_abs_value=0.0,
+        bytes_downloaded=0,
+        tensors_downloaded=0,
+        resident_weight_bytes=0,
+        cold_load_seconds=0.0,
+        benchmark_iterations=0,
+        benchmark_seconds=0.0,
+        seconds_per_resident_layer=0.0,
+        projected_config_layers_seconds_per_token=0.0,
+        note=note,
+    )
 
 
 def _route_layer(

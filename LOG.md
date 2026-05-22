@@ -6258,3 +6258,13 @@ Result: 297 passed in 21.83s
 - Added a resident real-layer probe: stream needed FP8 tensors once, dequantize to resident GPU tensors, cache selected-expert stacks, run FP16 CUDA resident math, and report the projected full-layer speed separately from cold load.
 - Resident Kaggle result: `passed=true`, `speed_target_met=true`, `cold_load_seconds=18.17926852400001`, `benchmark_seconds=0.22990756600006534` over `8` iterations, `seconds_per_resident_layer=0.028738445750008168`, projected `61` config layers `1.7530451907504983s/token`, selected experts `[15, 123, 196, 209, 213, 236, 242, 252]`, checksum `41.05815887451172`.
 - Evidence posted to PLM-13. The win is real but scoped: a bounded real layer meets the <=2s/token projection only when weights are resident on GPU. Full product still needs a paging/residency engine, not HTTP range reads in the hot loop.
+
+## PLM-13 GPU Effective Speed / Attempt 4
+- Added a bounded multi-layer resident decode probe to `pcketlm.core.runtime.deepseek_remote_gpu`: it streams real DeepSeek V3 layer weights by HTTP range, dequantizes them to resident CUDA tensors, carries the hidden state through consecutive real layers, and benchmarks repeated resident passes without HTTP/dequant in the hot loop.
+- Added `tools/deepseek_gpu_validate.py --resident-decode-layers N --resident-decode-iterations N`.
+- Local syntax: `python -m py_compile src\pcketlm\core\runtime\deepseek_remote_gpu.py tools\deepseek_gpu_validate.py` -> passed.
+- Focused tests: `python -m pytest tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `7 passed in 2.40s`.
+- Kaggle browser notebook, T4 x2, real DeepSeek V3 layers `3,4,5`: `passed=true`, `speed_target_met=true`, `cuda_available=true`, `torch_version=2.10.0+cu128`, `bytes_downloaded=1762587807`, `tensors_downloaded=211`, `resident_weight_bytes=5636852736`, `cold_load_seconds=47.776582029999986`, `benchmark_seconds=0.26029442199995856` over `3` iterations, `seconds_per_resident_layer=0.02892160244443984`, projected `61` config layers `1.7642177491108302s/token`, checksum `43.89678192138672`.
+- Selected experts by layer: layer `3` -> `[15,123,196,209,213,236,242,252]`; layer `4` -> `[2,11,30,64,69,100,110,251]`; layer `5` -> `[42,58,80,81,95,108,160,190]`.
+- Interpretation: the resident multi-layer path still meets the target projection, but cold loading remains about `15.9s/layer`. Full product needs a GPU paging/residency scheduler that keeps the active window resident and overlaps next-layer transfers.
+- Full suite: `python -m pytest tests\ -q` -> `477 passed, 2 skipped in 97.23s`.

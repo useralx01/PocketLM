@@ -19,6 +19,7 @@ from pcketlm.core.runtime.deepseek_remote_gpu import (
     DEFAULT_REPO_ID,
     DEFAULT_REVISION,
     run_remote_deepseek_layer_probe,
+    run_remote_deepseek_resident_decode_probe,
     run_remote_deepseek_resident_layer_probe,
 )
 from pcketlm.core.runtime.gpu_smoke import run_deepseek_gpu_probe, run_gpu_smoke
@@ -35,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--skip-synthetic", action="store_true")
     parser.add_argument("--resident-iterations", type=int, default=8)
+    parser.add_argument("--resident-decode-layers", type=int, default=0)
+    parser.add_argument("--resident-decode-iterations", type=int, default=3)
     args = parser.parse_args(argv)
 
     smoke = None
@@ -67,6 +70,19 @@ def main(argv: list[str] | None = None) -> int:
         "real_deepseek_remote_layer_probe": real.to_dict(),
         "real_deepseek_resident_layer_probe": resident.to_dict(),
     }
+    if args.resident_decode_layers > 0:
+        decode = run_remote_deepseek_resident_decode_probe(
+            repo_id=args.repo_id,
+            revision=args.revision,
+            token_id=args.token_id,
+            start_layer=args.layer,
+            layer_count=args.resident_decode_layers,
+            benchmark_iterations=args.resident_decode_iterations,
+            require_cuda=args.require_cuda,
+            device=args.device,
+            dtype=torch.float16,
+        )
+        payload["real_deepseek_resident_decode_probe"] = decode.to_dict()
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
