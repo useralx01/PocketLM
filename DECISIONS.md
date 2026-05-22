@@ -1627,3 +1627,9 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Add batched lm_head top-k for verification positions because the previous speculative verifier shape re-read `lm_head` once per candidate position. The batched tail keeps the same BF16/F16/F32 lm_head source and streams each chunk once across all positions.
 - Keep `PCKETLM_DISABLE_FP8_BATCH_TAIL=1` as the kill switch for the speculative verifier. The fallback runs one `run_fp8_decode_tail_topk()` per position and is slower but useful for equivalence checks.
 - Do not claim PLM-13 target met. The best upper-bound row reaches `1.815s/position` only for `8` layers with `k=64`; the `32`-layer row is `6.757s/position`, so full `62` layers cannot reach `<=2s/token` on this CPU-only machine with this architecture.
+
+## PLM-14 GPU Testing Pipeline
+- Use a small synthetic smoke instead of DeepSeek V3 itself for the free-cloud gate. This keeps the human loop under two minutes and avoids downloading hundreds of GB in Colab/Kaggle.
+- Keep the GPU path opt-in through device detection and `--require-cuda`; local CPU behavior remains unchanged and the CPU fallback smoke verifies deterministic math.
+- Put the reusable implementation under `pcketlm.core.runtime.gpu_smoke` and keep `tools/gpu_smoke.py` as a thin wrapper so the notebook, tests, and terminal use the same code.
+- Make the notebook clone/pull from GitHub rather than requiring file upload. Because this checkout has no configured remote, the operator-owned step is creating/providing the repo URL and token once.

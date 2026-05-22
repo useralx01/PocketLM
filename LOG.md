@@ -6205,3 +6205,15 @@ Result: 297 passed in 21.83s
   - `k=64`: `118.006s`, `65` positions, `1.815s/position`.
 - Layer scaling row, batch tail enabled, `k=64`: bounded `32` layers took `439.209s` for `65` positions, `6.757s/position`, layers `32/32`, ids head `[0, 37036, 76181, 76181, 76181, 76181, 37036, 37036]`.
 - Outcome: PLM-13 is blocked. Batched FP8 speculative verification is a real improvement and can hit `<=2s/position` only on an `8`-layer slice with an unrealistic `64`-candidate perfect-acceptance upper bound. At `32` layers it is already `6.757s/position`; full `62` layers cannot reach `<=2s/token` on this CPU-only machine, and real speculative acceptance would be lower than the artificial repeated-token probe.
+
+## PLM-14 GPU Testing Pipeline / Awaiting Operator Evidence
+- Branch: `plm-14-gpu-testing-pipeline`.
+- Added a synthetic cloud GPU smoke path in `pcketlm.core.runtime.gpu_smoke`: FP8 e4m3 bytes plus fp32 block scales, FP8 dequant, MLP gate/up/down, MoE top-k combine, and MLA-shaped latent/RoPE attention.
+- Added `tools/gpu_smoke.py` for notebook and terminal use.
+- Added `notebooks/gpu_test.ipynb` with clone/pull, editable `REPO_URL`/`BRANCH`, private-token prompt, install, CUDA assertion, `tools/gpu_smoke.py --require-cuda --json`, and `python -m pytest tests/gpu -q`.
+- Added `docs/gpu_cloud_testing.md` with the operator workflow.
+- Local CPU smoke: `python tools\gpu_smoke.py --json` -> passed on CPU with checksum `0.04252868890762329`, output shape `[1, 64]`, `cuda_available: false`.
+- Require-CUDA local sanity: `python tools\gpu_smoke.py --require-cuda --json` reports `CUDA is required for this smoke run but is not available` and exits nonzero on this CPU-only laptop.
+- Focused tests: `python -m pytest tests\test_gpu_smoke.py tests\test_gpu_notebook.py tests\gpu -q` -> `3 passed, 1 skipped in 2.75s`.
+- Full suite: `python -m pytest tests\ -q` -> `468 passed, 1 skipped in 112.12s`.
+- Git remote check: `git remote -v` returned no remotes, so this session cannot push to GitHub yet. Operator must create/provide a GitHub repo or remote URL, then run `git remote add origin ...` and `git push -u origin plm-14-gpu-testing-pipeline`.
