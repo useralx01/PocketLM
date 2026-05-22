@@ -1665,3 +1665,4 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Add prefetch as an explicit diagnostic option, not a default assumption. The first correctness gate is resident-window semantics; the speed gate then checks whether background layer loads overlap with CUDA compute on the real worker.
 - Stream the local `lm_head` tail in row chunks for resident-pager validation. This keeps the token-decision proof bounded in memory and avoids treating a hidden-state-only layer probe as a complete decode.
 - Carry MLA KV cache through the local resident layer API before attempting multi-token decode timing. A fast no-cache loop would be misleading because it would ignore previous context.
+- Use float32 for local CPU diagnostics and fp16 for CUDA diagnostics in the resident-pager validator. CPU float16 can hit PyTorch dtype support edges that are unrelated to the GPU path being built.

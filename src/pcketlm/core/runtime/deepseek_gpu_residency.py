@@ -92,6 +92,44 @@ class LocalDeepSeekPagedDecodeResult:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class LocalDeepSeekPagedDecodeLoopResult:
+    """Multi-token local decode loop through the resident layer pager."""
+
+    passed: bool
+    cuda_available: bool
+    device: str
+    device_name: str
+    torch_version: str
+    model_id: str
+    prompt_token_ids: list[int]
+    generated_token_ids: list[int]
+    start_layer: int
+    layer_count: int
+    config_hidden_layers: int
+    positions_completed: int
+    final_top_token_ids: list[int]
+    final_top_logits: list[float]
+    cache_sequence_lengths: dict[int, int]
+    step_summaries: list[dict[str, Any]]
+    resident_budget_bytes: int
+    peak_resident_bytes: int
+    final_resident_bytes: int
+    pager_loads: int
+    pager_evictions: int
+    pager_cache_hits: int
+    pager_cache_misses: int
+    pager_prefetch_submitted: int
+    pager_prefetch_completed: int
+    tail_elapsed_seconds: float
+    elapsed_seconds: float
+    blockers: list[str] = field(default_factory=list)
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class LocalDeepSeekResidentLayer:
     """One DeepSeek layer with dequantized weights resident on a target device."""
 
@@ -670,6 +708,186 @@ def run_local_deepseek_paged_decode_probe(
         )
 
 
+def run_local_deepseek_paged_decode_loop(
+    model_id: str,
+    token_ids: list[int],
+    *,
+    start_layer: int = 0,
+    layer_count: int = 1,
+    max_new_tokens: int = 1,
+    resident_budget_bytes: int = 12 * 1024**3,
+    prefetch_window: int = 0,
+    prefetch_workers: int = 1,
+    tail_top_k: int = 5,
+    tail_chunk_rows: int = 8192,
+    device: str | None = None,
+    require_cuda: bool = False,
+    dtype: torch.dtype = torch.float16,
+) -> LocalDeepSeekPagedDecodeLoopResult:
+    """Run a small greedy decode loop through one local resident-layer pager."""
+    prompt = [int(value) for value in token_ids]
+    if not prompt:
+        return _failed_loop(model_id, [], start_layer, layer_count, "At least one token id is required.")
+    cuda_available = torch.cuda.is_available()
+    if device is None:
+        if cuda_available:
+            device = "cuda"
+        elif require_cuda:
+            return _failed_loop(model_id, prompt, start_layer, layer_count, "CUDA is required but is not available.")
+        else:
+            device = "cpu"
+    torch_device = torch.device(device)
+    if torch_device.type == "cuda" and not cuda_available:
+        if require_cuda:
+            return _failed_loop(model_id, prompt, start_layer, layer_count, "CUDA device was requested but is not available.")
+        torch_device = torch.device("cpu")
+    device_name = torch.cuda.get_device_name(torch_device) if torch_device.type == "cuda" else "cpu"
+    catalog = load_tensor_catalog(model_id)
+    config = _load_config(catalog.model_dir)
+    config_layers = int(config.get("num_hidden_layers", catalog.num_hidden_layers or catalog.layer_count or 0) or 0)
+    start_layer = max(0, int(start_layer))
+    layer_count = max(1, min(int(layer_count), max(1, config_layers - start_layer)))
+    executed = list(range(start_layer, start_layer + layer_count))
+    pager = LocalDeepSeekResidentLayerPager(
+        model_id,
+        config=config,
+        dtype=dtype,
+        device=torch_device,
+        max_resident_bytes=max(1, int(resident_budget_bytes)),
+        prefetch_workers=max(0, int(prefetch_workers)) if int(prefetch_window) > 0 else 0,
+    )
+    caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    summaries: list[dict[str, Any]] = []
+    generated: list[int] = []
+    final_top_ids: list[int] = []
+    final_top_logits: list[float] = []
+    tail_elapsed = 0.0
+    blockers: list[str] = []
+    position = 0
+    current_tokens = list(prompt)
+    started = time.perf_counter()
+    try:
+        while position < len(prompt) + max(0, int(max_new_tokens)):
+            if position < len(prompt):
+                token_id = int(prompt[position])
+                phase = "prompt"
+            else:
+                if not final_top_ids:
+                    blockers.append("Cannot continue generation because no previous tail token is available.")
+                    break
+                token_id = int(final_top_ids[0])
+                generated.append(token_id)
+                current_tokens.append(token_id)
+                phase = "generate"
+            need_tail = position >= len(prompt) - 1
+            hidden = _embed_token(model_id, token_id, config=config, device=torch_device, dtype=dtype)
+            selected: dict[int, list[int]] = {}
+            for offset, layer_index in enumerate(executed):
+                for ahead in range(1, max(0, int(prefetch_window)) + 1):
+                    prefetch_index = offset + ahead
+                    if prefetch_index >= len(executed):
+                        break
+                    pager.prefetch(executed[prefetch_index])
+                resident = pager.get(layer_index)
+                hidden, next_cache = resident.forward_with_cache(
+                    hidden,
+                    start_pos=position,
+                    previous_kv_cache=caches.get(layer_index),
+                )
+                caches[layer_index] = next_cache
+                selected[layer_index] = list(resident.selected_experts)
+                pager.enforce_budget(protected_layer=layer_index)
+            if need_tail:
+                tail_started = time.perf_counter()
+                final_top_ids, final_top_logits = _run_tail_topk(
+                    model_id,
+                    hidden,
+                    device=torch_device,
+                    top_k=tail_top_k,
+                    chunk_rows=tail_chunk_rows,
+                )
+                tail_elapsed += time.perf_counter() - tail_started
+            summaries.append(
+                {
+                    "position": int(position),
+                    "phase": phase,
+                    "token_id": int(token_id),
+                    "selected_experts_by_layer": selected,
+                    "tail_top_token_ids": list(final_top_ids) if need_tail else [],
+                    "cache_sequence_lengths": {int(key): int(value[0].shape[1]) for key, value in caches.items()},
+                }
+            )
+            position += 1
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        elapsed = time.perf_counter() - started
+        pager.close()
+        return LocalDeepSeekPagedDecodeLoopResult(
+            passed=not blockers and position >= len(prompt),
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            model_id=str(model_id),
+            prompt_token_ids=prompt,
+            generated_token_ids=generated,
+            start_layer=int(start_layer),
+            layer_count=int(layer_count),
+            config_hidden_layers=int(config_layers),
+            positions_completed=int(position),
+            final_top_token_ids=final_top_ids,
+            final_top_logits=final_top_logits,
+            cache_sequence_lengths={int(key): int(value[0].shape[1]) for key, value in caches.items()},
+            step_summaries=summaries,
+            resident_budget_bytes=int(resident_budget_bytes),
+            peak_resident_bytes=int(pager.peak_resident_bytes),
+            final_resident_bytes=int(pager.resident_nbytes()),
+            pager_loads=int(pager.loads),
+            pager_evictions=int(pager.evictions),
+            pager_cache_hits=int(pager.cache_hits),
+            pager_cache_misses=int(pager.cache_misses),
+            pager_prefetch_submitted=int(pager.prefetch_submitted),
+            pager_prefetch_completed=int(pager.prefetch_completed),
+            tail_elapsed_seconds=float(tail_elapsed),
+            elapsed_seconds=float(elapsed),
+            blockers=blockers,
+            note="Small local greedy decode loop through the resident-layer pager.",
+        )
+    except Exception as exc:  # noqa: BLE001 - caller needs a machine-readable failure.
+        pager.close()
+        return LocalDeepSeekPagedDecodeLoopResult(
+            passed=False,
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            model_id=str(model_id),
+            prompt_token_ids=prompt,
+            generated_token_ids=generated,
+            start_layer=int(start_layer),
+            layer_count=int(layer_count),
+            config_hidden_layers=int(config_layers),
+            positions_completed=int(position),
+            final_top_token_ids=final_top_ids,
+            final_top_logits=final_top_logits,
+            cache_sequence_lengths={int(key): int(value[0].shape[1]) for key, value in caches.items()},
+            step_summaries=summaries,
+            resident_budget_bytes=int(resident_budget_bytes),
+            peak_resident_bytes=int(pager.peak_resident_bytes),
+            final_resident_bytes=int(pager.resident_nbytes()),
+            pager_loads=int(pager.loads),
+            pager_evictions=int(pager.evictions),
+            pager_cache_hits=int(pager.cache_hits),
+            pager_cache_misses=int(pager.cache_misses),
+            pager_prefetch_submitted=int(pager.prefetch_submitted),
+            pager_prefetch_completed=int(pager.prefetch_completed),
+            tail_elapsed_seconds=float(tail_elapsed),
+            elapsed_seconds=float(time.perf_counter() - started),
+            blockers=[f"{type(exc).__name__}: {exc}"],
+            note="Local resident-pager decode loop failed.",
+        )
+
+
 def _load_dequantized_weight(model_id: str, name: str, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     pair = load_fp8_weight_pair(model_id, name)
     if pair.fp8_bytes is not None:
@@ -727,6 +945,18 @@ def _run_tail_topk(
     return [int(value) for value in best_indices.detach().cpu().tolist()], [
         float(value) for value in best_values.detach().cpu().tolist()
     ]
+
+
+def _embed_token(
+    model_id: str,
+    token_id: int,
+    *,
+    config: dict[str, Any],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    embedding = _load_regular_tensor(model_id, "model.embed_tokens.weight", device=device)
+    return embedding[int(token_id) : int(token_id) + 1].reshape(1, 1, int(config["hidden_size"])).to(dtype=dtype)
 
 
 def _load_regular_tensor(model_id: str, name: str, *, device: torch.device) -> torch.Tensor:
@@ -806,6 +1036,46 @@ def _failed_decode(
         elapsed_seconds=0.0,
         seconds_per_layer=0.0,
         projected_config_layers_seconds_per_token=0.0,
+        blockers=[note],
+        note=note,
+    )
+
+
+def _failed_loop(
+    model_id: str,
+    prompt: list[int],
+    start_layer: int,
+    layer_count: int,
+    note: str,
+) -> LocalDeepSeekPagedDecodeLoopResult:
+    return LocalDeepSeekPagedDecodeLoopResult(
+        passed=False,
+        cuda_available=False,
+        device="cpu",
+        device_name="cpu",
+        torch_version=torch.__version__,
+        model_id=str(model_id),
+        prompt_token_ids=[int(value) for value in prompt],
+        generated_token_ids=[],
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        config_hidden_layers=0,
+        positions_completed=0,
+        final_top_token_ids=[],
+        final_top_logits=[],
+        cache_sequence_lengths={},
+        step_summaries=[],
+        resident_budget_bytes=0,
+        peak_resident_bytes=0,
+        final_resident_bytes=0,
+        pager_loads=0,
+        pager_evictions=0,
+        pager_cache_hits=0,
+        pager_cache_misses=0,
+        pager_prefetch_submitted=0,
+        pager_prefetch_completed=0,
+        tail_elapsed_seconds=0.0,
+        elapsed_seconds=0.0,
         blockers=[note],
         note=note,
     )

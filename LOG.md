@@ -6308,3 +6308,9 @@ Result: 297 passed in 21.83s
 - The bounded local pager result now reports per-layer cache sequence lengths.
 - Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `40 passed in 2.90s`.
 - Full suite: `python -m pytest tests\ -q` -> `485 passed, 2 skipped in 101.22s`.
+
+## PLM-13 Local GPU Residency / Decode Loop
+- Added `run_local_deepseek_paged_decode_loop()` for a small greedy multi-token loop through one resident-layer pager. It processes prompt tokens, carries per-layer KV caches, streams the tail for token choice, generates tokens, and reports pager/cache/tail telemetry.
+- Added `tools\deepseek_gpu_validate.py --local-max-new-tokens N`. Local CPU diagnostics use float32 while CUDA diagnostics keep fp16.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `41 passed in 2.80s`.
+- Full suite: `python -m pytest tests\ -q` -> `486 passed, 2 skipped in 101.11s`.

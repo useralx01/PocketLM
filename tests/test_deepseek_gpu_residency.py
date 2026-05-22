@@ -7,6 +7,7 @@ from pcketlm.core.runtime.deepseek_gpu_residency import (
     LocalDeepSeekResidentLayer,
     LocalDeepSeekResidentLayerPager,
     estimate_deepseek_gpu_residency,
+    run_local_deepseek_paged_decode_loop,
     run_local_deepseek_paged_decode_probe,
 )
 from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog
@@ -142,6 +143,34 @@ def test_local_paged_decode_probe_can_stream_tail_topk(tmp_path, monkeypatch) ->
     assert result.blockers == []
 
 
+def test_local_paged_decode_loop_generates_with_cache(tmp_path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    result = run_local_deepseek_paged_decode_loop(
+        model_id,
+        [1, 2],
+        layer_count=1,
+        max_new_tokens=1,
+        resident_budget_bytes=1024 * 1024,
+        device="cpu",
+        require_cuda=False,
+        dtype=torch.float32,
+        tail_top_k=2,
+        tail_chunk_rows=2,
+    )
+
+    assert result.passed is True
+    assert result.prompt_token_ids == [1, 2]
+    assert len(result.generated_token_ids) == 1
+    assert result.positions_completed == 3
+    assert result.cache_sequence_lengths == {0: 3}
+    assert len(result.step_summaries) == 3
+    assert result.pager_cache_hits >= 2
+    assert result.final_top_token_ids
+    assert result.blockers == []
+
+
 def test_local_layer_pager_evicts_lru_without_evicting_protected_layer() -> None:
     layers = {3: _DummyLayer(70), 4: _DummyLayer(70)}
     pager = LocalDeepSeekResidentLayerPager(
@@ -202,6 +231,8 @@ def test_deepseek_gpu_validator_can_run_local_only(tmp_path, monkeypatch, capsys
             "--local-paged-decode-layers",
             "1",
             "--local-include-tail",
+            "--local-max-new-tokens",
+            "1",
             "--json",
         ]
     )
@@ -209,5 +240,5 @@ def test_deepseek_gpu_validator_can_run_local_only(tmp_path, monkeypatch, capsys
 
     assert exit_code == 0
     assert '"local_deepseek_gpu_residency_estimate"' in captured
-    assert '"local_deepseek_paged_decode_probe"' in captured
+    assert '"local_deepseek_paged_decode_loop"' in captured
     assert '"tail_top_token_ids"' in captured

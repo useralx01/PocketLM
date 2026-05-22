@@ -25,6 +25,7 @@ from pcketlm.core.runtime.deepseek_remote_gpu import (
 )
 from pcketlm.core.runtime.deepseek_gpu_residency import (
     estimate_deepseek_gpu_residency,
+    run_local_deepseek_paged_decode_loop,
     run_local_deepseek_paged_decode_probe,
 )
 from pcketlm.core.runtime.gpu_smoke import run_deepseek_gpu_probe, run_gpu_smoke
@@ -53,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--local-paged-prefetch-window", type=int, default=0)
     parser.add_argument("--local-include-tail", action="store_true")
     parser.add_argument("--local-tail-chunk-rows", type=int, default=8192)
+    parser.add_argument("--local-max-new-tokens", type=int, default=0)
     args = parser.parse_args(argv)
 
     smoke = None
@@ -126,20 +128,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         payload["local_deepseek_gpu_residency_estimate"] = estimate.to_dict()
         if args.local_paged_decode_layers > 0:
-            local_paged = run_local_deepseek_paged_decode_probe(
-                args.local_model_id,
-                token_id=args.token_id,
-                start_layer=args.layer,
-                layer_count=args.local_paged_decode_layers,
-                resident_budget_bytes=int(float(args.local_paged_budget_gb) * 1024**3),
-                prefetch_window=args.local_paged_prefetch_window,
-                include_tail=args.local_include_tail,
-                tail_chunk_rows=args.local_tail_chunk_rows,
-                require_cuda=args.require_cuda,
-                device=args.device,
-                dtype=torch.float16,
-            )
-            payload["local_deepseek_paged_decode_probe"] = local_paged.to_dict()
+            local_device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            local_dtype = torch.float16 if str(local_device).startswith("cuda") else torch.float32
+            if args.local_max_new_tokens > 0:
+                local_paged = run_local_deepseek_paged_decode_loop(
+                    args.local_model_id,
+                    [args.token_id],
+                    start_layer=args.layer,
+                    layer_count=args.local_paged_decode_layers,
+                    max_new_tokens=args.local_max_new_tokens,
+                    resident_budget_bytes=int(float(args.local_paged_budget_gb) * 1024**3),
+                    prefetch_window=args.local_paged_prefetch_window,
+                    tail_chunk_rows=args.local_tail_chunk_rows,
+                    require_cuda=args.require_cuda,
+                    device=args.device,
+                    dtype=local_dtype,
+                )
+                payload["local_deepseek_paged_decode_loop"] = local_paged.to_dict()
+            else:
+                local_paged = run_local_deepseek_paged_decode_probe(
+                    args.local_model_id,
+                    token_id=args.token_id,
+                    start_layer=args.layer,
+                    layer_count=args.local_paged_decode_layers,
+                    resident_budget_bytes=int(float(args.local_paged_budget_gb) * 1024**3),
+                    prefetch_window=args.local_paged_prefetch_window,
+                    include_tail=args.local_include_tail,
+                    tail_chunk_rows=args.local_tail_chunk_rows,
+                    require_cuda=args.require_cuda,
+                    device=args.device,
+                    dtype=local_dtype,
+                )
+                payload["local_deepseek_paged_decode_probe"] = local_paged.to_dict()
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

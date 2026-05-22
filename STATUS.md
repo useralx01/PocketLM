@@ -727,3 +727,4 @@ PLM-13 local GPU residency: local DeepSeek FP8 resident-layer pager and header-o
 PLM-13 local prefetch: resident pager can prefetch upcoming layers in a background loader and reports prefetch counters; full suite is `483 passed, 2 skipped`.
 PLM-13 local tail: resident pager validation can now stream final norm + lm_head top-k and report token ids/logits; full suite is `484 passed, 2 skipped`.
 PLM-13 local KV cache: resident layers now expose cache-carrying forwards and pager results report cache sequence lengths; full suite is `485 passed, 2 skipped`.
+PLM-13 local decode loop: resident pager now has a small greedy multi-token loop with prompt processing, generated token ids, KV cache carry, streamed tail, and pager telemetry; full suite is `486 passed, 2 skipped`.

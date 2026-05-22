@@ -171,5 +171,6 @@ Done: PLM-13 local resident-layer pager and header-only GPU residency estimator.
 Done: PLM-13 local pager prefetch plumbing and telemetry.
 Done: PLM-13 streamed local lm_head tail for resident-pager token decisions.
 Done: PLM-13 local resident-layer KV cache carry.
-- PLM-13 next: run the local resident pager on a CUDA worker against the real local/packed DeepSeek source and add multi-token full/effective decode around that pager.
+Done: PLM-13 small local resident-pager multi-token decode loop.
+- PLM-13 next: run the local resident-pager decode loop on a CUDA worker against the real local/packed DeepSeek source.
 - PLM-13 next: validate whether local pager prefetch actually overlaps layer loads with CUDA compute on the GPU worker.
