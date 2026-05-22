@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -192,14 +193,64 @@ def _kernel_script(*, repo_url: str, branch: str, commit: str) -> str:
 
 
 def _notebook_payload(source: str) -> dict[str, Any]:
+    wrapper_source = "\n".join(
+        [
+            "import json as _pcketlm_json",
+            "import os as _pcketlm_os",
+            "from pathlib import Path as _PcketlmPath",
+            "import subprocess as _pcketlm_subprocess",
+            "import sys as _pcketlm_sys",
+            "",
+            f"_PCKETLM_PAYLOAD = {source!r}",
+            "_PCKETLM_SCRIPT = _PcketlmPath('gpu_smoke_payload.py')",
+            "_PCKETLM_SCRIPT.write_text(_PCKETLM_PAYLOAD, encoding='utf-8')",
+            "",
+            "def _pcketlm_probe_python(path):",
+            "    code = \"import json, sys; import torch; print(json.dumps({'executable': sys.executable, 'version': torch.__version__, 'cuda_available': torch.cuda.is_available()}))\"",
+            "    completed = _pcketlm_subprocess.run([path, '-c', code], text=True, stdout=_pcketlm_subprocess.PIPE, stderr=_pcketlm_subprocess.STDOUT)",
+            "    text = completed.stdout.strip()",
+            "    print('PCKETLM_NOTEBOOK_PYTHON_PROBE', path, text)",
+            "    try:",
+            "        return _pcketlm_json.loads(text.splitlines()[-1])",
+            "    except Exception:",
+            "        return {'executable': path, 'version': 'unknown', 'cuda_available': False}",
+            "",
+            "_pcketlm_candidates = [",
+            "    _pcketlm_sys.executable,",
+            "    '/opt/conda/bin/python',",
+            "    '/opt/conda/bin/python3',",
+            "    '/usr/local/bin/python',",
+            "    '/usr/local/bin/python3',",
+            "    '/usr/bin/python3',",
+            "]",
+            "_pcketlm_seen = set()",
+            "_pcketlm_selected = _pcketlm_sys.executable",
+            "_pcketlm_selected_probe = None",
+            "for _pcketlm_candidate in _pcketlm_candidates:",
+            "    if _pcketlm_candidate in _pcketlm_seen or not _pcketlm_os.path.exists(_pcketlm_candidate):",
+            "        continue",
+            "    _pcketlm_seen.add(_pcketlm_candidate)",
+            "    _pcketlm_probe = _pcketlm_probe_python(_pcketlm_candidate)",
+            "    if _pcketlm_selected_probe is None:",
+            "        _pcketlm_selected_probe = _pcketlm_probe",
+            "    if _pcketlm_probe.get('cuda_available', False):",
+            "        _pcketlm_selected = _pcketlm_candidate",
+            "        _pcketlm_selected_probe = _pcketlm_probe",
+            "        break",
+            "print('PCKETLM_NOTEBOOK_PYTHON_SELECTED', _pcketlm_selected, _pcketlm_json.dumps(_pcketlm_selected_probe, sort_keys=True))",
+            "raise SystemExit(_pcketlm_subprocess.call([_pcketlm_selected, str(_PCKETLM_SCRIPT)]))",
+            "",
+        ]
+    )
     return {
         "cells": [
             {
                 "cell_type": "code",
                 "execution_count": None,
+                "id": "gpu-smoke",
                 "metadata": {},
                 "outputs": [],
-                "source": [f"{line}\n" for line in source.splitlines()],
+                "source": [f"{line}\n" for line in wrapper_source.splitlines()],
             }
         ],
         "metadata": {
@@ -283,6 +334,13 @@ def submit_kernel(kernel_dir: Path, *, accelerator: str) -> str:
     return _kaggle_command(["kernels", "push", "-p", str(kernel_dir), "--accelerator", accelerator]).stdout
 
 
+def kernel_id_from_submit_output(submit_output: str, fallback_kernel_id: str) -> str:
+    match = re.search(r"https://www\.kaggle\.com/code/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)", submit_output)
+    if not match:
+        return fallback_kernel_id
+    return f"{match.group(1)}/{match.group(2)}"
+
+
 def poll_kernel(kernel_id: str, *, interval_seconds: int, timeout_seconds: int) -> str:
     deadline = time.time() + timeout_seconds
     last_output = ""
@@ -353,12 +411,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     submit_output = submit_kernel(kernel_dir, accelerator=args.accelerator)
-    status_output = poll_kernel(kernel_id, interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
+    submitted_kernel_id = kernel_id_from_submit_output(submit_output, kernel_id)
+    status_output = poll_kernel(submitted_kernel_id, interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
     output_dir = DEFAULT_STATE_DIR / "output"
-    download_log = download_output(kernel_id, output_dir)
+    download_log = download_output(submitted_kernel_id, output_dir)
     payload.update(
         {
             "status": "submitted",
+            "requested_kernel_id": kernel_id,
+            "kernel_id": submitted_kernel_id,
             "submit_output": submit_output,
             "status_output": status_output,
             "download_log": download_log,

@@ -427,3 +427,4 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 1: preserve Kaggle's preinstalled Torch by avoiding repo dependency installs. The generated Kaggle smoke already embeds the smoke code and does not run `pip install -e .`; notebook setup was changed to `pip install --no-deps -e .` for the manual path.
 - Attempt 2: repair Torch inside the worker using `pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121`. The worker failed DNS resolution against `download.pytorch.org` despite `enable_internet: true`.
 - Attempt 3: switch the autonomous Kaggle submission from script to notebook execution, because the operator verified a manual browser notebook on the same account reports CUDA on T4.
+- Attempt 4: notebook execution still used CPU Torch under `/usr/bin/python3`. Added interpreter probing so the notebook can select `/opt/conda/bin/python` if that interpreter has CUDA Torch.

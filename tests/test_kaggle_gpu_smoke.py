@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from tools.kaggle_gpu_smoke import kaggle_credentials, prepare_kernel
+from tools.kaggle_gpu_smoke import kaggle_credentials, kernel_id_from_submit_output, prepare_kernel
 
 
 def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
@@ -26,8 +26,13 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
     assert metadata["is_private"] == "true"
     assert metadata["kernel_type"] == "notebook"
     assert metadata["code_file"] == "gpu_smoke_kaggle.ipynb"
+    assert notebook["cells"][0]["id"] == "gpu-smoke"
+    assert "PCKETLM_NOTEBOOK_PYTHON_PROBE" in script
+    assert "PCKETLM_NOTEBOOK_PYTHON_SELECTED" in script
+    assert "/opt/conda/bin/python" in script
     assert "run_gpu_smoke(require_cuda=True)" in script
-    assert "SOURCE_COMMIT = 'abc1234'" in script
+    assert "SOURCE_COMMIT = " in script
+    assert "abc1234" in script
     assert "PCKETLM_GPU_SMOKE_JSON_START" in script
     assert "PCKETLM_TORCH_PROBE" in script
     assert "PCKETLM_TORCH_REPAIR_FAILED" in script
@@ -63,3 +68,14 @@ def test_kaggle_credentials_accepts_access_token(monkeypatch, tmp_path) -> None:
     assert creds.available is True
     assert creds.username == "api-token"
     assert creds.source.endswith("access_token")
+
+
+def test_kernel_id_from_submit_output_uses_returned_url() -> None:
+    output = (
+        "Kernel version 1 successfully pushed.  Please check progress at "
+        "https://www.kaggle.com/code/lichtnicht/pocketlm-gpu-smoke-notebook\n"
+    )
+
+    assert kernel_id_from_submit_output(output, "lichtnicht/pocketlm-gpu-smoke-nb") == (
+        "lichtnicht/pocketlm-gpu-smoke-notebook"
+    )
