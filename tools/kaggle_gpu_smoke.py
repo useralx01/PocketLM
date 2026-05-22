@@ -181,12 +181,14 @@ def prepare_kernel(
         "code_file": script_name,
         "language": "python",
         "kernel_type": "script",
-        "is_private": True,
-        "enable_gpu": True,
-        "enable_internet": False,
+        "is_private": "true",
+        "enable_gpu": "true",
+        "enable_tpu": "false",
+        "enable_internet": "false",
         "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
+        "model_sources": [],
     }
     (out_dir / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / script_name).write_text(
@@ -209,7 +211,7 @@ def _kaggle_command(args: list[str], *, check: bool = True) -> subprocess.Comple
 
 
 def submit_kernel(kernel_dir: Path) -> str:
-    return _kaggle_command(["kernels", "push", "-p", str(kernel_dir)]).stdout
+    return _kaggle_command(["kernels", "push", "-p", str(kernel_dir), "--accelerator", "gpu"]).stdout
 
 
 def poll_kernel(kernel_id: str, *, interval_seconds: int, timeout_seconds: int) -> str:

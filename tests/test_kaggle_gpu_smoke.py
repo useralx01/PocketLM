@@ -20,8 +20,8 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
     script = (kernel_dir / "gpu_smoke_kaggle.py").read_text(encoding="utf-8")
 
     assert metadata["id"] == "tester/pcketlm-gpu-smoke-test"
-    assert metadata["enable_gpu"] is True
-    assert metadata["is_private"] is True
+    assert metadata["enable_gpu"] == "true"
+    assert metadata["is_private"] == "true"
     assert metadata["code_file"] == "gpu_smoke_kaggle.py"
     assert "run_gpu_smoke(require_cuda=True)" in script
     assert "SOURCE_COMMIT = 'abc1234'" in script
