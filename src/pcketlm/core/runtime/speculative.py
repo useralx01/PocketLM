@@ -631,6 +631,99 @@ def verify_candidates_once(
     )
 
 
+def verify_fp8_candidates_once(
+    verifier_model_id: str,
+    prompt_token_ids: list[int],
+    candidate_token_ids: list[int],
+    *,
+    layer_count: int | None = None,
+    lm_head_chunk_rows: int = DEFAULT_LM_HEAD_CHUNK_ROWS,
+) -> VerifierBatchResult:
+    """Verify DeepSeek FP8 candidates with one batched prompt-prefill pass."""
+    started = time.perf_counter()
+    blockers: list[str] = []
+    if not prompt_token_ids:
+        blockers.append("Verifier prompt token ids must not be empty.")
+    if not candidate_token_ids:
+        blockers.append("Verifier candidate token ids must not be empty.")
+    if blockers:
+        return VerifierBatchResult(
+            model_id=verifier_model_id,
+            prompt_token_count=len(prompt_token_ids),
+            candidate_token_ids=list(candidate_token_ids),
+            verifier_token_ids=[],
+            logits_count=0,
+            layers_executed=0,
+            expected_layers_executed=0,
+            elapsed_seconds=round(time.perf_counter() - started, 4),
+            blockers=blockers,
+            ready=False,
+        )
+
+    from pcketlm.core.runtime.fp8_source import (
+        _load_deepseek_config,
+        run_fp8_decode_tail_topk,
+        run_fp8_decode_tail_topk_batch,
+        run_fp8_prompt_prefill,
+    )
+
+    config = _load_deepseek_config(verifier_model_id)
+    effective_layers = int(layer_count) if layer_count is not None else int(config["num_hidden_layers"])
+    full_input_ids = list(prompt_token_ids) + list(candidate_token_ids)
+    prefill = run_fp8_prompt_prefill(
+        verifier_model_id,
+        full_input_ids,
+        layer_count=effective_layers,
+        include_tail=False,
+    )
+    blockers.extend(prefill.blockers)
+    verifier_token_ids: list[int] = []
+    if prefill.ready and prefill.output_tensor is not None:
+        start_position = len(prompt_token_ids) - 1
+        end_position = start_position + len(candidate_token_ids) + 1
+        positions = prefill.output_tensor[:, start_position:end_position, :]
+        if os.environ.get("PCKETLM_DISABLE_FP8_BATCH_TAIL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            for position in range(int(positions.shape[1])):
+                tail = run_fp8_decode_tail_topk(
+                    verifier_model_id,
+                    positions[:, position : position + 1, :],
+                    top_k=1,
+                    chunk_rows=lm_head_chunk_rows,
+                )
+                blockers.extend(tail.blockers)
+                if tail.ready and tail.top_token_ids:
+                    verifier_token_ids.append(int(tail.top_token_ids[0]))
+        else:
+            tail = run_fp8_decode_tail_topk_batch(
+                verifier_model_id,
+                positions,
+                top_k=1,
+                chunk_rows=lm_head_chunk_rows,
+            )
+            blockers.extend(tail.blockers)
+            if tail.ready:
+                verifier_token_ids = [int(row[0]) for row in tail.top_token_ids_by_position if row]
+    elif not blockers:
+        blockers.append("DeepSeek FP8 verifier prefill did not produce hidden states.")
+
+    expected_count = len(candidate_token_ids) + 1
+    if not blockers and len(verifier_token_ids) != expected_count:
+        blockers.append(f"DeepSeek FP8 verifier produced {len(verifier_token_ids)} ids, expected {expected_count}.")
+
+    return VerifierBatchResult(
+        model_id=verifier_model_id,
+        prompt_token_count=len(prompt_token_ids),
+        candidate_token_ids=list(candidate_token_ids),
+        verifier_token_ids=verifier_token_ids,
+        logits_count=len(verifier_token_ids),
+        layers_executed=len(prefill.executed_layers),
+        expected_layers_executed=effective_layers,
+        elapsed_seconds=round(time.perf_counter() - started, 4),
+        blockers=blockers,
+        ready=not blockers and len(verifier_token_ids) == expected_count,
+    )
+
+
 def speculative_generate(
     verifier_model_id: str,
     speculator_model_id: str,

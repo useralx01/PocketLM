@@ -6185,3 +6185,23 @@ Result: 297 passed in 21.83s
 - Attempt 3 component timing on the current Python+flash-core path showed PyTorch/MKL projection calls are already fast: q_a `2.896-3.718 ms`, q_b `8.083-13.403 ms`, kv_a `1.035-1.327 ms`, flash core `8.144-12.752 ms`, o_proj `30.829-36.308 ms`. The hand-rolled native projection loops cannot beat those GEMV/GEMM kernels on this CPU.
 - Bounded DeepSeek 8-layer decode gate with prompt prefill disabled so the fused one-token path actually ran: current path `90.272s`, fused path `115.913s`, speedup `0.7788x`; fused counters `calls=16`, `fallbacks=0`, `errors=0`; top ids matched `[0, 20917, 4178, 94986, 43873]`.
 - Outcome: PLM-12 is blocked on both speed gates. The fused block is correct and truly runs, but CPU hand-rolled projection math loses to the current PyTorch/MKL projection path. The practical unblock is GPU offload or a BLAS-backed/batched native projection strategy, not more scalar/OpenMP C fusion.
+
+## PLM-13 DeepSeek Effective Speed / Blocker Evidence
+- Branch: `plm-13-deepseek-effective-speed`.
+- Environment check: `torch.cuda.is_available() -> False`, CUDA device count `0`, PyTorch MKL `True`, MKLDNN `True`, torch threads `8`. This laptop has no local GPU offload path available to this runtime.
+- Profile direction 1, existing evidence: full `62`-layer DeepSeek FP8 proof is ready and correct but `245.980s` for one bounded token; bounded `8`-layer runs are about `90s` in the current path. Prior PLM-11/PLM-12 proved hand-written C attention/projection loses to PyTorch/MKL.
+- Implemented direction 2: DeepSeek FP8 speculative verifier support. Added `verify_fp8_candidates_once()` for the FP8 source path, using one batched `run_fp8_prompt_prefill()` over prompt+candidates and anti-cheat layer counts.
+- Implemented a batched lm_head verifier tail: `run_fp8_decode_tail_topk_batch()` streams `lm_head` once for many hidden positions. Added kill switch `PCKETLM_DISABLE_FP8_BATCH_TAIL=1` in the FP8 speculative verifier.
+- Focused tests: `python -m pytest tests\test_speculative.py tests\test_runtime_fp8_source.py -q` -> `39 passed in 2.26s`.
+- Full suite: `python -m pytest tests\ -q` -> `465 passed in 121.60s`.
+- Kill-switch timing row, bounded `8` layers, `k=8` candidates, same verified ids both ways:
+  - `PCKETLM_DISABLE_FP8_BATCH_TAIL=1`: `169.492s`, `9` verified positions, `18.832s/position`, ids `[0, 94777, 94777, 97982, 75998, 75998, 75998, 75998, 73809]`.
+  - Batch tail enabled: `61.069s`, `9` verified positions, `6.785s/position`, same ids, layers `8/8`.
+- Aggressive upper-bound rows with batch tail enabled, bounded `8` layers:
+  - `k=12`: `66.803s`, `13` positions, `5.139s/position`.
+  - `k=16`: `70.091s`, `17` positions, `4.123s/position`.
+  - `k=24`: `80.107s`, `25` positions, `3.204s/position`.
+  - `k=32`: `94.058s`, `33` positions, `2.850s/position`.
+  - `k=64`: `118.006s`, `65` positions, `1.815s/position`.
+- Layer scaling row, batch tail enabled, `k=64`: bounded `32` layers took `439.209s` for `65` positions, `6.757s/position`, layers `32/32`, ids head `[0, 37036, 76181, 76181, 76181, 76181, 37036, 37036]`.
+- Outcome: PLM-13 is blocked. Batched FP8 speculative verification is a real improvement and can hit `<=2s/position` only on an `8`-layer slice with an unrealistic `64`-candidate perfect-acceptance upper bound. At `32` layers it is already `6.757s/position`; full `62` layers cannot reach `<=2s/token` on this CPU-only machine, and real speculative acceptance would be lower than the artificial repeated-token probe.

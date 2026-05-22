@@ -627,3 +627,88 @@ def test_stateful_speculative_fuses_first_prefill_and_verify(monkeypatch) -> Non
     assert result.ready is True
     assert calls == {"prefill": 0, "initial": 1, "verify": 0}
     assert result.layers_executed == 2
+
+
+def test_verify_fp8_candidates_once_uses_batched_tail(monkeypatch) -> None:
+    calls = {"prefill": 0, "tail_batch": 0}
+
+    def fake_prefill(model_id, token_ids, *, layer_count, include_tail):
+        calls["prefill"] += 1
+        assert model_id == "deepseek-v3"
+        assert token_ids == [10, 11, 20, 21]
+        assert layer_count == 8
+        assert include_tail is False
+        return SimpleNamespace(
+            ready=True,
+            blockers=[],
+            executed_layers=list(range(8)),
+            output_tensor=torch.randn(1, 4, 6),
+        )
+
+    def fake_tail_batch(model_id, hidden, *, top_k, chunk_rows):
+        calls["tail_batch"] += 1
+        assert model_id == "deepseek-v3"
+        assert list(hidden.shape) == [1, 3, 6]
+        assert top_k == 1
+        assert chunk_rows == 512
+        return SimpleNamespace(
+            ready=True,
+            blockers=[],
+            top_token_ids_by_position=[[20], [21], [22]],
+        )
+
+    from pcketlm.core.runtime import fp8_source
+
+    monkeypatch.setattr(fp8_source, "_load_deepseek_config", lambda _model_id: {"num_hidden_layers": 62})
+    monkeypatch.setattr(fp8_source, "run_fp8_prompt_prefill", fake_prefill)
+    monkeypatch.setattr(fp8_source, "run_fp8_decode_tail_topk_batch", fake_tail_batch)
+
+    result = speculative.verify_fp8_candidates_once(
+        "deepseek-v3",
+        [10, 11],
+        [20, 21],
+        layer_count=8,
+        lm_head_chunk_rows=512,
+    )
+
+    assert result.ready is True
+    assert result.verifier_token_ids == [20, 21, 22]
+    assert result.layers_executed == 8
+    assert result.expected_layers_executed == 8
+    assert calls == {"prefill": 1, "tail_batch": 1}
+
+
+def test_verify_fp8_candidates_once_batch_tail_kill_switch(monkeypatch) -> None:
+    calls = {"single_tail": 0}
+
+    from pcketlm.core.runtime import fp8_source
+
+    monkeypatch.setenv("PCKETLM_DISABLE_FP8_BATCH_TAIL", "1")
+    monkeypatch.setattr(fp8_source, "_load_deepseek_config", lambda _model_id: {"num_hidden_layers": 4})
+    monkeypatch.setattr(
+        fp8_source,
+        "run_fp8_prompt_prefill",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ready=True,
+            blockers=[],
+            executed_layers=list(range(4)),
+            output_tensor=torch.randn(1, 3, 6),
+        ),
+    )
+
+    def fake_single_tail(_model_id, _hidden, *, top_k, chunk_rows):
+        calls["single_tail"] += 1
+        return SimpleNamespace(ready=True, blockers=[], top_token_ids=[100 + calls["single_tail"]])
+
+    monkeypatch.setattr(fp8_source, "run_fp8_decode_tail_topk", fake_single_tail)
+    monkeypatch.setattr(
+        fp8_source,
+        "run_fp8_decode_tail_topk_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("batch tail disabled")),
+    )
+
+    result = speculative.verify_fp8_candidates_once("deepseek-v3", [10], [20, 21], layer_count=4)
+
+    assert result.ready is True
+    assert result.verifier_token_ids == [101, 102, 103]
+    assert calls == {"single_tail": 3}

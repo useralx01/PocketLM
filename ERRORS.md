@@ -398,3 +398,11 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 2: reuse C-side scratch buffers and avoid full q/kv intermediate materialization by computing q_nope/q_pe and KV split rows directly. Speed still regressed: Python+flash best `422.275 ms`, fused direct-split best `1139.023 ms`.
 - Attempt 3: profile the current path and attack the dominant component. The profile showed PyTorch/MKL projections are already fast (`o_proj` about `30.829-36.308 ms`, q_b about `8.083-13.403 ms`, flash core about `8.144-12.752 ms`), while the C projection loops remain slower. Bounded 8-layer decode with fused path engaged `16` calls and took `115.913s` vs current `90.272s`.
 - Resolution: mark PLM-12 blocked. The unblock is a BLAS-backed/batched native projection strategy or GPU offload; a scalar/OpenMP C fusion does not reach the CPU speed gate.
+
+## PLM-13 Effective Speed Blocker
+- Gate failed: PLM-13 requires DeepSeek V3 full FP8 generation at `<=2s/token` effective on this laptop.
+- Cause: no CUDA device is available, and the CPU path remains too slow even after the best speculative batching improvement found in this phase.
+- Attempt 1: profile current evidence and hardware. Full `62`-layer FP8 proof is correct but `245.980s`; current bounded `8`-layer decode is about `90s`; CUDA is unavailable; PyTorch MKL is available and already beats hand-written C projections.
+- Attempt 2: implement DeepSeek FP8 speculative verifier plus batched lm_head tail. This produced a real win: `k=8`, bounded `8` layers dropped from `169.492s` with single-position tails to `61.069s` with batched tail, same ids and layer count.
+- Attempt 3: push candidate batch size and layer count. Bounded `8` layers reached `1.815s/position` only at `k=64`, but bounded `32` layers at the same `k=64` took `439.209s`, `6.757s/position`. Full `62` layers would be slower still, and real speculative acceptance would be below this artificial repeated-token upper bound.
+- Resolution: mark PLM-13 blocked. The target is not reachable on this CPU-only laptop with the current FP8 architecture. The real unblock is GPU offload or a fundamentally faster BLAS/GPU-backed full-layer engine, not another Python orchestration or scalar native kernel.

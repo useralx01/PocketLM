@@ -395,6 +395,36 @@ class FP8DecodeTailResult:
 
 
 @dataclass(slots=True)
+class FP8DecodeTailBatchResult:
+    """Final norm plus streamed lm_head top-k for multiple hidden positions."""
+
+    model_id: str
+    input_shape: list[int]
+    top_token_ids_by_position: list[list[int]]
+    top_logits_by_position: list[list[float]]
+    chunk_rows: int
+    chunk_count: int
+    loaded_lm_head_bytes: int
+    elapsed_seconds: float
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "input_shape": list(self.input_shape),
+            "top_token_ids_by_position": [list(row) for row in self.top_token_ids_by_position],
+            "top_logits_by_position": [list(row) for row in self.top_logits_by_position],
+            "chunk_rows": self.chunk_rows,
+            "chunk_count": self.chunk_count,
+            "loaded_lm_head_bytes": self.loaded_lm_head_bytes,
+            "elapsed_seconds": self.elapsed_seconds,
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
 class FP8TokenEmbeddingResult:
     """One token embedding row loaded from the DeepSeek source."""
 
@@ -1485,6 +1515,78 @@ def run_fp8_decode_tail_topk(
         loaded_lm_head_bytes=int(loaded_bytes),
         blockers=blockers,
         ready=not blockers and bool(token_ids),
+    )
+
+
+def run_fp8_decode_tail_topk_batch(
+    model_id: str,
+    hidden: torch.Tensor,
+    *,
+    top_k: int = 1,
+    chunk_rows: int | None = None,
+) -> FP8DecodeTailBatchResult:
+    """Run final norm and stream lm_head chunks once for many hidden positions."""
+    started = time.perf_counter()
+    norm_tensor, blockers = _load_regular_tensor(model_id, "model.norm.weight")
+    hidden_2d = hidden.reshape(-1, hidden.shape[-1]).to(dtype=torch.bfloat16)
+    config = _load_deepseek_config(model_id)
+    top_values: torch.Tensor | None = None
+    top_indices: torch.Tensor | None = None
+    chunk_count = 0
+    loaded_bytes = 0
+    rows_per_chunk = max(1, int(_fp8_lm_head_chunk_rows() if chunk_rows is None else chunk_rows))
+    if int(hidden_2d.shape[0]) <= 0:
+        blockers.append("At least one hidden position is required.")
+    if norm_tensor is None:
+        blockers.append("Final norm tensor did not materialize.")
+    lm_head_entry = find_tensor_catalog_entry(model_id, "lm_head.weight")
+    if lm_head_entry is None:
+        blockers.append("lm_head.weight is not present in the tensor catalog.")
+    if lm_head_entry is not None and lm_head_entry.dtype not in {"BF16", "F16", "F32"}:
+        blockers.append(f"lm_head.weight has unsupported dtype {lm_head_entry.dtype}.")
+
+    if not blockers and norm_tensor is not None and lm_head_entry is not None:
+        normalized_u16 = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"]))
+        normalized = normalized_u16.float()
+        vocab_size = int(lm_head_entry.shape[0])
+        hidden_size = int(lm_head_entry.shape[1])
+        if int(normalized.shape[-1]) != hidden_size:
+            blockers.append(f"Hidden size {normalized.shape[-1]} does not match lm_head hidden size {hidden_size}.")
+        else:
+            keep_k = max(1, min(int(top_k), vocab_size))
+            for start in range(0, vocab_size, rows_per_chunk):
+                end = min(vocab_size, start + rows_per_chunk)
+                weight = _read_tensor_rows(lm_head_entry, start, end)
+                loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
+                chunk_logits = F.linear(normalized, weight.float())
+                values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
+                indices = indices + start
+                if top_values is None or top_indices is None:
+                    top_values = values
+                    top_indices = indices
+                else:
+                    merged_values = torch.cat([top_values, values], dim=-1)
+                    merged_indices = torch.cat([top_indices, indices], dim=-1)
+                    top_values, positions = torch.topk(merged_values, keep_k, dim=-1)
+                    top_indices = torch.gather(merged_indices, 1, positions)
+                chunk_count += 1
+
+    token_rows: list[list[int]] = []
+    logit_rows: list[list[float]] = []
+    if top_indices is not None and top_values is not None:
+        token_rows = [[int(value) for value in row] for row in top_indices.tolist()]
+        logit_rows = [[float(value) for value in row] for row in top_values.tolist()]
+    return FP8DecodeTailBatchResult(
+        model_id=model_id,
+        input_shape=[int(value) for value in hidden.shape],
+        top_token_ids_by_position=token_rows,
+        top_logits_by_position=logit_rows,
+        chunk_rows=int(rows_per_chunk),
+        chunk_count=int(chunk_count),
+        loaded_lm_head_bytes=int(loaded_bytes),
+        elapsed_seconds=round(time.perf_counter() - started, 4),
+        blockers=blockers,
+        ready=not blockers and bool(token_rows),
     )
 
 

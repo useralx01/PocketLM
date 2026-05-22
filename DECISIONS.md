@@ -1620,3 +1620,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Use the PLM-11 flash MLA core unchanged inside the fused block, but keep projection inputs as materialized f32 tensors for this phase. This proves the one-call math boundary without rewriting the whole FP8 raw-weight registration layer.
 - Reuse C-side scratch buffers and direct q/kv split projection outputs inside the session. This reduces allocation/materialization overhead, but measured wall time still loses to PyTorch/MKL projections.
 - Treat the PLM-12 miss as evidence that CPU OpenMP scalar projection loops are the wrong next speed direction. Future work should use GPU offload or BLAS-backed/batched native projection kernels before retrying production routing.
+
+## PLM-13 DeepSeek Effective Speed
+- Attack PLM-13 through speculative verification rather than another hand-written CPU attention kernel. The machine has no CUDA device, and PyTorch MKL is already the fastest measured projection path.
+- Add DeepSeek FP8 verifier batching at the `run_fp8_prompt_prefill()` boundary. This preserves FP8 quality and uses the existing causal prefill path to verify prompt+candidates in one pass.
+- Add batched lm_head top-k for verification positions because the previous speculative verifier shape re-read `lm_head` once per candidate position. The batched tail keeps the same BF16/F16/F32 lm_head source and streams each chunk once across all positions.
+- Keep `PCKETLM_DISABLE_FP8_BATCH_TAIL=1` as the kill switch for the speculative verifier. The fallback runs one `run_fp8_decode_tail_topk()` per position and is slower but useful for equivalence checks.
+- Do not claim PLM-13 target met. The best upper-bound row reaches `1.815s/position` only for `8` layers with `k=64`; the `32`-layer row is `6.757s/position`, so full `62` layers cannot reach `<=2s/token` on this CPU-only machine with this architecture.
