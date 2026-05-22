@@ -10,10 +10,16 @@ PLM-14 adds a no-file-shuffling GPU check for pcketlm. The loop is:
 
 ## GitHub Setup
 
-This checkout currently has no git remote configured. The operator needs to create a private GitHub repo once, then run:
+The private GitHub repo is:
+
+```text
+https://github.com/iamlicht1f1-maker/pcketlm
+```
+
+If this checkout ever loses its remote, restore it with:
 
 ```powershell
-git remote add origin https://github.com/<owner>/<repo>.git
+git remote add origin https://github.com/iamlicht1f1-maker/pcketlm.git
 git push -u origin plm-14-gpu-testing-pipeline
 ```
 
@@ -28,7 +34,7 @@ In Colab:
 3. Set:
 
 ```python
-REPO_URL = "https://github.com/<owner>/<repo>.git"
+REPO_URL = "https://github.com/iamlicht1f1-maker/pcketlm.git"
 BRANCH = "plm-14-gpu-testing-pipeline"
 ```
 
