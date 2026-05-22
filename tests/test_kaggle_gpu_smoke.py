@@ -27,6 +27,7 @@ def test_prepare_kaggle_kernel_embeds_gpu_smoke(tmp_path) -> None:
     assert "SOURCE_COMMIT = 'abc1234'" in script
     assert "PCKETLM_GPU_SMOKE_JSON_START" in script
     assert "from __future__ import annotations" not in script
+    assert "raise SystemExit(main())" not in script
 
 
 def test_kaggle_credentials_reports_missing_without_secret(monkeypatch, tmp_path) -> None:
