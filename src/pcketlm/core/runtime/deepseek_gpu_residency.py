@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -75,6 +76,8 @@ class LocalDeepSeekPagedDecodeResult:
     pager_evictions: int
     pager_cache_hits: int
     pager_cache_misses: int
+    pager_prefetch_submitted: int
+    pager_prefetch_completed: int
     elapsed_seconds: float
     seconds_per_layer: float
     projected_config_layers_seconds_per_token: float
@@ -297,6 +300,7 @@ class LocalDeepSeekResidentLayerPager:
         device: torch.device,
         max_resident_bytes: int,
         layer_factory: Callable[[int], LocalDeepSeekResidentLayer] | None = None,
+        prefetch_workers: int = 0,
     ) -> None:
         self.model_id = str(model_id)
         self.config = config
@@ -304,12 +308,16 @@ class LocalDeepSeekResidentLayerPager:
         self.device = device
         self.max_resident_bytes = int(max_resident_bytes)
         self.layer_factory = layer_factory
+        self._executor = ThreadPoolExecutor(max_workers=max(1, int(prefetch_workers))) if int(prefetch_workers) > 0 else None
+        self._prefetch_futures: dict[int, Future[LocalDeepSeekResidentLayer]] = {}
         self.layers: dict[int, LocalDeepSeekResidentLayer] = {}
         self._lru: list[int] = []
         self.loads = 0
         self.evictions = 0
         self.cache_hits = 0
         self.cache_misses = 0
+        self.prefetch_submitted = 0
+        self.prefetch_completed = 0
         self.peak_resident_bytes = 0
 
     def get(self, layer_index: int) -> LocalDeepSeekResidentLayer:
@@ -321,21 +329,28 @@ class LocalDeepSeekResidentLayerPager:
             self._record_peak()
             return resident
         self.cache_misses += 1
-        self.loads += 1
-        if self.layer_factory is None:
-            resident = LocalDeepSeekResidentLayer(
-                self.model_id,
-                layer_index,
-                config=self.config,
-                dtype=self.dtype,
-                device=self.device,
-            )
+        future = self._prefetch_futures.pop(layer_index, None)
+        if future is not None:
+            resident = future.result()
+            self.prefetch_completed += 1
         else:
-            resident = self.layer_factory(layer_index)
+            self.loads += 1
+            resident = self._load_layer(layer_index)
         self.layers[layer_index] = resident
         self._touch(layer_index)
         self._record_peak()
         return resident
+
+    def prefetch(self, layer_index: int) -> bool:
+        layer_index = int(layer_index)
+        if self._executor is None:
+            return False
+        if layer_index in self.layers or layer_index in self._prefetch_futures:
+            return False
+        self.loads += 1
+        self.prefetch_submitted += 1
+        self._prefetch_futures[layer_index] = self._executor.submit(self._load_layer, layer_index)
+        return True
 
     def enforce_budget(self, *, protected_layer: int | None = None) -> None:
         protected = None if protected_layer is None else int(protected_layer)
@@ -344,8 +359,24 @@ class LocalDeepSeekResidentLayerPager:
             pass
         self._record_peak()
 
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
     def resident_nbytes(self) -> int:
         return int(sum(layer.resident_nbytes() for layer in self.layers.values()))
+
+    def _load_layer(self, layer_index: int) -> LocalDeepSeekResidentLayer:
+        if self.layer_factory is None:
+            return LocalDeepSeekResidentLayer(
+                self.model_id,
+                int(layer_index),
+                config=self.config,
+                dtype=self.dtype,
+                device=self.device,
+            )
+        return self.layer_factory(int(layer_index))
 
     def _touch(self, layer_index: int) -> None:
         if layer_index in self._lru:
@@ -455,6 +486,8 @@ def run_local_deepseek_paged_decode_probe(
     start_layer: int = 0,
     layer_count: int = 1,
     resident_budget_bytes: int = 12 * 1024**3,
+    prefetch_window: int = 0,
+    prefetch_workers: int = 1,
     device: str | None = None,
     require_cuda: bool = False,
     dtype: torch.dtype = torch.float16,
@@ -485,6 +518,7 @@ def run_local_deepseek_paged_decode_probe(
         dtype=dtype,
         device=torch_device,
         max_resident_bytes=max(1, int(resident_budget_bytes)),
+        prefetch_workers=max(0, int(prefetch_workers)) if int(prefetch_window) > 0 else 0,
     )
     executed = list(range(start_layer, start_layer + layer_count))
     selected: dict[int, list[int]] = {}
@@ -494,7 +528,12 @@ def run_local_deepseek_paged_decode_probe(
         embedding = _load_regular_tensor(model_id, "model.embed_tokens.weight", device=torch_device)
         hidden = embedding[int(token_id) : int(token_id) + 1].reshape(1, 1, int(config["hidden_size"])).to(dtype=dtype)
         out = hidden
-        for layer_index in executed:
+        for offset, layer_index in enumerate(executed):
+            for ahead in range(1, max(0, int(prefetch_window)) + 1):
+                prefetch_index = offset + ahead
+                if prefetch_index >= len(executed):
+                    break
+                pager.prefetch(executed[prefetch_index])
             resident = pager.get(layer_index)
             out = resident.forward(out)
             selected[layer_index] = list(resident.selected_experts)
@@ -505,6 +544,7 @@ def run_local_deepseek_paged_decode_probe(
         seconds_per_layer = elapsed / float(max(1, layer_count))
         projected = seconds_per_layer * max(1, config_layers)
         passed = bool(torch.isfinite(out).all().item() and out.shape == (1, 1, int(config["hidden_size"])))
+        pager.close()
         return LocalDeepSeekPagedDecodeResult(
             passed=passed,
             cuda_available=cuda_available,
@@ -528,6 +568,8 @@ def run_local_deepseek_paged_decode_probe(
             pager_evictions=int(pager.evictions),
             pager_cache_hits=int(pager.cache_hits),
             pager_cache_misses=int(pager.cache_misses),
+            pager_prefetch_submitted=int(pager.prefetch_submitted),
+            pager_prefetch_completed=int(pager.prefetch_completed),
             elapsed_seconds=float(elapsed),
             seconds_per_layer=float(seconds_per_layer),
             projected_config_layers_seconds_per_token=float(projected),
@@ -535,6 +577,7 @@ def run_local_deepseek_paged_decode_probe(
             note="Bounded local DeepSeek FP8 decode slice through the resident-layer pager.",
         )
     except Exception as exc:  # noqa: BLE001 - caller needs a machine-readable failure.
+        pager.close()
         return LocalDeepSeekPagedDecodeResult(
             passed=False,
             cuda_available=cuda_available,
@@ -558,6 +601,8 @@ def run_local_deepseek_paged_decode_probe(
             pager_evictions=int(pager.evictions),
             pager_cache_hits=int(pager.cache_hits),
             pager_cache_misses=int(pager.cache_misses),
+            pager_prefetch_submitted=int(pager.prefetch_submitted),
+            pager_prefetch_completed=int(pager.prefetch_completed),
             elapsed_seconds=float(time.perf_counter() - started),
             seconds_per_layer=0.0,
             projected_config_layers_seconds_per_token=0.0,
@@ -643,6 +688,8 @@ def _failed_decode(
         pager_evictions=0,
         pager_cache_hits=0,
         pager_cache_misses=0,
+        pager_prefetch_submitted=0,
+        pager_prefetch_completed=0,
         elapsed_seconds=0.0,
         seconds_per_layer=0.0,
         projected_config_layers_seconds_per_token=0.0,

@@ -168,5 +168,6 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
 - PLM-14 follow-up only if Kaggle changes its API worker image: rerun `python tools\kaggle_gpu_smoke.py`; until then, use the browser Colab/Kaggle notebook for GPU validation.
 Done: PLM-13 local resident-layer pager and header-only GPU residency estimator.
+Done: PLM-13 local pager prefetch plumbing and telemetry.
 - PLM-13 next: run the local resident pager on a CUDA worker against the real local/packed DeepSeek source and add full/effective decode around that pager.
-- PLM-13 next: add asynchronous prefetch/overlap to the local pager after CUDA validation proves the bounded local pager semantics.
+- PLM-13 next: validate whether local pager prefetch actually overlaps layer loads with CUDA compute on the GPU worker.

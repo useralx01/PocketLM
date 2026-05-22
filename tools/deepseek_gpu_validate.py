@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--local-model-id", default="")
     parser.add_argument("--local-paged-decode-layers", type=int, default=0)
     parser.add_argument("--local-paged-budget-gb", type=float, default=12.0)
+    parser.add_argument("--local-paged-prefetch-window", type=int, default=0)
     args = parser.parse_args(argv)
 
     smoke = None
@@ -129,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 start_layer=args.layer,
                 layer_count=args.local_paged_decode_layers,
                 resident_budget_bytes=int(float(args.local_paged_budget_gb) * 1024**3),
+                prefetch_window=args.local_paged_prefetch_window,
                 require_cuda=args.require_cuda,
                 device=args.device,
                 dtype=torch.float16,

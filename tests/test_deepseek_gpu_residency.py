@@ -96,6 +96,29 @@ def test_local_layer_pager_evicts_lru_without_evicting_protected_layer() -> None
     assert pager.resident_nbytes() == 70
 
 
+def test_local_layer_pager_prefetches_next_layer() -> None:
+    layers = {3: _DummyLayer(70), 4: _DummyLayer(70)}
+    pager = LocalDeepSeekResidentLayerPager(
+        "dummy",
+        config={},
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        max_resident_bytes=200,
+        layer_factory=lambda index: layers[index],  # type: ignore[arg-type]
+        prefetch_workers=1,
+    )
+
+    assert pager.prefetch(4) is True
+    layer = pager.get(4)
+    pager.close()
+
+    assert layer is layers[4]
+    assert pager.loads == 1
+    assert pager.prefetch_submitted == 1
+    assert pager.prefetch_completed == 1
+    assert pager.cache_misses == 1
+
+
 def test_deepseek_gpu_validator_can_run_local_only(tmp_path, monkeypatch, capsys) -> None:
     from tools.deepseek_gpu_validate import main
 

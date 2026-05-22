@@ -6291,3 +6291,8 @@ Result: 297 passed in 21.83s
 - Full suite: `python -m pytest tests\ -q` -> `482 passed, 2 skipped in 100.45s`.
 - Real DeepSeek V3 header-only estimate: `python tools\deepseek_gpu_validate.py --skip-synthetic --skip-remote --local-model-id deepseek-v3 --layer 3 --local-paged-decode-layers 0 --local-paged-budget-gb 12 --json` -> ready `true`, config layers `61`, source bytes for layer 3 active set `587,313,376`, estimated dequantized resident bytes `1,170,637,824`, 12 GB budget fits `11` dequantized active layers, projected hot resident speed `1.7642177491108302s/token` using the prior Kaggle T4 resident measurement.
 - This is a real product-direction step, not the finish line: it proves the local scheduler can plan/run against the tensor catalog, while full `<=2s/token` still needs a CUDA validation run with the local pager and full/effective decode.
+
+## PLM-13 Local GPU Residency / Prefetch
+- Added local pager prefetch plumbing with a background layer-load executor, counters for submitted/completed prefetches, and `tools\deepseek_gpu_validate.py --local-paged-prefetch-window`.
+- Focused tests: `python -m pytest tests\test_deepseek_gpu_residency.py tests\test_runtime_fp8_source.py tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `38 passed in 3.28s`.
+- Full suite: `python -m pytest tests\ -q` -> `483 passed, 2 skipped in 103.39s`.
