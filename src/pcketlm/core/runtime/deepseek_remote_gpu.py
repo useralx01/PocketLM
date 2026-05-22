@@ -116,6 +116,43 @@ class RemoteDeepSeekResidentDecodeProbeResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RemoteDeepSeekPagedDecodeProbeResult:
+    passed: bool
+    cuda_available: bool
+    device: str
+    device_name: str
+    torch_version: str
+    repo_id: str
+    revision: str
+    token_id: int
+    start_layer: int
+    layer_count: int
+    config_hidden_layers: int
+    executed_layers: list[int]
+    selected_experts_by_layer: dict[int, list[int]]
+    output_shape: list[int]
+    checksum: float
+    max_abs_value: float
+    bytes_downloaded: int
+    tensors_downloaded: int
+    resident_budget_bytes: int
+    peak_resident_bytes: int
+    final_resident_bytes: int
+    pager_loads: int
+    pager_evictions: int
+    pager_cache_hits: int
+    pager_cache_misses: int
+    prefetch_window: int
+    elapsed_seconds: float
+    seconds_per_paged_layer: float
+    projected_config_layers_seconds_per_token: float
+    note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class RemoteSafeTensorShard:
     def __init__(self, *, repo_id: str, revision: str, filename: str) -> None:
         self.repo_id = repo_id
@@ -648,6 +685,150 @@ def run_remote_deepseek_resident_decode_probe(
         )
 
 
+def run_remote_deepseek_paged_decode_probe(
+    *,
+    repo_id: str = DEFAULT_REPO_ID,
+    revision: str = DEFAULT_REVISION,
+    token_id: int = 0,
+    start_layer: int = 3,
+    layer_count: int = 6,
+    resident_budget_bytes: int = 6 * 1024**3,
+    prefetch_window: int = 0,
+    require_cuda: bool = True,
+    device: str | None = None,
+    dtype: torch.dtype = torch.float16,
+) -> RemoteDeepSeekPagedDecodeProbeResult:
+    """Run a bounded real DeepSeek decode slice through a GPU layer residency pager."""
+    cuda_available = torch.cuda.is_available()
+    if device is None:
+        if cuda_available:
+            device = "cuda"
+        elif require_cuda:
+            return _failed_paged_decode_probe(
+                repo_id=repo_id,
+                revision=revision,
+                token_id=token_id,
+                start_layer=start_layer,
+                layer_count=layer_count,
+                torch_version=torch.__version__,
+                note="CUDA is required but is not available.",
+            )
+        else:
+            device = "cpu"
+    torch_device = torch.device(device)
+    device_name = torch.cuda.get_device_name(torch_device) if torch_device.type == "cuda" else "cpu"
+    store = RemoteDeepSeekStore(repo_id, revision, device=torch_device)
+    config = store.config
+    config_layers = int(config.get("num_hidden_layers", 0) or 0)
+    start_layer = max(0, int(start_layer))
+    layer_count = max(1, min(int(layer_count), max(1, config_layers - start_layer)))
+    resident_budget_bytes = max(1, int(resident_budget_bytes))
+    prefetch_window = max(0, int(prefetch_window))
+    executed = list(range(start_layer, start_layer + layer_count))
+    selected: dict[int, list[int]] = {}
+    pager = _ResidentRemoteDeepSeekLayerPager(
+        store,
+        config=config,
+        dtype=dtype,
+        max_resident_bytes=resident_budget_bytes,
+    )
+    started = time.perf_counter()
+
+    try:
+        hidden = store.rows("model.embed_tokens.weight", int(token_id), int(token_id) + 1).reshape(
+            1, 1, int(config["hidden_size"])
+        )
+        out = hidden
+        for offset, layer_index in enumerate(executed):
+            resident = pager.get(layer_index)
+            out = resident.forward(out)
+            selected[layer_index] = list(resident.selected_experts)
+            pager.enforce_budget(protected_layer=layer_index)
+            for ahead in range(1, prefetch_window + 1):
+                prefetch_index = offset + ahead
+                if prefetch_index >= len(executed):
+                    break
+                pager.get(executed[prefetch_index])
+                pager.enforce_budget(protected_layer=layer_index)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        elapsed = time.perf_counter() - started
+        seconds_per_layer = elapsed / float(max(1, layer_count))
+        projected = seconds_per_layer * max(1, config_layers)
+        checksum = float(out.float().sum().detach().cpu().item())
+        max_abs = float(out.float().abs().max().detach().cpu().item())
+        passed = bool(torch.isfinite(out).all().item() and out.shape == (1, 1, int(config["hidden_size"])))
+        return RemoteDeepSeekPagedDecodeProbeResult(
+            passed=passed,
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            token_id=int(token_id),
+            start_layer=start_layer,
+            layer_count=layer_count,
+            config_hidden_layers=config_layers,
+            executed_layers=executed,
+            selected_experts_by_layer=selected,
+            output_shape=[int(v) for v in out.shape],
+            checksum=checksum,
+            max_abs_value=max_abs,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            resident_budget_bytes=int(resident_budget_bytes),
+            peak_resident_bytes=int(pager.peak_resident_bytes),
+            final_resident_bytes=int(pager.resident_nbytes()),
+            pager_loads=int(pager.loads),
+            pager_evictions=int(pager.evictions),
+            pager_cache_hits=int(pager.cache_hits),
+            pager_cache_misses=int(pager.cache_misses),
+            prefetch_window=prefetch_window,
+            elapsed_seconds=float(elapsed),
+            seconds_per_paged_layer=float(seconds_per_layer),
+            projected_config_layers_seconds_per_token=float(projected),
+            note=(
+                "Bounded real DeepSeek V3 decode slice using a GPU resident layer pager. "
+                "This proves active-window load/evict semantics under a VRAM budget; "
+                "elapsed time includes cold remote range reads and dequant."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - validation JSON should carry the exact remote failure.
+        return RemoteDeepSeekPagedDecodeProbeResult(
+            passed=False,
+            cuda_available=cuda_available,
+            device=str(torch_device),
+            device_name=device_name,
+            torch_version=torch.__version__,
+            repo_id=repo_id,
+            revision=revision,
+            token_id=int(token_id),
+            start_layer=start_layer,
+            layer_count=layer_count,
+            config_hidden_layers=config_layers,
+            executed_layers=[],
+            selected_experts_by_layer=selected,
+            output_shape=[],
+            checksum=0.0,
+            max_abs_value=0.0,
+            bytes_downloaded=int(store.bytes_downloaded),
+            tensors_downloaded=int(store.tensors_downloaded),
+            resident_budget_bytes=int(resident_budget_bytes),
+            peak_resident_bytes=int(pager.peak_resident_bytes),
+            final_resident_bytes=int(pager.resident_nbytes()),
+            pager_loads=int(pager.loads),
+            pager_evictions=int(pager.evictions),
+            pager_cache_hits=int(pager.cache_hits),
+            pager_cache_misses=int(pager.cache_misses),
+            prefetch_window=prefetch_window,
+            elapsed_seconds=float(time.perf_counter() - started),
+            seconds_per_paged_layer=0.0,
+            projected_config_layers_seconds_per_token=0.0,
+            note=f"Paged DeepSeek decode probe failed: {type(exc).__name__}: {exc}",
+        )
+
+
 class _ResidentRemoteDeepSeekLayer:
     def __init__(self, store: RemoteDeepSeekStore, layer_index: int, *, config: dict[str, Any], dtype: torch.dtype) -> None:
         self.store = store
@@ -827,6 +1008,86 @@ class _ResidentRemoteDeepSeekLayer:
                 total += int(tensor.nelement() * tensor.element_size())
         return total
 
+    def release(self) -> None:
+        self.weights.clear()
+        self.regular.clear()
+        self.selected_experts = []
+        self._expert_gate = None
+        self._expert_up = None
+        self._expert_down = None
+
+
+class _ResidentRemoteDeepSeekLayerPager:
+    def __init__(
+        self,
+        store: RemoteDeepSeekStore,
+        *,
+        config: dict[str, Any],
+        dtype: torch.dtype,
+        max_resident_bytes: int,
+    ) -> None:
+        self.store = store
+        self.config = config
+        self.dtype = dtype
+        self.max_resident_bytes = int(max_resident_bytes)
+        self.layers: dict[int, _ResidentRemoteDeepSeekLayer] = {}
+        self._lru: list[int] = []
+        self.loads = 0
+        self.evictions = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.peak_resident_bytes = 0
+
+    def get(self, layer_index: int) -> _ResidentRemoteDeepSeekLayer:
+        layer_index = int(layer_index)
+        resident = self.layers.get(layer_index)
+        if resident is not None:
+            self.cache_hits += 1
+            self._touch(layer_index)
+            self._record_peak()
+            return resident
+        self.cache_misses += 1
+        self.loads += 1
+        resident = _ResidentRemoteDeepSeekLayer(self.store, layer_index, config=self.config, dtype=self.dtype)
+        self.layers[layer_index] = resident
+        self._touch(layer_index)
+        self._record_peak()
+        return resident
+
+    def enforce_budget(self, *, protected_layer: int | None = None) -> None:
+        protected = None if protected_layer is None else int(protected_layer)
+        self._record_peak()
+        while self.resident_nbytes() > self.max_resident_bytes and self._evict_one(protected_layer=protected):
+            pass
+        self._record_peak()
+
+    def resident_nbytes(self) -> int:
+        return sum(layer.resident_nbytes() for layer in self.layers.values())
+
+    def _touch(self, layer_index: int) -> None:
+        if layer_index in self._lru:
+            self._lru.remove(layer_index)
+        self._lru.append(layer_index)
+
+    def _evict_one(self, *, protected_layer: int | None) -> bool:
+        for layer_index in list(self._lru):
+            if protected_layer is not None and layer_index == protected_layer:
+                continue
+            resident = self.layers.pop(layer_index, None)
+            if resident is None:
+                self._lru.remove(layer_index)
+                continue
+            resident.release()
+            self._lru.remove(layer_index)
+            self.evictions += 1
+            if self.store.device.type == "cuda":
+                torch.cuda.empty_cache()
+            return True
+        return False
+
+    def _record_peak(self) -> None:
+        self.peak_resident_bytes = max(self.peak_resident_bytes, self.resident_nbytes())
+
 
 def _failed_resident_decode_probe(
     *,
@@ -863,6 +1124,50 @@ def _failed_resident_decode_probe(
         benchmark_iterations=0,
         benchmark_seconds=0.0,
         seconds_per_resident_layer=0.0,
+        projected_config_layers_seconds_per_token=0.0,
+        note=note,
+    )
+
+
+def _failed_paged_decode_probe(
+    *,
+    repo_id: str,
+    revision: str,
+    token_id: int,
+    start_layer: int,
+    layer_count: int,
+    torch_version: str,
+    note: str,
+) -> RemoteDeepSeekPagedDecodeProbeResult:
+    return RemoteDeepSeekPagedDecodeProbeResult(
+        passed=False,
+        cuda_available=False,
+        device="cpu",
+        device_name="cpu",
+        torch_version=torch_version,
+        repo_id=repo_id,
+        revision=revision,
+        token_id=int(token_id),
+        start_layer=int(start_layer),
+        layer_count=int(layer_count),
+        config_hidden_layers=0,
+        executed_layers=[],
+        selected_experts_by_layer={},
+        output_shape=[],
+        checksum=0.0,
+        max_abs_value=0.0,
+        bytes_downloaded=0,
+        tensors_downloaded=0,
+        resident_budget_bytes=0,
+        peak_resident_bytes=0,
+        final_resident_bytes=0,
+        pager_loads=0,
+        pager_evictions=0,
+        pager_cache_hits=0,
+        pager_cache_misses=0,
+        prefetch_window=0,
+        elapsed_seconds=0.0,
+        seconds_per_paged_layer=0.0,
         projected_config_layers_seconds_per_token=0.0,
         note=note,
     )

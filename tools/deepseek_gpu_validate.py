@@ -19,6 +19,7 @@ from pcketlm.core.runtime.deepseek_remote_gpu import (
     DEFAULT_REPO_ID,
     DEFAULT_REVISION,
     run_remote_deepseek_layer_probe,
+    run_remote_deepseek_paged_decode_probe,
     run_remote_deepseek_resident_decode_probe,
     run_remote_deepseek_resident_layer_probe,
 )
@@ -38,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resident-iterations", type=int, default=8)
     parser.add_argument("--resident-decode-layers", type=int, default=0)
     parser.add_argument("--resident-decode-iterations", type=int, default=3)
+    parser.add_argument("--paged-decode-layers", type=int, default=0)
+    parser.add_argument("--paged-budget-gb", type=float, default=6.0)
+    parser.add_argument("--paged-prefetch-window", type=int, default=0)
     args = parser.parse_args(argv)
 
     smoke = None
@@ -83,6 +87,21 @@ def main(argv: list[str] | None = None) -> int:
             dtype=torch.float16,
         )
         payload["real_deepseek_resident_decode_probe"] = decode.to_dict()
+    paged = None
+    if args.paged_decode_layers > 0:
+        paged = run_remote_deepseek_paged_decode_probe(
+            repo_id=args.repo_id,
+            revision=args.revision,
+            token_id=args.token_id,
+            start_layer=args.layer,
+            layer_count=args.paged_decode_layers,
+            resident_budget_bytes=int(float(args.paged_budget_gb) * 1024**3),
+            prefetch_window=args.paged_prefetch_window,
+            require_cuda=args.require_cuda,
+            device=args.device,
+            dtype=torch.float16,
+        )
+        payload["real_deepseek_paged_decode_probe"] = paged.to_dict()
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -97,7 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     return (
         0
-        if real.passed and resident.passed and (smoke is None or smoke.passed) and (synthetic is None or synthetic.passed)
+        if real.passed
+        and resident.passed
+        and (paged is None or paged.passed)
+        and (smoke is None or smoke.passed)
+        and (synthetic is None or synthetic.passed)
         else 1
     )
 

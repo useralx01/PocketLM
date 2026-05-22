@@ -6268,3 +6268,10 @@ Result: 297 passed in 21.83s
 - Selected experts by layer: layer `3` -> `[15,123,196,209,213,236,242,252]`; layer `4` -> `[2,11,30,64,69,100,110,251]`; layer `5` -> `[42,58,80,81,95,108,160,190]`.
 - Interpretation: the resident multi-layer path still meets the target projection, but cold loading remains about `15.9s/layer`. Full product needs a GPU paging/residency scheduler that keeps the active window resident and overlaps next-layer transfers.
 - Full suite: `python -m pytest tests\ -q` -> `477 passed, 2 skipped in 97.23s`.
+
+## PLM-13 GPU Effective Speed / Attempt 5
+- Added a bounded DeepSeek GPU paging probe to `pcketlm.core.runtime.deepseek_remote_gpu`. It uses a resident layer pager with an explicit byte budget, LRU eviction, optional ahead-of-current prefetch, and counters for loads, evictions, hits, misses, peak resident bytes, and final resident bytes.
+- Added `tools/deepseek_gpu_validate.py --paged-decode-layers N --paged-budget-gb G --paged-prefetch-window N`.
+- Local syntax: `python -m py_compile src\pcketlm\core\runtime\deepseek_remote_gpu.py tools\deepseek_gpu_validate.py` -> passed.
+- Focused tests: `python -m pytest tests\test_deepseek_remote_gpu.py tests\test_gpu_smoke.py -q` -> `8 passed in 2.38s`.
+- Full suite: `python -m pytest tests\ -q` -> `478 passed, 2 skipped in 100.70s`.
