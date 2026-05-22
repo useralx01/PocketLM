@@ -6223,3 +6223,7 @@ Result: 297 passed in 21.83s
 - Kaggle runner evidence: `python tools\kaggle_gpu_smoke.py --prepare-only` writes `build\kaggle_gpu_smoke\kernel-metadata.json` and `gpu_smoke_kaggle.py`; `python tools\kaggle_gpu_smoke.py` currently blocks cleanly with `blocked_missing_kaggle_credentials` because `C:\Users\isale\.kaggle\kaggle.json` is missing.
 - Focused Kaggle runner tests: `python -m pytest tests\test_kaggle_gpu_smoke.py tests\test_gpu_notebook.py tests\test_gpu_smoke.py tests\gpu -q` -> `5 passed, 1 skipped in 1.56s`.
 - Full suite after Kaggle runner: `python -m pytest tests\ -q` -> `470 passed, 1 skipped in 87.35s`.
+- Kaggle API token was added as `C:\Users\isale\.kaggle\access_token`; runner now detects Kaggle user `lichtnicht`.
+- Kaggle submissions are autonomous and logs download correctly, but current Kaggle workers still report `cuda_available: false` despite metadata `enable_gpu: true` and pulled server metadata `machine_shape: "Gpu"`.
+- Tried accelerator requests `gpu`, `GPU`, `NvidiaTeslaT4`, `nvidiaTeslaT4`, and `NvidiaTeslaP100`; all submitted and ran, but logs showed CPU-only Torch `2.10.0+cpu` and `CUDA is required for this smoke run but is not available.`
+- Latest runner default was changed to request exact Kaggle machine shape `NvidiaTeslaT4`; remaining blocker is Kaggle/account GPU entitlement or availability, not local automation.

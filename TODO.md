@@ -168,3 +168,4 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
 - Operator step for PLM-14: open the pushed `notebooks/gpu_test.ipynb` from `https://github.com/iamlicht1f1-maker/pcketlm`, run it on a free Colab/Kaggle GPU, and paste the smoke JSON plus `tests/gpu` pytest output into Linear.
 - Better PLM-14 operator step: create a Kaggle API token once and save it to `C:\Users\isale\.kaggle\kaggle.json`; after that Codex can run `python tools\kaggle_gpu_smoke.py` autonomously.
+- PLM-14 remaining gate: Kaggle account `lichtnicht` must actually receive a GPU worker; current API submissions run CPU-only despite GPU metadata and exact T4/P100 accelerator requests.

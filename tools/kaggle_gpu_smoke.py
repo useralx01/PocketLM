@@ -210,8 +210,8 @@ def _kaggle_command(args: list[str], *, check: bool = True) -> subprocess.Comple
     return _run([*_kaggle_executable_command(), *args], check=check)
 
 
-def submit_kernel(kernel_dir: Path) -> str:
-    return _kaggle_command(["kernels", "push", "-p", str(kernel_dir), "--accelerator", "gpu"]).stdout
+def submit_kernel(kernel_dir: Path, *, accelerator: str) -> str:
+    return _kaggle_command(["kernels", "push", "-p", str(kernel_dir), "--accelerator", accelerator]).stdout
 
 
 def poll_kernel(kernel_id: str, *, interval_seconds: int, timeout_seconds: int) -> str:
@@ -244,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slug", default="pocketlm-gpu-smoke", help="Kaggle kernel slug.")
     parser.add_argument("--title", default="PocketLM GPU Smoke", help="Kaggle kernel title.")
     parser.add_argument("--prepare-only", action="store_true", help="Only write the Kaggle kernel folder.")
+    parser.add_argument("--accelerator", default="NvidiaTeslaT4", help="Kaggle machine shape, for example NvidiaTeslaT4.")
     parser.add_argument("--poll-interval", type=int, default=30, help="Poll interval in seconds.")
     parser.add_argument("--timeout", type=int, default=900, help="Poll timeout in seconds.")
     args = parser.parse_args(argv)
@@ -276,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         write_state(payload)
         return 2
 
-    submit_output = submit_kernel(kernel_dir)
+    submit_output = submit_kernel(kernel_dir, accelerator=args.accelerator)
     status_output = poll_kernel(kernel_id, interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
     output_dir = DEFAULT_STATE_DIR / "output"
     download_log = download_output(kernel_id, output_dir)

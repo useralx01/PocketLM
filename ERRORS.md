@@ -416,3 +416,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Gate blocked: fully autonomous free-GPU launch requires Kaggle API credentials.
 - Cause: `C:\Users\isale\.kaggle\kaggle.json` is missing and `KAGGLE_USERNAME`/`KAGGLE_KEY` are not set.
 - Resolution: `tools\kaggle_gpu_smoke.py` is ready and prepares the private GPU kernel, but it cannot submit until the operator downloads a Kaggle API token once. After that Codex can run `python tools\kaggle_gpu_smoke.py` and poll/download without manual notebook clicking.
+
+## PLM-14 Kaggle GPU Not Attached
+- Gate blocked: autonomous Kaggle submissions run and logs download, but the remote worker starts CPU-only.
+- Evidence: Kaggle pulled metadata shows `enable_gpu: true` and `machine_shape: "Gpu"`, and CLI submissions with `gpu`, `GPU`, `NvidiaTeslaT4`, `nvidiaTeslaT4`, and `NvidiaTeslaP100` all ran. Each downloaded log reports `cuda_available: false`, `device: "cpu"`, Torch `2.10.0+cpu`, and `CUDA is required for this smoke run but is not available.`
+- Resolution: local automation is working; Kaggle/account GPU availability needs to be enabled or verified before the smoke can pass. The runner now defaults to exact `NvidiaTeslaT4`.
