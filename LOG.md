@@ -6216,4 +6216,6 @@ Result: 297 passed in 21.83s
 - Require-CUDA local sanity: `python tools\gpu_smoke.py --require-cuda --json` reports `CUDA is required for this smoke run but is not available` and exits nonzero on this CPU-only laptop.
 - Focused tests: `python -m pytest tests\test_gpu_smoke.py tests\test_gpu_notebook.py tests\gpu -q` -> `3 passed, 1 skipped in 2.75s`.
 - Full suite: `python -m pytest tests\ -q` -> `468 passed, 1 skipped in 112.12s`.
-- Git remote check: `git remote -v` returned no remotes, so this session cannot push to GitHub yet. Operator must create/provide a GitHub repo or remote URL, then run `git remote add origin ...` and `git push -u origin plm-14-gpu-testing-pipeline`.
+- GitHub repo created and pushed: `https://github.com/iamlicht1f1-maker/pcketlm`, branch `plm-14-gpu-testing-pipeline`.
+- Follow-up commit `4149428` set the real repo URL in `notebooks/gpu_test.ipynb` and `docs/gpu_cloud_testing.md`.
+- Remaining operator gate: open the notebook in Colab/Kaggle on a free GPU runtime, run all cells, and paste the JSON plus `tests/gpu` pytest result into PLM-14.

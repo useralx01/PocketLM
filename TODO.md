@@ -166,4 +166,4 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-11 flash MLA speed gate needs fused/native q_a/q_b/kv_a/o_proj projection plus persistent attention weight residency; the online-softmax core alone is correct but not faster for the full call.
 - Blocked: PLM-12 fused attention block speed gate needs BLAS-backed/batched native projection or GPU offload; the one-call C fusion is correct but slower than PyTorch/MKL on CPU.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
-- Operator step for PLM-14: create/provide a GitHub remote, push `plm-14-gpu-testing-pipeline`, run `notebooks/gpu_test.ipynb` on a free GPU, and paste the smoke JSON plus `tests/gpu` pytest output into Linear.
+- Operator step for PLM-14: open the pushed `notebooks/gpu_test.ipynb` from `https://github.com/iamlicht1f1-maker/pcketlm`, run it on a free Colab/Kaggle GPU, and paste the smoke JSON plus `tests/gpu` pytest output into Linear.

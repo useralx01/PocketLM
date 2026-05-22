@@ -407,7 +407,7 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Attempt 3: push candidate batch size and layer count. Bounded `8` layers reached `1.815s/position` only at `k=64`, but bounded `32` layers at the same `k=64` took `439.209s`, `6.757s/position`. Full `62` layers would be slower still, and real speculative acceptance would be below this artificial repeated-token upper bound.
 - Resolution: mark PLM-13 blocked. The target is not reachable on this CPU-only laptop with the current FP8 architecture. The real unblock is GPU offload or a fundamentally faster BLAS/GPU-backed full-layer engine, not another Python orchestration or scalar native kernel.
 
-## PLM-14 Git Remote Blocker
-- Gate blocked: PLM-14 requires the repo to push cleanly to a remote git repo and the operator to run the notebook once on a free GPU.
-- Cause: `git remote -v` returned no configured remotes in this checkout, and this session has no operator-provided GitHub repo URL or token to create/push a private repo.
-- Resolution: code, notebook, docs, and tests are ready. Operator must create or provide a GitHub remote, push branch `plm-14-gpu-testing-pipeline`, open `notebooks/gpu_test.ipynb` in Colab/Kaggle, run all cells on a GPU runtime, and paste the JSON/pytest result into PLM-14.
+## PLM-14 Cloud GPU Evidence Pending
+- Previous remote blocker is resolved: repo `https://github.com/iamlicht1f1-maker/pcketlm` exists and branch `plm-14-gpu-testing-pipeline` is pushed.
+- Remaining gate: PLM-14 requires an operator-run free GPU notebook result. This cannot be completed from the local CPU-only shell.
+- Resolution: operator opens `notebooks/gpu_test.ipynb` from the pushed branch in Colab/Kaggle, selects GPU runtime, runs all cells, and pastes the JSON/pytest result into PLM-14.
