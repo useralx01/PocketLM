@@ -6234,3 +6234,11 @@ Result: 297 passed in 21.83s
 - Follow-up fix: notebook wrapper now probes `sys.executable`, `/opt/conda/bin/python`, `/opt/conda/bin/python3`, `/usr/local/bin/python*`, and `/usr/bin/python3`, then runs the smoke payload under the first CUDA-capable interpreter found.
 - Focused tests after interpreter-probe wrapper: `python -m pytest tests\test_kaggle_gpu_smoke.py tests\test_gpu_notebook.py tests\test_gpu_smoke.py tests\gpu -q` -> `7 passed, 1 skipped in 2.04s`.
 - Kaggle interpreter-probe run `lichtnicht/pocketlm-gpu-smoke-probe`, commit `01c955d`: probes found `/usr/bin/python3` and `/usr/local/bin/python` only; both reported Torch `2.10.0+cpu`, `cuda_available: false`. No `/opt/conda/bin/python` existed on the API worker. CUDA Torch repair again failed DNS against `download.pytorch.org`. Smoke JSON: `passed: false`, `device: "cpu"`, `note: "CUDA is required for this smoke run but is not available."`
+
+## PLM-13 GPU Effective Speed / Attempt 1
+- Branch: `plm-13-gpu-effective-speed`.
+- Added a DeepSeek-shaped CUDA timing probe to `tools/gpu_smoke.py --deepseek-probe --json`. It measures FP8 e4m3 byte dequant with block scales, routed selected-expert MoE, MLA-shaped attention, and reports a 62-layer projection plus a k=64 effective-position projection.
+- The probe is intentionally labeled synthetic and does not claim a full DeepSeek V3 run; it is the first GPU evidence loop now that PLM-14's browser notebook path is available.
+- Updated `notebooks/gpu_test.ipynb` to use branch `plm-13-gpu-effective-speed` and run `tools/gpu_smoke.py --require-cuda --deepseek-probe --json`.
+- Local focused validation: `python -m pytest tests\test_gpu_smoke.py tests\test_gpu_notebook.py tests\gpu -q` -> `5 passed, 2 skipped in 1.39s`.
+- Local CPU diagnostic run with `--deepseek-probe` completed and emitted both `smoke` and `deepseek_gpu_probe` JSON; cloud CUDA run is required before any speed claim.
