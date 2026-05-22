@@ -13,6 +13,8 @@ python tools\kaggle_gpu_smoke.py
 
 Codex can then submit the private Kaggle GPU kernel, poll status, download output, and write `state\kaggle_gpu_smoke\latest.json`.
 
+The Kaggle runner checks the remote torch wheel before running the smoke. If Kaggle starts with a CPU-only torch wheel, it repairs torch from the CUDA wheel index before importing pcketlm smoke code. The notebook fallback installs pcketlm with `--no-deps` so it does not replace Kaggle's CUDA torch.
+
 ## One-Time Kaggle Token Setup
 
 1. Open Kaggle account settings.
