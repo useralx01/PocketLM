@@ -6332,3 +6332,10 @@ Result: 297 passed in 21.83s
 - Real estimate: `61` config layers, layer-3 active source bytes `587,313,376`, dequantized active-layer bytes `1,170,637,824`, `12 GB` budget fits `11` active layers by dequantized bytes, projected hot resident speed `1.7642177491108302s/token`.
 - Focused tests: `python -m pytest tests\test_deepseek_gpu_ready.py tests\test_deepseek_gpu_residency.py -q` -> `11 passed in 2.95s`.
 - Full suite: `python -m pytest tests\ -q` -> `490 passed, 2 skipped in 115.06s`.
+
+## PLM-13 Kaggle Model Source Probe
+- Extended `tools\kaggle_deepseek_gpu_validate.py` with an opt-in Kaggle model-source path. The generated notebook now attaches `deepseek-ai/deepseek-v3/transformers/deepseek-v3/2` and embeds the minimal pcketlm runtime tree, avoiding private GitHub clone credentials.
+- Fresh Kaggle notebook slug `lichtnicht/pocketlm-deepseek-model-source-embed-1` ran on Tesla T4 with CUDA and built a real tensor catalog from `/kaggle/input/models/deepseek-ai/deepseek-v3/transformers/deepseek-v3/2`: `91,991` tensors, `163` shards, `680,571,043,840` FP8 weight bytes.
+- The mounted-source local pager is correct but far off the PLM-13 speed gate: one real layer plus streamed lm_head tail took `29.020s`, with `12.637s` in tail, `1,878,950,912` peak resident bytes, and top token ids `[108316, 18024, 116874, 59339, 20560]`.
+- Interpretation: Kaggle model attachment removes HuggingFace HTTP range reads, but Kaggle input storage is still too slow for per-token paged DeepSeek. Even excluding tail, the one-layer row projects about `1012s/token` across `61` config layers. The only sub-2s evidence remains hot resident compute, which requires fast local weight residency/storage that this worker does not provide.
+- Focused tests: `python -m py_compile tools\kaggle_deepseek_gpu_validate.py` and `python -m pytest tests\test_kaggle_gpu_smoke.py -q` -> `6 passed in 3.13s`.

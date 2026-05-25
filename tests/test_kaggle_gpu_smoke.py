@@ -69,6 +69,34 @@ def test_prepare_deepseek_gpu_validate_kernel_embeds_remote_validator(tmp_path) 
     assert "layer_count=4" in script
 
 
+def test_prepare_deepseek_gpu_validate_kernel_can_attach_kaggle_model_source(tmp_path) -> None:
+    kernel_dir = prepare_deepseek_kernel(
+        username="tester",
+        slug="pcketlm-deepseek-local-test",
+        title="pcketlm-deepseek-local-test",
+        out_dir=tmp_path,
+        model_source="deepseek-ai/deepseek-v3/transformers/deepseek-v3/2",
+        local_decode_layers=4,
+        local_budget_gb=12.0,
+        local_prefetch_window=1,
+        local_max_new_tokens=1,
+        repo_url="https://github.com/example/pcketlm.git",
+        branch="plm-13",
+        commit="abc1234",
+    )
+
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    notebook = json.loads((kernel_dir / "deepseek_gpu_validate.ipynb").read_text(encoding="utf-8"))
+    script = "".join(notebook["cells"][0]["source"])
+
+    assert metadata["model_sources"] == ["deepseek-ai/deepseek-v3/transformers/deepseek-v3/2"]
+    assert "run_local_deepseek_paged_decode_loop" in script
+    assert "build_tensor_catalog" in script
+    assert "LOCAL_DECODE_LAYERS = 4" in script
+    assert "SOURCE_COMMIT = 'abc1234'" in script
+    assert "/kaggle/input/deepseek-v3/transformers/deepseek-v3/2" in script
+
+
 def test_kaggle_credentials_reports_missing_without_secret(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
