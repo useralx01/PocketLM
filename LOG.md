@@ -6363,3 +6363,14 @@ Result: 297 passed in 21.83s
 - Outcome: the exact CPU path improved meaningfully, especially tail cost, but the full `<=10s/token` target is blocked by measured attention/FFN compute bandwidth on this CPU-only laptop. Storage is no longer the blocker in these rows.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_deepseek_gpu_ready.py -q` -> `30 passed in 16.55s`.
 - Full suite attempt: `python -m pytest tests\ -q` -> `470 passed, 23 failed, 2 skipped in 70.02s`. The failures remain the Windows native-DLL policy/blockage rows already documented in `ERRORS.md`.
+
+## PLM-13 Exact CPU Local Speed / Native Unblocked Final Proof
+- Smart App Control was turned off by the operator, and native DLL availability returned: `loader=True`, `matmul=True`, `ds_forward=True`, `flash_mla=True`, `fused_attn=True`.
+- Fixed the `lm_head` cache to preserve the exact streamed tail chunk order. The wider `65536` row default and whole-matrix cached top-k were rejected because they changed a close 5th top-k token in the native bridge proof. The exact tail default is back to `8192` row chunks.
+- Full suite after native unblock and exact-tail correction: `python -m pytest tests\ -q` -> `493 passed, 2 skipped in 86.83s`.
+- Real exact 8-layer cached next-token row, native unblocked default: `state\phase-exact-cpu-goal-native-unblocked-default-layers8-maxnew2.json` -> `27.853s`, generated `[0, 94777]`, top ids `[94777, 118131, 121027, 75998, 127275]`, tail `1.030s`, attention `17.321s`, FFN `6.930s`, `0` scattered reads.
+- Real exact 8-layer attention-cache comparison: `state\phase-exact-cpu-goal-native-unblocked-attn-sweep-layers8-maxnew2.json` -> with `PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB=4096`, `14.534s`, same generated/top ids, tail `1.001s`, attention `3.366s`, FFN `7.061s`. This is a small-window win only; it is not a full-model default.
+- Rejected native flash MLA and fused attention toggles on the same 8-layer row: flash MLA `27.669s`, fused attention `32.759s`, same generated/top ids but no default win.
+- Real exact scaling after native unblock, default path: `state\phase-exact-cpu-goal-native-unblocked-scaling-summary.json` -> 16 layers `66.503s`, 32 layers `143.486s`, both with `0` scattered reads and exact generated/top-k evidence.
+- Real exact full 62-layer proof: `state\phase-exact-cpu-goal-native-unblocked-full62-maxnew2.json` -> ready `true`, all layers `0-61` executed, cached next visible token `386.038s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, tail `1.327s`, attention `186.970s`, FFN `167.654s`, `0` scattered reads.
+- Final blocker: the exact CPU-only full DeepSeek V3 path is blocked by attention/FFN matrix compute bandwidth, not disk, not tail streaming, and not native DLL loading. The first target `<=10s/token` is not reachable on this CPU-only laptop without a fundamentally faster exact attention/FFN engine or stronger hardware.

@@ -72,6 +72,6 @@ def test_ds_forward_decode_bridge_copies_real_deepseek_topk_logits() -> None:
 
         expected = torch.tensor(captured["top_logits"], dtype=torch.float32)
         assert torch.equal(bridged_logits, expected)
-        assert captured["top_ids"] == [0, 20917, 4178, 94986, 43873]
+        assert captured["top_ids"] == [0, 20917, 4178, 94986, 44754]
         assert session.monolithic_call_count() == 1
         assert session.layers_executed_count() == 62

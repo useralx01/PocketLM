@@ -447,3 +447,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Root cause: exact attention and FFN compute dominate after disk reads and tail streaming are reduced. The 32-layer row has `0` scattered reads, but spends `146.016s` in attention and `58.025s` in FFN.
 - Rejected fixes: native `lm_head` top-k preserved tokens but did not improve timing; 4 GB MLP span cache churned and stayed around `30s`; 4/8/12 CPU thread tuning stayed around `30s`; 4 GB attention cache helped only the 8-layer window and had `0` hits with `265` evictions at 32 layers.
 - Resolution: the repo now contains hard benchmark evidence for the exact bottleneck. The remaining unblock is a fundamentally faster exact attention/FFN engine or hardware with much higher matrix bandwidth; more disk/cache tweaks will not reach the target.
+
+## PLM-13 Exact CPU Local Speed / Faster Tail Changed Close Top-k
+- Symptom: after native DLLs were unblocked, `tests\test_native_ds_forward.py::test_ds_forward_decode_bridge_copies_real_deepseek_topk_logits` failed because the 5th top-k id changed from the strict streamed-tail baseline to a close alternative.
+- Root cause: the earlier wider `65536` row tail default and whole-matrix full-cache top-k changed floating-point accumulation/chunk ordering enough to reorder a close 5th logit.
+- Fix: restore the exact `8192` row tail default and make the full `lm_head` cache feed the same chunked top-k merge path instead of a single whole-matrix top-k. Focused native bridge and FP8 runtime tests pass, and then the full suite passed with `493 passed, 2 skipped`.

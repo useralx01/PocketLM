@@ -65,7 +65,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
     assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
-    assert status["runtime_policy"]["lm_head_chunk_rows"] == 65536
+    assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
     assert status["runtime_policy"]["lm_head_full_cache_max_mb"] == 2048
 
 

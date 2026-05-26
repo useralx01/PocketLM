@@ -1552,46 +1552,42 @@ def run_fp8_decode_tail_topk(
                 _load_fp8_lm_head_full_cached(lm_head_entry) if chunk_rows is None else (None, 0)
             )
             loaded_bytes += cache_loaded_bytes
-            if cached_lm_head is not None:
-                weight = cached_lm_head.to(device=normalized.device)
-                logits = F.linear(normalized, weight.float()).reshape(-1)
-                top_values, top_indices = torch.topk(logits, keep_k)
-                top_values = top_values.cpu()
-                top_indices = top_indices.cpu()
-                chunk_count += 1
-            else:
-                for start in range(0, vocab_size, rows_per_chunk):
-                    end = min(vocab_size, start + rows_per_chunk)
+            for start in range(0, vocab_size, rows_per_chunk):
+                end = min(vocab_size, start + rows_per_chunk)
+                if cached_lm_head is not None:
+                    weight = cached_lm_head[start:end]
+                else:
                     weight = _read_tensor_rows(lm_head_entry, start, end)
                     loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
-                    if (
-                        normalized.device.type == "cpu"
-                        and _native_lm_head_topk_enabled()
-                        and lm_head_entry.dtype in {"BF16", "F16"}
-                        and native_fp16_matmul_available()
-                    ):
-                        native_hidden = normalized_u16.to(dtype=_torch_dtype_for_scale(lm_head_entry.dtype))
-                        values, indices = lm_head_topk_u16(
-                            native_hidden,
-                            weight,
-                            top_k=min(keep_k, int(weight.shape[0])),
-                            token_offset=start,
-                        )
-                    else:
-                        weight = weight.to(device=normalized.device)
-                        chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
-                        values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
-                        values = values.cpu()
-                        indices = indices.cpu() + start
-                    if top_values is None or top_indices is None:
-                        top_values = values
-                        top_indices = indices
-                    else:
-                        merged_values = torch.cat([top_values, values])
-                        merged_indices = torch.cat([top_indices, indices])
-                        top_values, positions = torch.topk(merged_values, keep_k)
-                        top_indices = merged_indices[positions]
-                    chunk_count += 1
+                if (
+                    normalized.device.type == "cpu"
+                    and cached_lm_head is None
+                    and _native_lm_head_topk_enabled()
+                    and lm_head_entry.dtype in {"BF16", "F16"}
+                    and native_fp16_matmul_available()
+                ):
+                    native_hidden = normalized_u16.to(dtype=_torch_dtype_for_scale(lm_head_entry.dtype))
+                    values, indices = lm_head_topk_u16(
+                        native_hidden,
+                        weight,
+                        top_k=min(keep_k, int(weight.shape[0])),
+                        token_offset=start,
+                    )
+                else:
+                    weight = weight.to(device=normalized.device)
+                    chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
+                    values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
+                    values = values.cpu()
+                    indices = indices.cpu() + start
+                if top_values is None or top_indices is None:
+                    top_values = values
+                    top_indices = indices
+                else:
+                    merged_values = torch.cat([top_values, values])
+                    merged_indices = torch.cat([top_indices, indices])
+                    top_values, positions = torch.topk(merged_values, keep_k)
+                    top_indices = merged_indices[positions]
+                chunk_count += 1
 
     token_ids = [] if top_indices is None else [int(value) for value in top_indices.tolist()]
     logits = [] if top_values is None else [float(value) for value in top_values.tolist()]
@@ -1649,29 +1645,26 @@ def run_fp8_decode_tail_topk_batch(
                 _load_fp8_lm_head_full_cached(lm_head_entry) if chunk_rows is None else (None, 0)
             )
             loaded_bytes += cache_loaded_bytes
-            if cached_lm_head is not None:
-                weight = cached_lm_head.to(device=normalized.device)
-                logits = F.linear(normalized, weight.float())
-                top_values, top_indices = torch.topk(logits, keep_k, dim=-1)
-                chunk_count += 1
-            else:
-                for start in range(0, vocab_size, rows_per_chunk):
-                    end = min(vocab_size, start + rows_per_chunk)
+            for start in range(0, vocab_size, rows_per_chunk):
+                end = min(vocab_size, start + rows_per_chunk)
+                if cached_lm_head is not None:
+                    weight = cached_lm_head[start:end]
+                else:
                     weight = _read_tensor_rows(lm_head_entry, start, end)
                     loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
-                    weight = weight.to(device=normalized.device)
-                    chunk_logits = F.linear(normalized, weight.float())
-                    values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
-                    indices = indices + start
-                    if top_values is None or top_indices is None:
-                        top_values = values
-                        top_indices = indices
-                    else:
-                        merged_values = torch.cat([top_values, values], dim=-1)
-                        merged_indices = torch.cat([top_indices, indices], dim=-1)
-                        top_values, positions = torch.topk(merged_values, keep_k, dim=-1)
-                        top_indices = torch.gather(merged_indices, 1, positions)
-                    chunk_count += 1
+                weight = weight.to(device=normalized.device)
+                chunk_logits = F.linear(normalized, weight.float())
+                values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
+                indices = indices + start
+                if top_values is None or top_indices is None:
+                    top_values = values
+                    top_indices = indices
+                else:
+                    merged_values = torch.cat([top_values, values], dim=-1)
+                    merged_indices = torch.cat([top_indices, indices], dim=-1)
+                    top_values, positions = torch.topk(merged_values, keep_k, dim=-1)
+                    top_indices = torch.gather(merged_indices, 1, positions)
+                chunk_count += 1
 
     token_rows: list[list[int]] = []
     logit_rows: list[list[float]] = []
@@ -3039,11 +3032,11 @@ def _rope_cos_sin_for_position(config: dict, *, start_pos: int, qk_rope: int) ->
 def _fp8_lm_head_chunk_rows() -> int:
     raw = os.environ.get("PCKETLM_FP8_LM_HEAD_CHUNK_ROWS", "").strip()
     if not raw:
-        return 65536
+        return 8192
     try:
         return max(1, int(raw))
     except ValueError:
-        return 65536
+        return 8192
 
 
 def _fp8_lm_head_full_cache_max_bytes() -> int:
