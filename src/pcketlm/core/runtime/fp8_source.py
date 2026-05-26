@@ -8,6 +8,7 @@ import json
 import math
 import os
 import time
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -798,7 +799,9 @@ def fp8_attention_weight_cache_snapshot() -> dict:
         "bytes": int(_FP8_ATTENTION_WEIGHT_CACHE_BYTES),
         "max_bytes": int(_fp8_attention_weight_cache_max_bytes()),
         "policy": _fp8_attention_weight_cache_policy(),
+        "roles": list(_fp8_attention_weight_cache_roles()),
         "dequant_hot_cache_enabled": _fp8_dequant_hot_cache_enabled(),
+        "dequant_hot_cache_mmap_enabled": _fp8_dequant_hot_cache_mmap_enabled(),
         **{f"dequant_hot_cache_{key}": int(value) for key, value in _FP8_DEQUANT_HOT_CACHE_STATS.items()},
         **{key: int(value) for key, value in _FP8_ATTENTION_WEIGHT_CACHE_STATS.items()},
     }
@@ -819,6 +822,7 @@ def fp8_mlp_span_cache_snapshot() -> dict:
         "entries": len(_FP8_MLP_SPAN_CACHE),
         "bytes": int(_FP8_MLP_SPAN_CACHE_BYTES),
         "max_bytes": int(_fp8_mlp_span_cache_max_bytes()),
+        "filter": list(_fp8_mlp_span_cache_filters()),
         **{key: int(value) for key, value in _FP8_MLP_SPAN_CACHE_STATS.items()},
     }
 
@@ -904,6 +908,8 @@ def _store_fp8_attention_weight_cache(
 ) -> None:
     if max_bytes <= 0 or loaded.tensor is None or loaded.blockers:
         return
+    if not _fp8_attention_weight_cache_accepts(loaded.weight_name):
+        return
     tensor_bytes = int(loaded.tensor.nelement() * loaded.tensor.element_size())
     if tensor_bytes > max_bytes:
         return
@@ -933,6 +939,15 @@ def _store_fp8_attention_weight_cache(
 
 def _fp8_dequant_hot_cache_enabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _fp8_dequant_hot_cache_mmap_enabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE_MMAP", "").strip().lower() not in {
         "1",
         "true",
         "yes",
@@ -984,8 +999,16 @@ def _load_fp8_dequant_hot_cache(
         if not cache_path.exists() or cache_path.stat().st_size != expected_nbytes:
             _FP8_DEQUANT_HOT_CACHE_STATS["misses"] += 1
             return None
-        tensor = torch.empty(expected_shape, dtype=dtype)
-        if expected_nbytes:
+        if expected_nbytes and _fp8_dequant_hot_cache_mmap_enabled():
+            tensor = torch.from_file(
+                str(cache_path),
+                shared=False,
+                size=expected_nbytes // torch.empty((), dtype=dtype).element_size(),
+                dtype=dtype,
+            ).reshape(expected_shape)
+        else:
+            tensor = torch.empty(expected_shape, dtype=dtype)
+        if expected_nbytes and not _fp8_dequant_hot_cache_mmap_enabled():
             if native_fp16_loader_available():
                 native_read_tensor_bytes(cache_path, 0, expected_nbytes, tensor)
             else:
@@ -999,7 +1022,7 @@ def _load_fp8_dequant_hot_cache(
             shape=list(entry.shape),
             dtype=str(dtype).replace("torch.", ""),
             loaded_nbytes=0,
-            tensor=tensor.contiguous(),
+            tensor=tensor,
             blockers=[],
             ready=True,
         )
@@ -2412,6 +2435,8 @@ def _store_fp8_mlp_span_cache(
     max_bytes = _fp8_mlp_span_cache_max_bytes()
     if max_bytes <= 0:
         return
+    if not _fp8_mlp_span_cache_accepts(tensor_slices.keys()):
+        return
     cache_bytes = int(raw.nelement() * raw.element_size())
     if cache_bytes <= 0 or cache_bytes > max_bytes:
         return
@@ -2469,7 +2494,9 @@ def _read_packed_mlp_full_tensors(
             tensor_slices = location.tensor_slices
         elif _fp8_pack_mmap_spans_enabled():
             span = reader.get_tensor_span_bytes(names)
-            raw = torch.frombuffer(bytearray(span.bytes), dtype=torch.uint8)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="The given buffer is not writable")
+                raw = torch.frombuffer(span.bytes, dtype=torch.uint8)
             tensor_slices = span.tensor_slices
         else:
             raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
@@ -2990,9 +3017,32 @@ def _fp8_attention_weight_cache_max_bytes() -> int:
 
 def _fp8_attention_weight_cache_policy() -> str:
     raw = os.environ.get("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_POLICY", "").strip().lower()
-    if raw in {"prefix", "lru"}:
+    if raw in {"prefix", "lru", "role-prefix"}:
         return raw
     return "prefix"
+
+
+def _fp8_attention_weight_cache_roles() -> tuple[str, ...]:
+    raw = os.environ.get("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_ROLES", "").strip().lower()
+    if not raw:
+        return ()
+    roles: list[str] = []
+    for item in raw.replace(";", ",").split(","):
+        role = item.strip()
+        if not role:
+            continue
+        if not role.endswith(".weight"):
+            role = f"{role}.weight"
+        roles.append(role)
+    return tuple(dict.fromkeys(roles))
+
+
+def _fp8_attention_weight_cache_accepts(weight_name: str) -> bool:
+    roles = _fp8_attention_weight_cache_roles()
+    if not roles:
+        return True
+    lowered = str(weight_name).lower()
+    return any(lowered.endswith(role) for role in roles)
 
 
 def _native_lm_head_topk_enabled() -> bool:
@@ -3087,7 +3137,12 @@ def _fp8_pack_prefetch_workers() -> int:
 
 
 def _fp8_pack_mmap_spans_enabled() -> bool:
-    return os.environ.get("PCKETLM_FP8_PACK_MMAP_SPANS", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _fp8_hot_cache_enabled() -> bool:
@@ -3102,6 +3157,21 @@ def _fp8_mlp_span_cache_max_bytes() -> int:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
         return 0
+
+
+def _fp8_mlp_span_cache_filters() -> tuple[str, ...]:
+    raw = os.environ.get("PCKETLM_FP8_MLP_SPAN_CACHE_FILTER", "").strip().lower()
+    if not raw:
+        return ()
+    return tuple(dict.fromkeys(item.strip() for item in raw.replace(";", ",").split(",") if item.strip()))
+
+
+def _fp8_mlp_span_cache_accepts(names: object) -> bool:
+    filters = _fp8_mlp_span_cache_filters()
+    if not filters:
+        return True
+    joined = "\n".join(str(name).lower() for name in names)
+    return any(item in joined for item in filters)
 
 
 def _fp8_prefill_cache_max_entries() -> int:

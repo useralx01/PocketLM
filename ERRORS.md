@@ -458,3 +458,9 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Evidence: 32-layer `8192 MB` prefix row was `126.586s` versus `125.053s` for `4096 MB`, despite more attention-cache hits. Tail rose to `4.134s` and FFN rose to `48.854s`.
 - Root cause: the larger cache adds memory pressure on this 16 GB laptop. More attention residency is not automatically faster when it squeezes the rest of the exact path.
 - Fix: keep the default at `4096 MB`.
+
+## PLM-13 Exact CPU Local Speed / Native Flash MLA Default Rejected
+- Symptom: enabling native flash MLA by default made the full 62-layer strict proof produce top ids `[223, 260, 343, 14, 270]` instead of the exact baseline `[223, 260, 343, 14, 295]`.
+- Evidence: `state\phase-exact-cpu-goal-mmap-flashmla-full62.json` completed all `0-61` layers and improved wall time to `250.304s`, but changed the close 5th token.
+- Root cause: the flash MLA kernel uses a different floating-point path/order than the strict PyTorch materialized attention path, enough to reorder a close 5th logit.
+- Fix: keep flash MLA opt-in only. The exact default uses mmap hot-cache plus mmap packed spans and preserves `[223, 260, 343, 14, 295]`.

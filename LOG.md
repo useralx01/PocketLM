@@ -6382,3 +6382,13 @@ Result: 297 passed in 21.83s
 - Real 4 GB prefix-cache 32-layer row: `state\phase-exact-cpu-goal-attn-prefix4096-8-32.json` -> `125.053s`, same generated/top ids as default, attention `65.160s`, FFN `42.279s`, `62` RAM attention-cache hits, `0` evictions, `0` scattered reads.
 - Real 4 GB prefix-cache full 62-layer row: `state\phase-exact-cpu-goal-attn-prefix4096-full62.json` -> `275.327s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, all layers `0-61` executed, tail `0.849s`, attention `157.887s`, FFN `84.399s`, `62` RAM attention-cache hits, `0` evictions, `0` scattered reads.
 - Outcome: meaningful exact full-model win from `386.038s` to `275.327s`, but still far above `<=10s/token`. Remaining wall is still exact attention/FFN compute and memory bandwidth.
+
+## PLM-13 Exact CPU Local Speed / Mmap Hot Cache And Pack Spans
+- Added mmap-backed reads for dequantized FP8 attention hot-cache hits. This avoids copying every RAM-cache miss from the `.bin` hot cache into a fresh tensor before compute.
+- Changed packed MLP span reads to use mmap-backed `memoryview` tensors by default instead of copying the span into a `bytearray`. The kill switch is `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1`.
+- Rejected native flash MLA as a default even though it was slightly faster on the 16-layer row, because the full 62-layer proof changed the close 5th top-k token from `295` to `270`.
+- Rejected `PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB=6144` as a default: 32-layer attention improved, but generated-token wall got worse (`116.199s` vs `112.232s`) from RAM pressure.
+- Rejected shared-expert-only MLP span RAM cache as a default: 16-layer generated-token wall worsened (`46.369s` vs `33.587s`).
+- Real 16-layer mmap+packspan row: `state\phase-exact-cpu-goal-mmap-hotcache-packspan-layers16.json` -> generated-token step `33.587s`, generated `[0, 28191]`, top ids `[28191, 96887, 37036, 118131, 71878]`, attention `13.202s`, FFN `14.713s`, `0` scattered reads.
+- Real full 62-layer mmap+packspan row: `state\phase-exact-cpu-goal-mmap-hotcache-packspan-full62.json` -> `245.935s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, all layers `0-61` executed, tail `1.130s`, attention `141.500s`, FFN `75.724s`, `0` scattered reads.
+- Outcome: exact full-model win from `275.327s` to `245.935s`, with unchanged generated token/top-k and no skipped layers. Remaining wall is still attention/FFN CPU memory bandwidth.

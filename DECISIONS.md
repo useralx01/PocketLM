@@ -1685,3 +1685,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Stop pursuing exact CPU disk/cache tweaks as the main DeepSeek unblock. The full 62-layer proof has `0` scattered reads and tail `1.327s`; the remaining wall is attention `186.970s` and FFN `167.654s`.
 - Default the FP8 attention cache to `4096 MB` with `prefix` policy after the full 62-layer exact row improved from `386.038s` to `275.327s`. This is still not enough for the target, but it is a real exact win and better than the old no-RAM-cache default.
 - Do not raise the default to `8192 MB` on this laptop. It adds RAM pressure and did not improve the measured 32-layer total despite more attention hits.
+- Default dequantized FP8 attention hot-cache hits to `torch.from_file` mmap tensors. The full 62-layer top-k stayed `[223, 260, 343, 14, 295]`, and generated-token wall improved to `245.935s`.
+- Default packed MLP span reads to mmap-backed buffers. The old copy path remains behind `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1` for debugging.
+- Keep native flash MLA opt-in only. It is exact enough for smaller rows but changed the close full-model 5th top-k token in the strict proof, so it is not acceptable as the main exact path.
+- Keep the attention RAM cache at `4096 MB`; `6144 MB` was tested and rejected because total generated-token wall regressed on the 32-layer row.

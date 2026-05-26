@@ -74,11 +74,19 @@ class FP8PackReader:
         }
 
     def close(self) -> None:
-        while self._mmaps:
-            _index, mapped = self._mmaps.popitem()
-            mapped.close()
-        while self._files:
-            _index, handle = self._files.popitem()
+        for index, mapped in list(self._mmaps.items()):
+            try:
+                mapped.close()
+            except BufferError:
+                continue
+            self._mmaps.pop(index, None)
+            handle = self._files.pop(index, None)
+            if handle is not None:
+                handle.close()
+        for index, handle in list(self._files.items()):
+            if index in self._mmaps:
+                continue
+            self._files.pop(index, None)
             handle.close()
 
     def telemetry(self) -> dict:

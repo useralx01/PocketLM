@@ -735,3 +735,4 @@ PLM-13 exact CPU phase: meaningful lossless speed phase complete; repeated 8-lay
 PLM-13 exact CPU blocker proof: exact full `lm_head` cache reduces tail to `1.611s`, but cached exact 32-layer decode is still `234.253s` with attention `146.016s` and FFN `58.025s`; full local CPU DeepSeek `<=10s/token` is blocked by matrix compute, not storage.
 PLM-13 exact CPU final: native DLLs are unblocked and tests pass (`493 passed, 2 skipped`), but exact full 62-layer DeepSeek V3 cached next token is `386.038s`; the blocker is attention/FFN compute bandwidth, not disk or tail.
 PLM-13 exact CPU latest: prefix RAM attention cache is now default and cuts full 62-layer cached token to `275.327s`, still blocked far above `<=10s/token` by attention/FFN compute bandwidth.
+PLM-13 exact CPU latest: mmap attention hot-cache + mmap packed MLP spans cut full 62-layer cached token to `245.935s` with exact top-k preserved; still far above `<=10s/token`.
