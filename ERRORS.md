@@ -434,3 +434,9 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: full test suite failed after the notebook switched from `tools/gpu_smoke.py` to `tools/deepseek_gpu_validate.py`.
 - Cause: `tests/test_gpu_notebook.py` still asserted the old smoke-only command.
 - Fix: update the notebook test to require the new real DeepSeek validator command. Rerun full suite passed: `477 passed, 2 skipped`.
+
+## PLM-13 Exact CPU Local Speed / Native DLL Blocked
+- Symptom: full suite now fails native availability checks while focused FP8 runtime tests pass.
+- Evidence: `python -m pytest tests\ -q` returned `469 passed, 23 failed, 2 skipped in 73.20s`; failing tests report `[WinError 4551] An Application Control policy has blocked this file` for native DLL loading.
+- Root cause: Windows Application Control is blocking locally rebuilt/native DLLs in this machine state, including loader/matmul paths used by unrelated native tests.
+- Fix status: not fixed in this phase. `Unblock-File` was attempted on `src\pcketlm\native\*.dll`, but `native_fp16_loader_available()` and `native_fp16_matmul_available()` still returned `False`. The exact FP8 changes were validated with focused tests, and packed reads now have a Python file-read fallback when the native loader is unavailable. The full-suite blocker requires restoring/unblocking the native DLLs, not changing FP8 prefix-cache logic.

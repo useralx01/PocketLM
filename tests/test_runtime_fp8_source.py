@@ -6,7 +6,9 @@ import torch
 
 import pcketlm.core.runtime.fp8_source as fp8_source
 from pcketlm.core.runtime.fp8_source import (
+    clear_fp8_prefill_cache,
     dequantize_fp8_block_scaled,
+    fp8_prefill_cache_snapshot,
     fp8_source_status,
     load_fp8_token_embedding,
     run_fp8_decode_tail_topk,
@@ -61,7 +63,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
     assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
-    assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
+    assert status["runtime_policy"]["lm_head_chunk_rows"] == 65536
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:
@@ -400,6 +402,27 @@ def test_run_fp8_decode_loop_can_prepare_final_cache_when_requested(tmp_path: Pa
     assert result.step_summaries[-1]["phase"] == "generate"
     assert result.step_summaries[-1]["executed_layers"] == [0]
     assert result.step_summaries[-1]["cache_sequence_lengths"] == {"0": 3}
+
+
+def test_run_fp8_decode_loop_reuses_exact_prefill_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    clear_fp8_prefill_cache()
+
+    first = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+    second = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+    snapshot = fp8_prefill_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.generated_token_ids == second.generated_token_ids
+    assert first.final_top_token_ids == second.final_top_token_ids
+    assert first.step_summaries[0]["phase"] == "prompt_prefill"
+    assert first.step_summaries[0]["cache_hit"] is False
+    assert second.step_summaries[0]["phase"] == "prompt_prefill_cache"
+    assert second.step_summaries[0]["cache_hit"] is True
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
 
 
 def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monkeypatch) -> None:

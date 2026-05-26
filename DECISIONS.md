@@ -1670,3 +1670,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Treat Kaggle remote-range runs as GPU math and paging evidence, not final product completion. They prove real DeepSeek FP8 layers and resident/paged behavior on Tesla T4, but they do not prove the local 688 GB FP8 pack can be read fast on that worker.
 - Add a standalone GPU readiness gate instead of hiding hardware checks inside validation scripts. `tools\deepseek_gpu_ready.py` is the operator-facing answer: catalog ready + FP8 pack ready + CUDA ready means run the local pager; missing CUDA is a clean hardware blocker, not a code blocker.
 - Treat Kaggle's official DeepSeek V3 model source as a validation input, not the final runtime storage answer. It mounts the full FP8 artifact and builds the catalog correctly, but measured one-layer local pager timing is still dominated by input/tail reads and projects orders of magnitude above `<=2s/token`.
+
+## PLM-13 Exact CPU Local Speed
+- Use exact in-process prompt prefill reuse for repeated local DeepSeek sessions with identical model/source/pack/prompt/window/tail/dtype. This is a valid lossless session acceleration because the cached object is cloned KV state plus top-k evidence from the exact prior prefill, not a guessed answer or skipped layer.
+- Keep FP8 prefill cache bounded by `PCKETLM_FP8_PREFILL_CACHE_ENTRIES`, default `4`, and allow `0` to disable it for equivalence/debug runs.
+- Default DeepSeek dense FP8 MLP to the existing native full-MLP path up to `512 MB`, because real dense layer measurements show the old `192 MB` cap forced a much slower exact fallback.
+- Default streamed FP8 `lm_head` chunks to `65536` rows. It is memory-heavier but exact, and the direct tail benchmark showed the best local timing among tested chunk sizes while preserving top-k.
+- Treat the current CPU blocker as measured compute bandwidth, not storage: the latest cached 8-layer next-token row has `0` scattered reads and still spends `17.585s` in tail, `10.019s` in FFN, and `5.241s` in attention.

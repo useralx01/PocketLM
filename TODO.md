@@ -176,3 +176,5 @@ Done: PLM-13 online Kaggle CUDA smoke and real DeepSeek remote resident/paged va
 Done: PLM-13 GPU readiness gate for CUDA + local DeepSeek catalog + local FP8 pack.
 - PLM-13 next: provide a CUDA worker with direct access to the `688 GB` local FP8 pack/source, then run the local resident-pager decode loop there.
 - PLM-13 next: validate whether local pager prefetch overlaps pack/source reads with CUDA compute on that direct-access worker.
+- DeepSeek exact CPU next: reduce the streamed `lm_head` tail, now `17.585s` of the cached 8-layer next-token row, using exact lossless caching or a native/top-k tail kernel that proves identical top-k.
+- DeepSeek exact CPU next: reduce per-layer attention/FFN compute, now `5.241s` attention and `10.019s` FFN on the cached 8-layer next-token row; storage is not the current blocker because the row has `0` scattered reads.

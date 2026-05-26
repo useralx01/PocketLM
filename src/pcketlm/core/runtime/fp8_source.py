@@ -39,7 +39,7 @@ from pcketlm.native import (
     native_fp8_mlp_many_available,
     native_read_tensor_bytes,
 )
-from pcketlm.core.runtime.fp8_pack import fp8_pack_telemetry, reader_for_model_dir, record_scattered_read
+from pcketlm.core.runtime.fp8_pack import fp8_pack_enabled, fp8_pack_telemetry, reader_for_model_dir, record_scattered_read
 from pcketlm.core.storage.paths import state_root
 
 _FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTensor]" = OrderedDict()
@@ -49,6 +49,8 @@ _FP8_DEQUANT_HOT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "read_error
 _FP8_MLP_SPAN_CACHE: "OrderedDict[str, tuple[torch.Tensor, dict[str, tuple[int, int]]]]" = OrderedDict()
 _FP8_MLP_SPAN_CACHE_BYTES = 0
 _FP8_MLP_SPAN_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FP8_PREFILL_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_FP8_PREFILL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FUSED_DS_ATTENTION_SESSIONS: dict[tuple[str, int, int, int], DeepSeekNativeSession] = {}
 _FUSED_DS_ATTENTION_STATS = {"calls": 0, "fallbacks": 0, "errors": 0}
 from pcketlm.core.runtime.tensor_catalog import (
@@ -504,6 +506,7 @@ class FP8DecodeLoopResult:
     next_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     attention_weight_cache: dict = field(default_factory=dict)
     mlp_span_cache: dict = field(default_factory=dict)
+    prefill_cache: dict = field(default_factory=dict)
     fp8_pack: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
@@ -524,6 +527,7 @@ class FP8DecodeLoopResult:
             },
             "attention_weight_cache": dict(self.attention_weight_cache),
             "mlp_span_cache": dict(self.mlp_span_cache),
+            "prefill_cache": dict(self.prefill_cache),
             "fp8_pack": dict(self.fp8_pack),
             "blockers": list(self.blockers),
             "ready": self.ready,
@@ -589,6 +593,7 @@ def fp8_source_status(model_id: str) -> dict:
             "native_lm_head_topk": _native_lm_head_topk_enabled(),
             "lm_head_chunk_rows": _fp8_lm_head_chunk_rows(),
             "moe_expert_workers": _fp8_moe_expert_workers(),
+            "prefill_cache_entries": _fp8_prefill_cache_max_entries(),
         },
         "fp8_weight_count": catalog.fp8_weight_count,
         "fp8_scale_count": catalog.fp8_scale_count,
@@ -809,6 +814,22 @@ def fp8_mlp_span_cache_snapshot() -> dict:
         "bytes": int(_FP8_MLP_SPAN_CACHE_BYTES),
         "max_bytes": int(_fp8_mlp_span_cache_max_bytes()),
         **{key: int(value) for key, value in _FP8_MLP_SPAN_CACHE_STATS.items()},
+    }
+
+
+def clear_fp8_prefill_cache() -> None:
+    """Clear exact in-process FP8 prompt prefill reuse."""
+    _FP8_PREFILL_CACHE.clear()
+    for key in _FP8_PREFILL_CACHE_STATS:
+        _FP8_PREFILL_CACHE_STATS[key] = 0
+
+
+def fp8_prefill_cache_snapshot() -> dict:
+    """Return exact prompt prefill cache telemetry."""
+    return {
+        "entries": len(_FP8_PREFILL_CACHE),
+        "max_entries": int(_fp8_prefill_cache_max_entries()),
+        **{key: int(value) for key, value in _FP8_PREFILL_CACHE_STATS.items()},
     }
 
 
@@ -1939,8 +1960,7 @@ def _run_fp8_decode_loop_impl(
         blockers.append("At least one token id is required.")
 
     if not blockers and len(prompt) > 1 and _fp8_prompt_prefill_enabled():
-        prefill_start = time.perf_counter()
-        prefill = run_fp8_prompt_prefill(
+        prefill_key = _fp8_prefill_cache_key(
             model_id,
             prompt,
             start_layer=start_layer,
@@ -1948,30 +1968,66 @@ def _run_fp8_decode_loop_impl(
             include_tail=int(max_new_tokens) > 0,
             dtype=dtype,
         )
-        summaries.append(
-            {
-                "position": 0,
-                "phase": "prompt_prefill",
-                "token_ids": list(prompt),
-                "ready": bool(prefill.ready),
-                "executed_layers": list(prefill.executed_layers),
-                "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
-                "layer_summaries": [dict(item) for item in prefill.step_summaries],
-                "tail_elapsed_seconds": float(prefill.tail_elapsed_seconds),
-                "cache_sequence_lengths": {
-                    str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
-                },
-                "elapsed_seconds": float(time.perf_counter() - prefill_start),
-                "blockers": list(prefill.blockers),
-            }
-        )
-        blockers.extend(prefill.blockers)
-        if prefill.ready:
-            caches = dict(prefill.next_kv_caches)
-            if prefill.tail is not None:
-                final_top_ids = list(prefill.tail.top_token_ids)
-                final_top_logits = list(prefill.tail.top_logits)
+        cached_prefill = _get_fp8_prefill_cache(prefill_key)
+        if cached_prefill is not None:
+            caches = _clone_kv_caches(cached_prefill["next_kv_caches"])
+            final_top_ids = list(cached_prefill["tail_top_token_ids"])
+            final_top_logits = list(cached_prefill["tail_top_logits"])
             position = len(prompt)
+            summaries.append(
+                {
+                    "position": 0,
+                    "phase": "prompt_prefill_cache",
+                    "token_ids": list(prompt),
+                    "ready": True,
+                    "executed_layers": list(cached_prefill["executed_layers"]),
+                    "tail_top_token_ids": list(final_top_ids),
+                    "layer_summaries": [],
+                    "tail_elapsed_seconds": 0.0,
+                    "cache_sequence_lengths": {
+                        str(key): int(value[0].shape[1]) for key, value in caches.items()
+                    },
+                    "elapsed_seconds": 0.0,
+                    "cache_hit": True,
+                    "blockers": [],
+                }
+            )
+        else:
+            prefill_start = time.perf_counter()
+            prefill = run_fp8_prompt_prefill(
+                model_id,
+                prompt,
+                start_layer=start_layer,
+                layer_count=layer_count,
+                include_tail=int(max_new_tokens) > 0,
+                dtype=dtype,
+            )
+            summaries.append(
+                {
+                    "position": 0,
+                    "phase": "prompt_prefill",
+                    "token_ids": list(prompt),
+                    "ready": bool(prefill.ready),
+                    "executed_layers": list(prefill.executed_layers),
+                    "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
+                    "layer_summaries": [dict(item) for item in prefill.step_summaries],
+                    "tail_elapsed_seconds": float(prefill.tail_elapsed_seconds),
+                    "cache_sequence_lengths": {
+                        str(key): int(value[0].shape[1]) for key, value in prefill.next_kv_caches.items()
+                    },
+                    "elapsed_seconds": float(time.perf_counter() - prefill_start),
+                    "cache_hit": False,
+                    "blockers": list(prefill.blockers),
+                }
+            )
+            blockers.extend(prefill.blockers)
+            if prefill.ready:
+                caches = dict(prefill.next_kv_caches)
+                if prefill.tail is not None:
+                    final_top_ids = list(prefill.tail.top_token_ids)
+                    final_top_logits = list(prefill.tail.top_logits)
+                _store_fp8_prefill_cache(prefill_key, prefill)
+                position = len(prompt)
 
     while not blockers and position < len(prompt) + max(0, int(max_new_tokens)):
         if position < len(prompt):
@@ -2056,6 +2112,7 @@ def _run_fp8_decode_loop_impl(
         next_kv_caches=caches,
         attention_weight_cache=fp8_attention_weight_cache_snapshot(),
         mlp_span_cache=fp8_mlp_span_cache_snapshot(),
+        prefill_cache=fp8_prefill_cache_snapshot(),
         fp8_pack=fp8_pack_telemetry(load_tensor_catalog(model_id).model_dir),
         blockers=blockers,
         ready=not blockers and position >= len(prompt),
@@ -2191,16 +2248,20 @@ def _read_packed_tensor_to_tensor(
             return None
         native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, out)
         return out
-    packed = _read_packed_tensor_slice(entry, int(relative_offset), int(byte_length))
-    if packed is None:
+    try:
+        location = reader.get_tensor_slice_location(entry.tensor_name, int(relative_offset), int(byte_length))
+    except (KeyError, ValueError):
         return None
-    return torch.frombuffer(bytearray(packed), dtype=dtype).reshape(shape).clone()
+    with location.path.open("rb") as handle:
+        handle.seek(int(location.byte_offset))
+        payload = handle.read(int(location.byte_length))
+    return torch.frombuffer(bytearray(payload), dtype=dtype).reshape(shape).clone()
 
 
 def _read_tensor_bytes(entry: TensorCatalogEntry) -> bytes:
     packed = _read_packed_tensor(entry)
     if packed is not None:
-        return packed
+        return bytes(packed)
     record_scattered_read(entry.shard_path.parent, entry.data_nbytes)
     base_offset = _safetensors_data_base_offset(str(entry.shard_path.resolve()), _path_mtime_ns(entry.shard_path))
     with entry.shard_path.open("rb") as handle:
@@ -2332,8 +2393,6 @@ def _read_packed_mlp_full_tensors(
     down: TensorCatalogEntry,
     down_scale: TensorCatalogEntry,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    if not native_fp16_loader_available():
-        return None
     reader = reader_for_model_dir(gate.shard_path.parent)
     if reader is None:
         return None
@@ -2359,7 +2418,12 @@ def _read_packed_mlp_full_tensors(
             pass
         elif cache_hit and cache_path is not None:
             raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
-            native_read_tensor_bytes(cache_path, 0, int(location.byte_length), raw)
+            if native_fp16_loader_available():
+                native_read_tensor_bytes(cache_path, 0, int(location.byte_length), raw)
+            else:
+                with cache_path.open("rb") as handle:
+                    payload = handle.read(int(location.byte_length))
+                raw = torch.frombuffer(bytearray(payload), dtype=torch.uint8).contiguous()
             tensor_slices = location.tensor_slices
         elif _fp8_pack_mmap_spans_enabled():
             span = reader.get_tensor_span_bytes(names)
@@ -2367,7 +2431,13 @@ def _read_packed_mlp_full_tensors(
             tensor_slices = span.tensor_slices
         else:
             raw = torch.empty((int(location.byte_length),), dtype=torch.uint8)
-            native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, raw)
+            if native_fp16_loader_available():
+                native_read_tensor_bytes(location.path, location.byte_offset, location.byte_length, raw)
+            else:
+                with location.path.open("rb") as handle:
+                    handle.seek(int(location.byte_offset))
+                    payload = handle.read(int(location.byte_length))
+                raw = torch.frombuffer(bytearray(payload), dtype=torch.uint8).contiguous()
             tensor_slices = location.tensor_slices
         if not cache_hit and cache_path is not None and _fp8_hot_cache_enabled():
             _write_fp8_hot_cache(cache_path, raw)
@@ -2850,11 +2920,11 @@ def _native_fp8_linear_enabled() -> bool:
 def _native_fp8_mlp_full_max_bytes() -> int:
     raw = os.environ.get("PCKETLM_NATIVE_FP8_MLP_FULL_MAX_MB", "").strip()
     if not raw:
-        return 192 * 1024 * 1024
+        return 512 * 1024 * 1024
     try:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
-        return 192 * 1024 * 1024
+        return 512 * 1024 * 1024
 
 
 def _native_fp8_mlp_many_enabled() -> bool:
@@ -2923,11 +2993,11 @@ def _rope_cos_sin_for_position(config: dict, *, start_pos: int, qk_rope: int) ->
 def _fp8_lm_head_chunk_rows() -> int:
     raw = os.environ.get("PCKETLM_FP8_LM_HEAD_CHUNK_ROWS", "").strip()
     if not raw:
-        return 8192
+        return 65536
     try:
         return max(1, int(raw))
     except ValueError:
-        return 8192
+        return 65536
 
 
 def _fp8_moe_expert_workers() -> int:
@@ -2966,6 +3036,73 @@ def _fp8_mlp_span_cache_max_bytes() -> int:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
         return 0
+
+
+def _fp8_prefill_cache_max_entries() -> int:
+    raw = os.environ.get("PCKETLM_FP8_PREFILL_CACHE_ENTRIES", "").strip()
+    if not raw:
+        return 4
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 4
+
+
+def _fp8_prefill_cache_key(
+    model_id: str,
+    token_ids: list[int],
+    *,
+    start_layer: int,
+    layer_count: int,
+    include_tail: bool,
+    dtype: torch.dtype,
+) -> tuple:
+    catalog = load_tensor_catalog(model_id)
+    return (
+        str(model_id),
+        str(catalog.model_dir),
+        bool(fp8_pack_enabled()),
+        tuple(int(value) for value in token_ids),
+        int(start_layer),
+        int(layer_count),
+        bool(include_tail),
+        str(dtype).replace("torch.", ""),
+    )
+
+
+def _clone_kv_caches(caches: dict[int, tuple[torch.Tensor, torch.Tensor]]) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+    return {
+        int(layer): (kv.detach().clone().contiguous(), pe.detach().clone().contiguous())
+        for layer, (kv, pe) in caches.items()
+    }
+
+
+def _get_fp8_prefill_cache(key: tuple) -> dict | None:
+    if _fp8_prefill_cache_max_entries() <= 0:
+        return None
+    cached = _FP8_PREFILL_CACHE.get(key)
+    if cached is None:
+        _FP8_PREFILL_CACHE_STATS["misses"] += 1
+        return None
+    _FP8_PREFILL_CACHE.move_to_end(key)
+    _FP8_PREFILL_CACHE_STATS["hits"] += 1
+    return cached
+
+
+def _store_fp8_prefill_cache(key: tuple, prefill: FP8PromptPrefillResult) -> None:
+    max_entries = _fp8_prefill_cache_max_entries()
+    if max_entries <= 0 or not prefill.ready:
+        return
+    while _FP8_PREFILL_CACHE and len(_FP8_PREFILL_CACHE) >= max_entries:
+        _FP8_PREFILL_CACHE.popitem(last=False)
+        _FP8_PREFILL_CACHE_STATS["evictions"] += 1
+    _FP8_PREFILL_CACHE[key] = {
+        "executed_layers": list(prefill.executed_layers),
+        "tail_top_token_ids": [] if prefill.tail is None else list(prefill.tail.top_token_ids),
+        "tail_top_logits": [] if prefill.tail is None else list(prefill.tail.top_logits),
+        "next_kv_caches": _clone_kv_caches(prefill.next_kv_caches),
+    }
+    _FP8_PREFILL_CACHE_STATS["stores"] += 1
 
 
 def _fp8_hot_cache_path(entry: TensorCatalogEntry, names: list[str]) -> Path | None:
