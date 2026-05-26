@@ -6374,3 +6374,11 @@ Result: 297 passed in 21.83s
 - Real exact scaling after native unblock, default path: `state\phase-exact-cpu-goal-native-unblocked-scaling-summary.json` -> 16 layers `66.503s`, 32 layers `143.486s`, both with `0` scattered reads and exact generated/top-k evidence.
 - Real exact full 62-layer proof: `state\phase-exact-cpu-goal-native-unblocked-full62-maxnew2.json` -> ready `true`, all layers `0-61` executed, cached next visible token `386.038s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, tail `1.327s`, attention `186.970s`, FFN `167.654s`, `0` scattered reads.
 - Final blocker: the exact CPU-only full DeepSeek V3 path is blocked by attention/FFN matrix compute bandwidth, not disk, not tail streaming, and not native DLL loading. The first target `<=10s/token` is not reachable on this CPU-only laptop without a fundamentally faster exact attention/FFN engine or stronger hardware.
+
+## PLM-13 Exact CPU Local Speed / Prefix Attention Cache
+- Added a prefix-preserving RAM attention cache policy. Unlike the older LRU behavior, it fills with the earliest attention weights during prefill and does not evict them when later layers stream through, so generation gets real hits for the front of the model.
+- Made the default FP8 attention cache `4096 MB` with `prefix` policy. This is the best proven exact local CPU setting so far; it spends RAM to avoid repeated disk-backed dequant-cache reads for early attention layers.
+- Rejected `8192 MB` prefix cache as a default: the 32-layer row reduced attention more but increased tail/FFN and did not improve total wall time, likely from RAM pressure.
+- Real 4 GB prefix-cache 32-layer row: `state\phase-exact-cpu-goal-attn-prefix4096-8-32.json` -> `125.053s`, same generated/top ids as default, attention `65.160s`, FFN `42.279s`, `62` RAM attention-cache hits, `0` evictions, `0` scattered reads.
+- Real 4 GB prefix-cache full 62-layer row: `state\phase-exact-cpu-goal-attn-prefix4096-full62.json` -> `275.327s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, all layers `0-61` executed, tail `0.849s`, attention `157.887s`, FFN `84.399s`, `62` RAM attention-cache hits, `0` evictions, `0` scattered reads.
+- Outcome: meaningful exact full-model win from `386.038s` to `275.327s`, but still far above `<=10s/token`. Remaining wall is still exact attention/FFN compute and memory bandwidth.

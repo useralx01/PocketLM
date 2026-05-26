@@ -452,3 +452,9 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Symptom: after native DLLs were unblocked, `tests\test_native_ds_forward.py::test_ds_forward_decode_bridge_copies_real_deepseek_topk_logits` failed because the 5th top-k id changed from the strict streamed-tail baseline to a close alternative.
 - Root cause: the earlier wider `65536` row tail default and whole-matrix full-cache top-k changed floating-point accumulation/chunk ordering enough to reorder a close 5th logit.
 - Fix: restore the exact `8192` row tail default and make the full `lm_head` cache feed the same chunked top-k merge path instead of a single whole-matrix top-k. Focused native bridge and FP8 runtime tests pass, and then the full suite passed with `493 passed, 2 skipped`.
+
+## PLM-13 Exact CPU Local Speed / 8 GB Prefix Cache Rejected
+- Symptom: increasing prefix RAM attention cache from `4096 MB` to `8192 MB` did not improve total wall time.
+- Evidence: 32-layer `8192 MB` prefix row was `126.586s` versus `125.053s` for `4096 MB`, despite more attention-cache hits. Tail rose to `4.134s` and FFN rose to `48.854s`.
+- Root cause: the larger cache adds memory pressure on this 16 GB laptop. More attention residency is not automatically faster when it squeezes the rest of the exact path.
+- Fix: keep the default at `4096 MB`.

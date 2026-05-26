@@ -797,6 +797,7 @@ def fp8_attention_weight_cache_snapshot() -> dict:
         "entries": len(_FP8_ATTENTION_WEIGHT_CACHE),
         "bytes": int(_FP8_ATTENTION_WEIGHT_CACHE_BYTES),
         "max_bytes": int(_fp8_attention_weight_cache_max_bytes()),
+        "policy": _fp8_attention_weight_cache_policy(),
         "dequant_hot_cache_enabled": _fp8_dequant_hot_cache_enabled(),
         **{f"dequant_hot_cache_{key}": int(value) for key, value in _FP8_DEQUANT_HOT_CACHE_STATS.items()},
         **{key: int(value) for key, value in _FP8_ATTENTION_WEIGHT_CACHE_STATS.items()},
@@ -907,6 +908,8 @@ def _store_fp8_attention_weight_cache(
     if tensor_bytes > max_bytes:
         return
     global _FP8_ATTENTION_WEIGHT_CACHE_BYTES
+    if _fp8_attention_weight_cache_policy() == "prefix" and _FP8_ATTENTION_WEIGHT_CACHE_BYTES + tensor_bytes > max_bytes:
+        return
     while _FP8_ATTENTION_WEIGHT_CACHE and _FP8_ATTENTION_WEIGHT_CACHE_BYTES + tensor_bytes > max_bytes:
         _old_key, old_value = _FP8_ATTENTION_WEIGHT_CACHE.popitem(last=False)
         if old_value.tensor is not None:
@@ -2978,11 +2981,18 @@ def _native_fp8_mlp_many_enabled() -> bool:
 def _fp8_attention_weight_cache_max_bytes() -> int:
     raw = os.environ.get("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "").strip()
     if not raw:
-        return 0
+        return 4096 * 1024 * 1024
     try:
         return max(0, int(float(raw) * 1024 * 1024))
     except ValueError:
-        return 0
+        return 4096 * 1024 * 1024
+
+
+def _fp8_attention_weight_cache_policy() -> str:
+    raw = os.environ.get("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_POLICY", "").strip().lower()
+    if raw in {"prefix", "lru"}:
+        return raw
+    return "prefix"
 
 
 def _native_lm_head_topk_enabled() -> bool:

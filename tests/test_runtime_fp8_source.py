@@ -64,7 +64,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["layer_count_source"] == "catalog"
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
-    assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
+    assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 4096 * 1024 * 1024
     assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
     assert status["runtime_policy"]["lm_head_full_cache_max_mb"] == 2048
 
@@ -497,6 +497,40 @@ def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatc
     assert snapshot["stores"] >= 5
     assert snapshot["hits"] >= 5
     assert second.loaded_weight_bytes == 0
+
+
+def test_fp8_attention_cache_prefix_policy_keeps_early_weights(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    fp8_source.clear_fp8_attention_weight_cache()
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "0.0001")
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_POLICY", "prefix")
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    first = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    second = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert snapshot["policy"] == "prefix"
+    assert snapshot["entries"] > 0
+    assert snapshot["evictions"] == 0
+    assert snapshot["hits"] > 0
 
 
 def test_fp8_attention_materialized_reuses_dequant_hot_cache(tmp_path: Path, monkeypatch) -> None:
