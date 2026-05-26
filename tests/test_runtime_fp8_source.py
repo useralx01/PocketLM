@@ -6,8 +6,10 @@ import torch
 
 import pcketlm.core.runtime.fp8_source as fp8_source
 from pcketlm.core.runtime.fp8_source import (
+    clear_fp8_lm_head_full_cache,
     clear_fp8_prefill_cache,
     dequantize_fp8_block_scaled,
+    fp8_lm_head_full_cache_snapshot,
     fp8_prefill_cache_snapshot,
     fp8_source_status,
     load_fp8_token_embedding,
@@ -64,6 +66,7 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert "native_fp8_mlp" in status["runtime_policy"]
     assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
     assert status["runtime_policy"]["lm_head_chunk_rows"] == 65536
+    assert status["runtime_policy"]["lm_head_full_cache_max_mb"] == 2048
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:
@@ -329,6 +332,28 @@ def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch)
     assert result.chunk_count == 2
     assert result.top_token_ids[0] == 1
     assert result.loaded_lm_head_bytes == 3 * 4 * 2
+
+
+def test_run_fp8_decode_tail_reuses_full_lm_head_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    clear_fp8_lm_head_full_cache()
+    hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.bfloat16)
+
+    first = run_fp8_decode_tail_topk(model_id, hidden, top_k=2)
+    second = run_fp8_decode_tail_topk(model_id, hidden, top_k=2)
+    snapshot = fp8_lm_head_full_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.top_token_ids == second.top_token_ids
+    assert first.top_logits == second.top_logits
+    assert first.chunk_count == 1
+    assert second.chunk_count == 1
+    assert first.loaded_lm_head_bytes == 3 * 4 * 2
+    assert second.loaded_lm_head_bytes == 0
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
 
 
 def test_load_fp8_token_embedding_reads_one_row(tmp_path: Path, monkeypatch) -> None:

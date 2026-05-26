@@ -437,6 +437,13 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 
 ## PLM-13 Exact CPU Local Speed / Native DLL Blocked
 - Symptom: full suite now fails native availability checks while focused FP8 runtime tests pass.
-- Evidence: `python -m pytest tests\ -q` returned `469 passed, 23 failed, 2 skipped in 73.20s`; failing tests report `[WinError 4551] An Application Control policy has blocked this file` for native DLL loading.
+- Evidence: `python -m pytest tests\ -q` returned `470 passed, 23 failed, 2 skipped in 70.02s`; failing tests report `[WinError 4551] An Application Control policy has blocked this file` for native DLL loading.
 - Root cause: Windows Application Control is blocking locally rebuilt/native DLLs in this machine state, including loader/matmul paths used by unrelated native tests.
 - Fix status: not fixed in this phase. `Unblock-File` was attempted on `src\pcketlm\native\*.dll`, but `native_fp16_loader_available()` and `native_fp16_matmul_available()` still returned `False`. The exact FP8 changes were validated with focused tests, and packed reads now have a Python file-read fallback when the native loader is unavailable. The full-suite blocker requires restoring/unblocking the native DLLs, not changing FP8 prefix-cache logic.
+
+## PLM-13 Exact CPU Local Speed / Full Target Blocked By Compute
+- Gate failed: local CPU-only exact DeepSeek V3 still does not reach `<=10s/token`.
+- Evidence: after lossless prefix reuse and full `lm_head` cache, the default cached 8-layer row is `38.967s`; the 16-layer row is `122.077s`; the 32-layer row is `234.253s`.
+- Root cause: exact attention and FFN compute dominate after disk reads and tail streaming are reduced. The 32-layer row has `0` scattered reads, but spends `146.016s` in attention and `58.025s` in FFN.
+- Rejected fixes: native `lm_head` top-k preserved tokens but did not improve timing; 4 GB MLP span cache churned and stayed around `30s`; 4/8/12 CPU thread tuning stayed around `30s`; 4 GB attention cache helped only the 8-layer window and had `0` hits with `265` evictions at 32 layers.
+- Resolution: the repo now contains hard benchmark evidence for the exact bottleneck. The remaining unblock is a fundamentally faster exact attention/FFN engine or hardware with much higher matrix bandwidth; more disk/cache tweaks will not reach the target.

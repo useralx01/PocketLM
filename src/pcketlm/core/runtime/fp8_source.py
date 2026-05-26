@@ -51,6 +51,8 @@ _FP8_MLP_SPAN_CACHE_BYTES = 0
 _FP8_MLP_SPAN_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FP8_PREFILL_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
 _FP8_PREFILL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FP8_LM_HEAD_FULL_CACHE: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+_FP8_LM_HEAD_FULL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FUSED_DS_ATTENTION_SESSIONS: dict[tuple[str, int, int, int], DeepSeekNativeSession] = {}
 _FUSED_DS_ATTENTION_STATS = {"calls": 0, "fallbacks": 0, "errors": 0}
 from pcketlm.core.runtime.tensor_catalog import (
@@ -507,6 +509,7 @@ class FP8DecodeLoopResult:
     attention_weight_cache: dict = field(default_factory=dict)
     mlp_span_cache: dict = field(default_factory=dict)
     prefill_cache: dict = field(default_factory=dict)
+    lm_head_full_cache: dict = field(default_factory=dict)
     fp8_pack: dict = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     ready: bool = False
@@ -528,6 +531,7 @@ class FP8DecodeLoopResult:
             "attention_weight_cache": dict(self.attention_weight_cache),
             "mlp_span_cache": dict(self.mlp_span_cache),
             "prefill_cache": dict(self.prefill_cache),
+            "lm_head_full_cache": dict(self.lm_head_full_cache),
             "fp8_pack": dict(self.fp8_pack),
             "blockers": list(self.blockers),
             "ready": self.ready,
@@ -594,6 +598,7 @@ def fp8_source_status(model_id: str) -> dict:
             "lm_head_chunk_rows": _fp8_lm_head_chunk_rows(),
             "moe_expert_workers": _fp8_moe_expert_workers(),
             "prefill_cache_entries": _fp8_prefill_cache_max_entries(),
+            "lm_head_full_cache_max_mb": round(_fp8_lm_head_full_cache_max_bytes() / (1024 * 1024), 3),
         },
         "fp8_weight_count": catalog.fp8_weight_count,
         "fp8_scale_count": catalog.fp8_scale_count,
@@ -830,6 +835,24 @@ def fp8_prefill_cache_snapshot() -> dict:
         "entries": len(_FP8_PREFILL_CACHE),
         "max_entries": int(_fp8_prefill_cache_max_entries()),
         **{key: int(value) for key, value in _FP8_PREFILL_CACHE_STATS.items()},
+    }
+
+
+def clear_fp8_lm_head_full_cache() -> None:
+    """Clear exact in-process FP8 lm_head full-matrix reuse."""
+    _FP8_LM_HEAD_FULL_CACHE.clear()
+    for key in _FP8_LM_HEAD_FULL_CACHE_STATS:
+        _FP8_LM_HEAD_FULL_CACHE_STATS[key] = 0
+
+
+def fp8_lm_head_full_cache_snapshot() -> dict:
+    """Return exact full lm_head cache telemetry."""
+    cache_bytes = sum(int(tensor.nelement() * tensor.element_size()) for tensor in _FP8_LM_HEAD_FULL_CACHE.values())
+    return {
+        "entries": len(_FP8_LM_HEAD_FULL_CACHE),
+        "bytes": int(cache_bytes),
+        "max_bytes": int(_fp8_lm_head_full_cache_max_bytes()),
+        **{key: int(value) for key, value in _FP8_LM_HEAD_FULL_CACHE_STATS.items()},
     }
 
 
@@ -1525,38 +1548,50 @@ def run_fp8_decode_tail_topk(
         else:
             keep_k = max(1, min(int(top_k), vocab_size))
             rows_per_chunk = max(1, int(_fp8_lm_head_chunk_rows() if chunk_rows is None else chunk_rows))
-            for start in range(0, vocab_size, rows_per_chunk):
-                end = min(vocab_size, start + rows_per_chunk)
-                weight = _read_tensor_rows(lm_head_entry, start, end)
-                loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
-                if (
-                    normalized.device.type == "cpu"
-                    and _native_lm_head_topk_enabled()
-                    and lm_head_entry.dtype in {"BF16", "F16"}
-                    and native_fp16_matmul_available()
-                ):
-                    native_hidden = normalized_u16.to(dtype=_torch_dtype_for_scale(lm_head_entry.dtype))
-                    values, indices = lm_head_topk_u16(
-                        native_hidden,
-                        weight,
-                        top_k=min(keep_k, int(weight.shape[0])),
-                        token_offset=start,
-                    )
-                else:
-                    weight = weight.to(device=normalized.device)
-                    chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
-                    values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
-                    values = values.cpu()
-                    indices = indices.cpu() + start
-                if top_values is None or top_indices is None:
-                    top_values = values
-                    top_indices = indices
-                else:
-                    merged_values = torch.cat([top_values, values])
-                    merged_indices = torch.cat([top_indices, indices])
-                    top_values, positions = torch.topk(merged_values, keep_k)
-                    top_indices = merged_indices[positions]
+            cached_lm_head, cache_loaded_bytes = (
+                _load_fp8_lm_head_full_cached(lm_head_entry) if chunk_rows is None else (None, 0)
+            )
+            loaded_bytes += cache_loaded_bytes
+            if cached_lm_head is not None:
+                weight = cached_lm_head.to(device=normalized.device)
+                logits = F.linear(normalized, weight.float()).reshape(-1)
+                top_values, top_indices = torch.topk(logits, keep_k)
+                top_values = top_values.cpu()
+                top_indices = top_indices.cpu()
                 chunk_count += 1
+            else:
+                for start in range(0, vocab_size, rows_per_chunk):
+                    end = min(vocab_size, start + rows_per_chunk)
+                    weight = _read_tensor_rows(lm_head_entry, start, end)
+                    loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
+                    if (
+                        normalized.device.type == "cpu"
+                        and _native_lm_head_topk_enabled()
+                        and lm_head_entry.dtype in {"BF16", "F16"}
+                        and native_fp16_matmul_available()
+                    ):
+                        native_hidden = normalized_u16.to(dtype=_torch_dtype_for_scale(lm_head_entry.dtype))
+                        values, indices = lm_head_topk_u16(
+                            native_hidden,
+                            weight,
+                            top_k=min(keep_k, int(weight.shape[0])),
+                            token_offset=start,
+                        )
+                    else:
+                        weight = weight.to(device=normalized.device)
+                        chunk_logits = F.linear(normalized, weight.float()).reshape(-1)
+                        values, indices = torch.topk(chunk_logits, min(keep_k, chunk_logits.numel()))
+                        values = values.cpu()
+                        indices = indices.cpu() + start
+                    if top_values is None or top_indices is None:
+                        top_values = values
+                        top_indices = indices
+                    else:
+                        merged_values = torch.cat([top_values, values])
+                        merged_indices = torch.cat([top_indices, indices])
+                        top_values, positions = torch.topk(merged_values, keep_k)
+                        top_indices = merged_indices[positions]
+                    chunk_count += 1
 
     token_ids = [] if top_indices is None else [int(value) for value in top_indices.tolist()]
     logits = [] if top_values is None else [float(value) for value in top_values.tolist()]
@@ -1610,23 +1645,33 @@ def run_fp8_decode_tail_topk_batch(
             blockers.append(f"Hidden size {normalized.shape[-1]} does not match lm_head hidden size {hidden_size}.")
         else:
             keep_k = max(1, min(int(top_k), vocab_size))
-            for start in range(0, vocab_size, rows_per_chunk):
-                end = min(vocab_size, start + rows_per_chunk)
-                weight = _read_tensor_rows(lm_head_entry, start, end)
-                loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
-                weight = weight.to(device=normalized.device)
-                chunk_logits = F.linear(normalized, weight.float())
-                values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
-                indices = indices + start
-                if top_values is None or top_indices is None:
-                    top_values = values
-                    top_indices = indices
-                else:
-                    merged_values = torch.cat([top_values, values], dim=-1)
-                    merged_indices = torch.cat([top_indices, indices], dim=-1)
-                    top_values, positions = torch.topk(merged_values, keep_k, dim=-1)
-                    top_indices = torch.gather(merged_indices, 1, positions)
+            cached_lm_head, cache_loaded_bytes = (
+                _load_fp8_lm_head_full_cached(lm_head_entry) if chunk_rows is None else (None, 0)
+            )
+            loaded_bytes += cache_loaded_bytes
+            if cached_lm_head is not None:
+                weight = cached_lm_head.to(device=normalized.device)
+                logits = F.linear(normalized, weight.float())
+                top_values, top_indices = torch.topk(logits, keep_k, dim=-1)
                 chunk_count += 1
+            else:
+                for start in range(0, vocab_size, rows_per_chunk):
+                    end = min(vocab_size, start + rows_per_chunk)
+                    weight = _read_tensor_rows(lm_head_entry, start, end)
+                    loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
+                    weight = weight.to(device=normalized.device)
+                    chunk_logits = F.linear(normalized, weight.float())
+                    values, indices = torch.topk(chunk_logits, min(keep_k, int(chunk_logits.shape[-1])), dim=-1)
+                    indices = indices + start
+                    if top_values is None or top_indices is None:
+                        top_values = values
+                        top_indices = indices
+                    else:
+                        merged_values = torch.cat([top_values, values], dim=-1)
+                        merged_indices = torch.cat([top_indices, indices], dim=-1)
+                        top_values, positions = torch.topk(merged_values, keep_k, dim=-1)
+                        top_indices = torch.gather(merged_indices, 1, positions)
+                    chunk_count += 1
 
     token_rows: list[list[int]] = []
     logit_rows: list[list[float]] = []
@@ -2113,6 +2158,7 @@ def _run_fp8_decode_loop_impl(
         attention_weight_cache=fp8_attention_weight_cache_snapshot(),
         mlp_span_cache=fp8_mlp_span_cache_snapshot(),
         prefill_cache=fp8_prefill_cache_snapshot(),
+        lm_head_full_cache=fp8_lm_head_full_cache_snapshot(),
         fp8_pack=fp8_pack_telemetry(load_tensor_catalog(model_id).model_dir),
         blockers=blockers,
         ready=not blockers and position >= len(prompt),
@@ -3000,6 +3046,23 @@ def _fp8_lm_head_chunk_rows() -> int:
         return 65536
 
 
+def _fp8_lm_head_full_cache_max_bytes() -> int:
+    if os.environ.get("PCKETLM_DISABLE_FP8_LM_HEAD_FULL_CACHE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return 0
+    raw = os.environ.get("PCKETLM_FP8_LM_HEAD_FULL_CACHE_MB", "").strip()
+    if not raw:
+        return 2048 * 1024 * 1024
+    try:
+        return max(0, int(float(raw) * 1024 * 1024))
+    except ValueError:
+        return 2048 * 1024 * 1024
+
+
 def _fp8_moe_expert_workers() -> int:
     raw = os.environ.get("PCKETLM_FP8_MOE_EXPERT_WORKERS", "").strip()
     if not raw:
@@ -3103,6 +3166,38 @@ def _store_fp8_prefill_cache(key: tuple, prefill: FP8PromptPrefillResult) -> Non
         "next_kv_caches": _clone_kv_caches(prefill.next_kv_caches),
     }
     _FP8_PREFILL_CACHE_STATS["stores"] += 1
+
+
+def _fp8_lm_head_full_cache_key(entry: TensorCatalogEntry) -> tuple:
+    return (
+        str(entry.tensor_name),
+        str(entry.shard_path.resolve()),
+        int(_path_mtime_ns(entry.shard_path)),
+        tuple(int(value) for value in entry.shape),
+        str(entry.dtype),
+        bool(fp8_pack_enabled()),
+    )
+
+
+def _load_fp8_lm_head_full_cached(entry: TensorCatalogEntry) -> tuple[torch.Tensor | None, int]:
+    max_bytes = _fp8_lm_head_full_cache_max_bytes()
+    tensor_bytes = int(entry.shape[0]) * int(entry.shape[1]) * _dtype_element_size(entry.dtype)
+    if max_bytes <= 0 or tensor_bytes <= 0 or tensor_bytes > max_bytes:
+        return None, 0
+    key = _fp8_lm_head_full_cache_key(entry)
+    cached = _FP8_LM_HEAD_FULL_CACHE.get(key)
+    if cached is not None:
+        _FP8_LM_HEAD_FULL_CACHE.move_to_end(key)
+        _FP8_LM_HEAD_FULL_CACHE_STATS["hits"] += 1
+        return cached, 0
+    _FP8_LM_HEAD_FULL_CACHE_STATS["misses"] += 1
+    loaded = _read_tensor_rows(entry, 0, int(entry.shape[0])).contiguous()
+    while _FP8_LM_HEAD_FULL_CACHE:
+        _FP8_LM_HEAD_FULL_CACHE.popitem(last=False)
+        _FP8_LM_HEAD_FULL_CACHE_STATS["evictions"] += 1
+    _FP8_LM_HEAD_FULL_CACHE[key] = loaded
+    _FP8_LM_HEAD_FULL_CACHE_STATS["stores"] += 1
+    return loaded, tensor_bytes
 
 
 def _fp8_hot_cache_path(entry: TensorCatalogEntry, names: list[str]) -> Path | None:

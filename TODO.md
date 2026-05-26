@@ -178,3 +178,5 @@ Done: PLM-13 GPU readiness gate for CUDA + local DeepSeek catalog + local FP8 pa
 - PLM-13 next: validate whether local pager prefetch overlaps pack/source reads with CUDA compute on that direct-access worker.
 - DeepSeek exact CPU next: reduce the streamed `lm_head` tail, now `17.585s` of the cached 8-layer next-token row, using exact lossless caching or a native/top-k tail kernel that proves identical top-k.
 - DeepSeek exact CPU next: reduce per-layer attention/FFN compute, now `5.241s` attention and `10.019s` FFN on the cached 8-layer next-token row; storage is not the current blocker because the row has `0` scattered reads.
+- DeepSeek exact CPU hard unblock: replace the current PyTorch/Python FP8 attention and FFN path with a fundamentally faster exact matrix engine. After the full `lm_head` cache, cached 32-layer exact decode still spends `146.016s` in attention and `58.025s` in FFN with `0` scattered reads.
+- Do not spend more time on native `lm_head` top-k, MLP span cache, small attention cache, or CPU thread tuning as defaults; all were measured and rejected for the full exact target.
