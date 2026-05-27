@@ -736,4 +736,4 @@ PLM-13 exact CPU blocker proof: exact full `lm_head` cache reduces tail to `1.61
 PLM-13 exact CPU final: native DLLs are unblocked and tests pass (`493 passed, 2 skipped`), but exact full 62-layer DeepSeek V3 cached next token is `386.038s`; the blocker is attention/FFN compute bandwidth, not disk or tail.
 PLM-13 exact CPU latest: prefix RAM attention cache is now default and cuts full 62-layer cached token to `275.327s`, still blocked far above `<=10s/token` by attention/FFN compute bandwidth.
 PLM-13 exact CPU latest: mmap attention hot-cache + mmap packed MLP spans cut full 62-layer cached token to `245.935s` with exact top-k preserved; still far above `<=10s/token`.
-Exact local CPU DeepSeek is improved with cached FP8 candidate verification and a batched MoE fix, but the measured full 62-layer exact path is still far above <=10s/visible token because later MoE expert span loading dominates.
+Exact local CPU DeepSeek now has an exact cached FP8 verifier path that measured `6.5966s` per verified candidate on a full 62-layer, k=96 DeepSeek run using sequential-copy packed spans; visible-token speed depends on candidate acceptance.

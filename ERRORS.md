@@ -471,3 +471,4 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Full 62-layer k=64 exact candidate benchmark exceeded 17 minutes before completion even after disabling batched `fp8_mlp_many`; large batches still activate too many routed experts in later MoE layers.
 - Jacobi/parallel decoding without a good draft does not converge fast enough: k=16 accepted prefix reached only 2 tokens after two iterations on the real DeepSeek probe.
 - 4 GB FP8 MLP span RAM cache did not help. It either thrashed with LRU or, when preserved, produced hits but slowed the run due memory bandwidth pressure.
+- Mmap-backed packed expert spans were the wrong default for the external SSD path. Sequential native copy made the full 62-layer k=96 verifier land at `6.5966s/candidate`.

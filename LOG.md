@@ -6412,3 +6412,6 @@ Result: 297 passed in 21.83s
 - Full 62-layer k=8 profile completed: prefill `284.4959s`, verify `780.1613s`, `97.5202s/candidate`, continuation `763.6708s`, tail `16.4901s`; evidence in `state/phase-exact-cpu-goal-cached-verifier-full62-k8-profile.json`.
 - Full k=8 bottleneck: later layer FFN time dominates. Example top layers: layer 58 total `36.9258s`, attention `2.4479s`, FFN `33.9890s`, selected experts `26`; layer 50 total `34.4305s`, attention `2.1261s`, FFN `31.8704s`, selected experts `29`.
 - Expert span RAM cache was tested with 4 GB and min-layer filtering. It got hits in the second pass (`97` hits) but slowed from `91.9191s` to `105.9466s` on 16-layer k=32, so RAM caching is not a win on this machine.
+- Follow-up exact span I/O fix: packed expert MLP spans now default to sequential copy instead of mmap-backed lazy page faults. Real DeepSeek 16-layer k=64 improved to `88.2057s`, `1.3782s/candidate`.
+- Full 62-layer exact cached verifier with sequential-copy spans, k=64: `724.3411s`, `11.3178s/candidate`, not enough.
+- Full 62-layer exact cached verifier with sequential-copy spans, k=96: `633.2696s`, `6.5966s/candidate`, layers executed `62/62`, no blockers. Evidence: `state/phase-exact-cpu-goal-seqcopy-full62-k96.json`.

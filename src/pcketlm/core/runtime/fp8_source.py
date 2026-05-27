@@ -3197,12 +3197,9 @@ def _fp8_pack_prefetch_workers() -> int:
 
 
 def _fp8_pack_mmap_spans_enabled() -> bool:
-    return os.environ.get("PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS", "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    if os.environ.get("PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_FP8_PACK_MMAP_SPANS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fp8_hot_cache_enabled() -> bool:
