@@ -26,6 +26,7 @@ from pcketlm.native import (
     fp8_e4m3_dequant_to_fp16,
     fp8_e4m3_block_mlp_f32,
     fp8_e4m3_block_mlp_many_f32,
+    fp8_e4m3_block_mlp_many_weighted_f32,
     ds_attention_block_forward,
     ds_mla_attention_flash_forward,
     lm_head_topk_u16,
@@ -38,6 +39,7 @@ from pcketlm.native import (
     native_fp8_linear_available,
     native_fp8_mlp_available,
     native_fp8_mlp_many_available,
+    native_fp8_mlp_many_weighted_available,
     native_read_tensor_bytes,
 )
 from pcketlm.core.runtime.fp8_pack import fp8_pack_enabled, fp8_pack_telemetry, reader_for_model_dir, record_scattered_read
@@ -623,6 +625,9 @@ def fp8_source_status(model_id: str) -> dict:
             "native_fp8_mlp_many": _native_fp8_linear_enabled()
             and _native_fp8_mlp_many_enabled()
             and native_fp8_mlp_many_available(),
+            "native_fp8_mlp_many_weighted": _native_fp8_linear_enabled()
+            and _native_fp8_mlp_many_enabled()
+            and native_fp8_mlp_many_weighted_available(),
             "native_fp8_mlp_full_max_bytes": _native_fp8_mlp_full_max_bytes(),
             "attention_weight_cache_max_bytes": _fp8_attention_weight_cache_max_bytes(),
             "streamed_attention": _streamed_fp8_attention_enabled(),
@@ -1247,6 +1252,42 @@ def run_fp8_moe(
         many_attempted = False
         if (
             _native_fp8_mlp_many_enabled()
+            and native_fp8_mlp_many_weighted_available()
+            and expert_jobs
+            and int(flat_hidden.shape[0]) == 1
+        ):
+            ordered_prefixes = [expert_prefixes[int(expert_index)] for expert_index, *_rest in expert_jobs]
+            if all(prefix in preloaded_mlps for prefix in ordered_prefixes):
+                try:
+                    ordered_route_weights = torch.tensor(
+                        [
+                            float(route_weights[row_indices[0], top_indices[0]].item())
+                            for _expert_index, row_indices, top_indices, _expert_hidden in expert_jobs
+                        ],
+                        dtype=torch.float32,
+                    )
+                    weighted_output = fp8_e4m3_block_mlp_many_weighted_f32(
+                        [preloaded_mlps[prefix] for prefix in ordered_prefixes],
+                        flat_hidden.to(dtype=dtype),
+                        ordered_route_weights,
+                    )
+                    for prefix in ordered_prefixes:
+                        tensors = preloaded_mlps[prefix]
+                        routed_loaded_bytes += sum(int(t.nelement() * t.element_size()) for t in tensors)
+                        dequantized_bytes += int(
+                            (
+                                int(tensors[0].shape[0]) * int(tensors[0].shape[1]) * 2
+                                + int(tensors[4].shape[0]) * int(tensors[4].shape[1])
+                            )
+                            * torch.empty((), dtype=dtype).element_size()
+                        )
+                    flat_output += weighted_output.to(dtype=dtype)
+                    many_attempted = True
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    many_attempted = False
+        if (
+            not many_attempted
+            and _native_fp8_mlp_many_enabled()
             and native_fp8_mlp_many_available()
             and expert_jobs
             and int(flat_hidden.shape[0]) == 1
@@ -1630,7 +1671,6 @@ def run_fp8_decode_tail_topk(
                     loaded_bytes += (end - start) * hidden_size * _dtype_element_size(lm_head_entry.dtype)
                 if (
                     normalized.device.type == "cpu"
-                    and cached_lm_head is None
                     and _native_lm_head_topk_enabled()
                     and lm_head_entry.dtype in {"BF16", "F16"}
                     and native_fp16_matmul_available()
@@ -3138,13 +3178,22 @@ def _fp8_attention_weight_cache_accepts(weight_name: str) -> bool:
 def _native_lm_head_topk_enabled() -> bool:
     if os.environ.get("PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False
-    return os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower() in {"1", "true", "yes", "on"}
+    explicit = os.environ.get("PCKETLM_ENABLE_NATIVE_LM_HEAD_TOPK", "").strip().lower()
+    if explicit:
+        return explicit in {"1", "true", "yes", "on"}
+    return True
 
 
 def _native_flash_mla_runtime_enabled() -> bool:
     if os.environ.get("PCKETLM_DISABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False
     return os.environ.get("PCKETLM_ENABLE_NATIVE_FLASH_MLA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_attention_linear_enabled() -> bool:
+    if os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_ATTENTION_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return os.environ.get("PCKETLM_ENABLE_NATIVE_FP8_ATTENTION_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fused_ds_attention_runtime_enabled() -> bool:
@@ -3432,6 +3481,18 @@ def _run_fp8_single_token_attention_materialized(
         "kv_b": f"{prefix}.kv_b_proj.weight",
         "o": f"{prefix}.o_proj.weight",
     }
+    if _native_fp8_attention_linear_enabled():
+        native_linear = _run_fp8_single_token_attention_native_linear(
+            model_id,
+            layer_index,
+            hidden_3d,
+            dtype=dtype,
+            start_pos=start_pos,
+            previous_kv_cache=previous_kv_cache,
+            weight_names=weight_names,
+        )
+        if native_linear is not None:
+            return native_linear
     loaded = {
         role: _load_dequantized_fp8_attention_weight(model_id, name, dtype=dtype)
         for role, name in weight_names.items()
@@ -3579,6 +3640,133 @@ def _run_fp8_single_token_attention_materialized(
         model_id=model_id,
         layer_index=int(layer_index),
         hidden_shape=[int(value) for value in hidden.shape],
+        output_shape=[] if output is None else [int(value) for value in output.shape],
+        loaded_weight_bytes=int(loaded_bytes),
+        dequantized_weight_bytes=int(dequantized_bytes),
+        output_tensor=output,
+        kv_cache=next_cache,
+        blockers=blockers,
+        ready=not blockers and output is not None,
+    )
+
+
+def _run_fp8_single_token_attention_native_linear(
+    model_id: str,
+    layer_index: int,
+    hidden_3d: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    start_pos: int,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None,
+    weight_names: dict[str, str],
+) -> FP8AttentionResult | None:
+    if hidden_3d.device.type != "cpu" or hidden_3d.ndim != 3 or int(hidden_3d.shape[0]) != 1 or int(hidden_3d.shape[1]) != 1:
+        return None
+    if not (_native_fp8_linear_enabled() and native_fp8_linear_available()):
+        return None
+    deepseek_config = _load_deepseek_config(model_id)
+    prefix = f"model.layers.{int(layer_index)}.self_attn"
+    q_norm = _load_regular_tensor(model_id, f"{prefix}.q_a_layernorm.weight")
+    kv_norm = _load_regular_tensor(model_id, f"{prefix}.kv_a_layernorm.weight")
+    blockers = [*q_norm[1], *kv_norm[1]]
+    if q_norm[0] is None or kv_norm[0] is None:
+        blockers.append("Native FP8 attention linear path needs q/kv norm tensors.")
+
+    loaded_bytes = 0
+    dequantized_bytes = 0
+    output = None
+    next_cache = None
+    if not blockers and q_norm[0] is not None and kv_norm[0] is not None:
+        try:
+            working = hidden_3d.float()
+            n_heads = int(deepseek_config["num_attention_heads"])
+            qk_nope = int(deepseek_config["qk_nope_head_dim"])
+            qk_rope = int(deepseek_config["qk_rope_head_dim"])
+            v_head_dim = int(deepseek_config["v_head_dim"])
+            kv_lora_rank = int(deepseek_config["kv_lora_rank"])
+            q_low, q_a_loaded, q_a_dequant, q_a_blockers = _run_fp8_linear_streamed(
+                model_id, weight_names["q_a"], working, dtype=torch.float32
+            )
+            blockers.extend(q_a_blockers)
+            loaded_bytes += q_a_loaded
+            dequantized_bytes += q_a_dequant
+            if q_low is None:
+                blockers.append("Native FP8 attention q_a projection failed.")
+            else:
+                q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+
+            if not blockers and q_low is not None:
+                q, q_b_loaded, q_b_dequant, q_b_blockers = _run_fp8_linear_streamed(
+                    model_id, weight_names["q_b"], q_low, dtype=torch.float32
+                )
+                blockers.extend(q_b_blockers)
+                loaded_bytes += q_b_loaded
+                dequantized_bytes += q_b_dequant
+            else:
+                q = None
+
+            if not blockers:
+                kv, kv_a_loaded, kv_a_dequant, kv_a_blockers = _run_fp8_linear_streamed(
+                    model_id, weight_names["kv_a"], working, dtype=torch.float32
+                )
+                blockers.extend(kv_a_blockers)
+                loaded_bytes += kv_a_loaded
+                dequantized_bytes += kv_a_dequant
+            else:
+                kv = None
+
+            kv_b_loaded = _load_dequantized_fp8_attention_weight(model_id, weight_names["kv_b"], dtype=torch.float32)
+            blockers.extend(kv_b_loaded.blockers)
+            loaded_bytes += kv_b_loaded.loaded_nbytes
+            if kv_b_loaded.tensor is not None:
+                dequantized_bytes += int(kv_b_loaded.tensor.nelement() * kv_b_loaded.tensor.element_size())
+            if q is None or kv is None or kv_b_loaded.tensor is None:
+                blockers.append("Native FP8 attention linear path failed to materialize q/kv/kv_b.")
+
+            if not blockers and q is not None and kv is not None and kv_b_loaded.tensor is not None:
+                q = q.view(1, 1, n_heads, qk_nope + qk_rope)
+                q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+                kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
+                q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
+                k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
+                kv_latent = _rms_norm_any(kv_latent, kv_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
+                if previous_kv_cache is not None:
+                    previous_kv, previous_pe = previous_kv_cache
+                    kv_cache = torch.cat([previous_kv.to(kv_latent.dtype), kv_latent], dim=1)
+                    pe_cache = torch.cat([previous_pe.to(k_pe.dtype), k_pe], dim=1)
+                else:
+                    kv_cache = kv_latent
+                    pe_cache = k_pe
+                wkv_b = kv_b_loaded.tensor.float().view(n_heads, qk_nope + v_head_dim, kv_lora_rank)
+                q_nope_absorbed = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope])
+                scores = (
+                    torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
+                    + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
+                ) * float(deepseek_config["softmax_scale"])
+                probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
+                attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
+                attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
+                projected, o_loaded, o_dequant, o_blockers = _run_fp8_linear_streamed(
+                    model_id,
+                    weight_names["o"],
+                    attention_heads.flatten(2),
+                    dtype=dtype,
+                )
+                blockers.extend(o_blockers)
+                loaded_bytes += o_loaded
+                dequantized_bytes += o_dequant
+                if projected is None:
+                    blockers.append("Native FP8 attention o projection failed.")
+                else:
+                    output = projected.to(dtype=dtype).reshape(1, 1, -1).contiguous()
+                    next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
+        except Exception as exc:
+            blockers.append(f"Native FP8 attention linear path failed: {exc}")
+
+    return FP8AttentionResult(
+        model_id=model_id,
+        layer_index=int(layer_index),
+        hidden_shape=[int(value) for value in hidden_3d.shape],
         output_shape=[] if output is None else [int(value) for value in output.shape],
         loaded_weight_bytes=int(loaded_bytes),
         dequantized_weight_bytes=int(dequantized_bytes),

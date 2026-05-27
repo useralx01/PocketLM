@@ -1711,3 +1711,10 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - For DeepSeek V3 normal chat, trust `config.json` `num_hidden_layers=61` over the catalog's physical `62` layer indices. The extra physical layer is accounted for by `num_nextn_predict_layers=1` and must not be run as part of ordinary assistant generation.
 - Stop FP8 decode/benchmark generation at configured EOS tokens and decode only visible tokens before EOS for user-facing text. Raw token traces stay in JSON evidence for debugging.
 - A short EOS-ended answer such as `Hello!!` is allowed to pass the useful-text gate even if it is shorter than the long-answer default thresholds; speed target evaluation remains separate.
+
+## PLM-13 Exact CPU Native Matrix Decisions
+
+- Keep weighted native FP8 many-MLP enabled behind the existing native FP8 switches. It is lossless against the previous route-combine path and removes Python per-expert combine overhead, but it is only a small win (`1.181x` on one routed MoE layer).
+- Enable FP8 native lm_head top-k by default and allow `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` to turn it off. It preserves top-k on the real DeepSeek probes and helps the cached lm_head path avoid Torch float matmul.
+- Do not enable `PCKETLM_ENABLE_FUSED_DS_ATTENTION` by default. The real 8-layer probe preserved top token ids but was slower than the current Torch materialized attention path.
+- Keep `PCKETLM_ENABLE_NATIVE_FP8_ATTENTION_LINEAR` opt-in only. The first real probe preserved top token ids but made attention slower, so it is evidence rather than the production path.

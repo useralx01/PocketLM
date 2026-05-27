@@ -6449,3 +6449,13 @@ Result: 297 passed in 21.83s
 - Re-analysis now classifies `Hello!!` as useful short EOS-ended text, but the `<=10s/token` target still fails hard: `277.921s/token` on the corrected useful-answer proof. This replaces the old whitespace-only under-10 claim as the honest current state.
 - Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_tokenizer_runtime.py -q` -> `35 passed`.
 - Full suite: `python -m pytest tests\ -q` -> `506 passed, 2 skipped in 83.43s`.
+
+## PLM-13 Exact CPU / Native Matrix-Slice Attempt
+
+- Added a lossless weighted native FP8 many-MLP path so routed MoE experts can accumulate route-weighted output inside C++ instead of returning per-expert outputs to Python for the combine step.
+- Real DeepSeek V3 layer-3 routed MoE equivalence: max absolute diff `0.0` versus previous native-many + Python combine. Evidence: `state\phase-exact-cpu-native-weighted-moe-layer3.json`.
+- Real DeepSeek V3 layer-3 routed MoE speed: old average `0.0399428s`, new weighted native average `0.0338092s`, speedup `1.181x`. This is correct but too small to move full-token speed.
+- 8-layer exact FP8 profile after the weighted path: wall `48.4666s`, attention `16.9381s`, FFN `7.4929s`, lm_head tail `16.4484s`. Evidence: `state\phase-exact-cpu-native-weighted-profile-8layers.json`.
+- Existing fused native DeepSeek attention was retested and rejected as default: 8-layer wall `69.9430s`, attention `24.6619s`, tail `29.1633s`, top token ids preserved but slower. Evidence: `state\phase-exact-cpu-fused-attention-profile-8layers.json`.
+- Native lm_head top-k now runs on the cached lm_head path too and defaults on for FP8, with `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` as the kill switch. Cached 1-layer repeat in one process showed tail cache reuse from `1.0802s` to `0.4909s`. Evidence: `state\phase-exact-cpu-native-lmhead-cache-reuse.json`.
+- Experimental native FP8 attention-linear switch was added but left opt-in because it is slower on the real 8-layer probe: wall `58.6379s`, attention `26.7155s`, with same top token ids. Evidence: `state\phase-exact-cpu-native-attn-linear-profile-8layers.json`.

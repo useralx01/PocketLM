@@ -361,6 +361,7 @@ def test_run_fp8_moe_uses_native_many_mlp_when_pack_preloaded(tmp_path: Path, mo
         return torch.zeros((len(items), hidden.reshape(-1, hidden.shape[-1]).shape[0], hidden.shape[-1]), dtype=torch.float32)
 
     monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: False)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_f32", fake_many)
     hidden = torch.ones((1, 1, 4), dtype=torch.float32)
 
@@ -368,6 +369,46 @@ def test_run_fp8_moe_uses_native_many_mlp_when_pack_preloaded(tmp_path: Path, mo
 
     assert result.ready is True
     assert calls["many"] == 1
+
+
+def test_run_fp8_moe_prefers_native_weighted_many_mlp_when_pack_preloaded(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    calls = {"weighted": 0, "many": 0}
+
+    def fake_weighted(
+        items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        hidden: torch.Tensor,
+        route_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        calls["weighted"] += 1
+        assert int(route_weights.numel()) == len(items)
+        return torch.zeros((hidden.reshape(-1, hidden.shape[-1]).shape[0], hidden.shape[-1]), dtype=torch.float32)
+
+    def fake_many(*_args, **_kwargs) -> torch.Tensor:
+        calls["many"] += 1
+        raise AssertionError("weighted many-MLP should run before unweighted many-MLP")
+
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_weighted_f32", fake_weighted)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_f32", fake_many)
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert calls == {"weighted": 1, "many": 0}
 
 
 def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:

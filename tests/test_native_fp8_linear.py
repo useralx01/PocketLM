@@ -55,8 +55,30 @@ def test_native_fp8_mlp_matches_python_reference() -> None:
     assert torch.allclose(native_out, python_out, atol=1e-5, rtol=1e-5)
 
 
+def test_native_fp8_weighted_many_mlp_matches_unweighted_combine() -> None:
+    hidden_cols = 64
+    intermediate = 32
+    hidden = torch.linspace(-0.5, 0.5, steps=hidden_cols, dtype=torch.float32).reshape(1, hidden_cols)
+    items = []
+    for seed in (1, 2, 3):
+        generator = torch.Generator().manual_seed(seed)
+        gate = _fp8_bytes(torch.randn((intermediate, hidden_cols), generator=generator) * 0.25)
+        up = _fp8_bytes(torch.randn((intermediate, hidden_cols), generator=generator) * 0.25)
+        down = _fp8_bytes(torch.randn((hidden_cols, intermediate), generator=generator) * 0.25)
+        gate_scale = torch.ones((1, 1), dtype=torch.float32)
+        up_scale = torch.ones((1, 1), dtype=torch.float32)
+        down_scale = torch.ones((1, 1), dtype=torch.float32)
+        items.append((gate, gate_scale, up, up_scale, down, down_scale))
+    route_weights = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float32)
+
+    weighted = native.fp8_e4m3_block_mlp_many_weighted_f32(items, hidden, route_weights)
+    unweighted = native.fp8_e4m3_block_mlp_many_f32(items, hidden)
+    expected = native._python_ds_moe_layer_forward(unweighted, route_weights)
+
+    assert torch.allclose(weighted, expected, atol=1e-5, rtol=1e-5)
+
+
 def test_native_fp8_linear_kill_switch_reports_unavailable(monkeypatch) -> None:
     monkeypatch.setenv("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "1")
 
     assert native.native_fp8_linear_available() is False
-

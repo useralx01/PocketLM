@@ -58,6 +58,23 @@ using Fp8MlpManyFn = int (*)(
     int64_t,
     int64_t
 );
+using Fp8MlpManyWeightedFn = int (*)(
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const uint64_t*,
+    const float*,
+    const float*,
+    float*,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t
+);
 
 struct DsLayerRegistration {
     int64_t layer_idx = 0;
@@ -139,6 +156,22 @@ static Fp8MlpManyFn fp8_mlp_many_fn() {
         return nullptr;
     }
     fn = reinterpret_cast<Fp8MlpManyFn>(GetProcAddress(module, "fp8_e4m3_block_mlp_many_f32"));
+    return fn;
+}
+
+static Fp8MlpManyWeightedFn fp8_mlp_many_weighted_fn() {
+    static HMODULE module = nullptr;
+    static Fp8MlpManyWeightedFn fn = nullptr;
+    if (fn != nullptr) {
+        return fn;
+    }
+    if (module == nullptr) {
+        module = load_sibling_dll("fp8_linear.dll");
+    }
+    if (module == nullptr) {
+        return nullptr;
+    }
+    fn = reinterpret_cast<Fp8MlpManyWeightedFn>(GetProcAddress(module, "fp8_e4m3_block_mlp_many_weighted_f32"));
     return fn;
 }
 
@@ -780,6 +813,31 @@ extern "C" __declspec(dllexport) int ds_moe_layer_forward_fp8_f32(
         hidden_dim <= 0 || gate_scale_cols <= 0 || down_scale_cols <= 0
     ) {
         return 2;
+    }
+    Fp8MlpManyWeightedFn weighted_fn = fp8_mlp_many_weighted_fn();
+    if (weighted_fn != nullptr) {
+        const int weighted_code = weighted_fn(
+            gate_weight_ptrs,
+            gate_scale_ptrs,
+            up_weight_ptrs,
+            up_scale_ptrs,
+            down_weight_ptrs,
+            down_scale_ptrs,
+            hidden,
+            route_weights,
+            hidden_out,
+            selected_count,
+            batch,
+            intermediate_rows,
+            hidden_dim,
+            gate_scale_cols,
+            down_scale_cols
+        );
+        if (weighted_code == 0) {
+            session->monolithic_calls += 1;
+            session->expert_invocations += selected_count;
+            return 0;
+        }
     }
     Fp8MlpManyFn fn = fp8_mlp_many_fn();
     if (fn == nullptr) {
