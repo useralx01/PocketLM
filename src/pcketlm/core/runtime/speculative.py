@@ -808,22 +808,42 @@ def fp8_speculative_generate(
     while not blockers and len(generated) < int(max_new_tokens):
         remaining = int(max_new_tokens) - len(generated)
         batch_k = min(int(k), remaining)
-        current_ids = list(prepared.token_ids) + list(session.committed_token_ids)
+        current_ids = list(prepared.token_ids) + list(generated)
         current_text, decode_blockers = decode_token_ids_to_text(verifier_model_id, current_ids)
         if decode_blockers:
             blockers.extend(decode_blockers)
             break
-        proposal = propose_fn(
-            speculator_model_id,
-            current_ids,
-            batch_k,
-            verifier_model_id=verifier_model_id,
-            prompt_text=current_text,
-        )
+        if _is_repeat_next_speculator(speculator_model_id):
+            proposal = CandidateProposal(
+                speculator_model_id=speculator_model_id,
+                prompt_text=current_text,
+                generated_text="",
+                backend="repeat-next",
+                token_ids=[],
+                elapsed_seconds=0.0,
+                blockers=[],
+                ready=True,
+            )
+        else:
+            proposal = propose_fn(
+                speculator_model_id,
+                current_ids,
+                batch_k,
+                verifier_model_id=verifier_model_id,
+                prompt_text=current_text,
+            )
         speculator_calls += 1
         if not proposal.ready and not proposal.token_ids:
-            blockers.extend(proposal.blockers or ["Speculator failed to produce candidates."])
-            break
+            proposal = CandidateProposal(
+                speculator_model_id=speculator_model_id,
+                prompt_text=current_text,
+                generated_text="",
+                backend=proposal.backend,
+                token_ids=[],
+                elapsed_seconds=proposal.elapsed_seconds,
+                blockers=[],
+                ready=True,
+            )
         candidates = _force_fp8_first_candidate(session.next_token_id, proposal.token_ids, batch_k)
         verification = session.verify(candidates)
         verifier_passes += 1
@@ -834,13 +854,15 @@ def fp8_speculative_generate(
             break
 
         accepted_this_pass = 0
+        pending_visible = max(0, len(generated) - len(session.committed_token_ids))
         for index, candidate_token_id in enumerate(candidates):
             verifier_token_id = int(verification.verifier_token_ids[index])
             if int(candidate_token_id) != verifier_token_id:
                 break
-            generated.append(int(candidate_token_id))
+            if accepted_this_pass >= pending_visible:
+                generated.append(int(candidate_token_id))
+                accepted_token_count += 1
             accepted_this_pass += 1
-            accepted_token_count += 1
             if len(generated) >= int(max_new_tokens):
                 break
 
@@ -851,13 +873,6 @@ def fp8_speculative_generate(
         corrected_token = int(verification.verifier_token_ids[accepted_this_pass])
         generated.append(corrected_token)
         corrected_token_count += 1
-        correction = session.append_token(corrected_token)
-        correction_passes += 1
-        layers_executed += int(correction.layers_executed)
-        expected_layers += int(correction.expected_layers_executed)
-        if not correction.ready:
-            blockers.extend(correction.blockers or ["DeepSeek FP8 verifier failed to append correction."])
-            break
 
     blockers.extend(session.blockers)
     generated_text, generated_blockers = decode_token_ids_to_text(verifier_model_id, generated)
@@ -894,6 +909,10 @@ def fp8_speculative_generate(
         blockers=blockers,
         ready=not blockers and len(generated) >= int(max_new_tokens) and anti_cheat,
     )
+
+
+def _is_repeat_next_speculator(model_id: str) -> bool:
+    return str(model_id).strip().lower() in {"repeat-next", "self-repeat", "deepseek-repeat-next"}
 
 
 def _force_fp8_first_candidate(next_token_id: int | None, proposed: list[int], k: int) -> list[int]:
