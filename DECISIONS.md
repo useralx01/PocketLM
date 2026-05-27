@@ -1718,3 +1718,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Enable FP8 native lm_head top-k by default and allow `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` to turn it off. It preserves top-k on the real DeepSeek probes and helps the cached lm_head path avoid Torch float matmul.
 - Do not enable `PCKETLM_ENABLE_FUSED_DS_ATTENTION` by default. The real 8-layer probe preserved top token ids but was slower than the current Torch materialized attention path.
 - Keep `PCKETLM_ENABLE_NATIVE_FP8_ATTENTION_LINEAR` opt-in only. The first real probe preserved top token ids but made attention slower, so it is evidence rather than the production path.
+- Keep exact full lm_head prefetch enabled by default for FP8 single-token forward. It is lossless and hides most of the final 1.85 GB head read behind layer compute.
+- Keep attention prefetch opt-in only. On the real full 61-layer row it competed with memory/disk and made total wall time worse despite reducing measured attention wait.
+- Do not use DeepSeek V3's MTP layer as an acceptance source yet. The current local implementation's MTP top candidates did not match normal exact next-token outputs on the probe, so it fails the exactness goal.

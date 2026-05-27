@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 import warnings
 from collections import OrderedDict
@@ -48,6 +49,9 @@ from pcketlm.core.storage.paths import state_root
 _FP8_ATTENTION_WEIGHT_CACHE: "OrderedDict[tuple[str, str, str], FP8DequantizedTensor]" = OrderedDict()
 _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
 _FP8_ATTENTION_WEIGHT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FP8_ATTENTION_PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
+_FP8_ATTENTION_PREFETCH_FUTURES: dict[tuple[str, str, str], object] = {}
+_FP8_ATTENTION_PREFETCH_LOCK = threading.Lock()
 _FP8_DEQUANT_HOT_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "read_errors": 0, "write_errors": 0}
 _FP8_MLP_SPAN_CACHE: "OrderedDict[str, tuple[torch.Tensor, dict[str, tuple[int, int]]]]" = OrderedDict()
 _FP8_MLP_SPAN_CACHE_BYTES = 0
@@ -56,6 +60,9 @@ _FP8_PREFILL_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
 _FP8_PREFILL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FP8_LM_HEAD_FULL_CACHE: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 _FP8_LM_HEAD_FULL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
+_FP8_LM_HEAD_PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
+_FP8_LM_HEAD_PREFETCH_FUTURES: dict[tuple, object] = {}
+_FP8_LM_HEAD_PREFETCH_LOCK = threading.Lock()
 _FUSED_DS_ATTENTION_SESSIONS: dict[tuple[str, int, int, int], DeepSeekNativeSession] = {}
 _FUSED_DS_ATTENTION_STATS = {"calls": 0, "fallbacks": 0, "errors": 0}
 _FP8_CPU_THREAD_TUNING_APPLIED = False
@@ -822,6 +829,8 @@ def clear_fp8_attention_weight_cache() -> None:
     global _FP8_ATTENTION_WEIGHT_CACHE_BYTES
     _FP8_ATTENTION_WEIGHT_CACHE.clear()
     _FP8_ATTENTION_WEIGHT_CACHE_BYTES = 0
+    with _FP8_ATTENTION_PREFETCH_LOCK:
+        _FP8_ATTENTION_PREFETCH_FUTURES.clear()
     for key in _FP8_ATTENTION_WEIGHT_CACHE_STATS:
         _FP8_ATTENTION_WEIGHT_CACHE_STATS[key] = 0
     for key in _FP8_DEQUANT_HOT_CACHE_STATS:
@@ -882,6 +891,8 @@ def fp8_prefill_cache_snapshot() -> dict:
 def clear_fp8_lm_head_full_cache() -> None:
     """Clear exact in-process FP8 lm_head full-matrix reuse."""
     _FP8_LM_HEAD_FULL_CACHE.clear()
+    with _FP8_LM_HEAD_PREFETCH_LOCK:
+        _FP8_LM_HEAD_PREFETCH_FUTURES.clear()
     for key in _FP8_LM_HEAD_FULL_CACHE_STATS:
         _FP8_LM_HEAD_FULL_CACHE_STATS[key] = 0
 
@@ -921,6 +932,27 @@ def _load_dequantized_fp8_attention_weight(
                 blockers=[],
                 ready=True,
             )
+        with _FP8_ATTENTION_PREFETCH_LOCK:
+            future = _FP8_ATTENTION_PREFETCH_FUTURES.get(key)
+        if future is not None:
+            try:
+                prefetched = future.result()
+            finally:
+                with _FP8_ATTENTION_PREFETCH_LOCK:
+                    _FP8_ATTENTION_PREFETCH_FUTURES.pop(key, None)
+            if prefetched is not None and prefetched.tensor is not None and not prefetched.blockers:
+                _FP8_ATTENTION_WEIGHT_CACHE_STATS["hits"] += 1
+                return FP8DequantizedTensor(
+                    model_id=prefetched.model_id,
+                    weight_name=prefetched.weight_name,
+                    scale_name=prefetched.scale_name,
+                    shape=list(prefetched.shape),
+                    dtype=prefetched.dtype,
+                    loaded_nbytes=0,
+                    tensor=prefetched.tensor,
+                    blockers=[],
+                    ready=True,
+                )
         _FP8_ATTENTION_WEIGHT_CACHE_STATS["misses"] += 1
 
     disk_cached = _load_fp8_dequant_hot_cache(model_id, weight_name, dtype=dtype)
@@ -934,6 +966,72 @@ def _load_dequantized_fp8_attention_weight(
     _write_fp8_dequant_hot_cache(loaded)
     _store_fp8_attention_weight_cache(key, loaded, max_bytes=max_bytes)
     return loaded
+
+
+def _prefetch_fp8_attention_weight_worker(
+    key: tuple[str, str, str],
+    model_id: str,
+    weight_name: str,
+    dtype: torch.dtype,
+    max_bytes: int,
+) -> FP8DequantizedTensor | None:
+    disk_cached = _load_fp8_dequant_hot_cache(model_id, weight_name, dtype=dtype)
+    loaded = disk_cached if disk_cached is not None else load_dequantized_fp8_weight(model_id, weight_name, dtype=dtype)
+    if loaded.tensor is None or loaded.blockers:
+        return loaded
+    if disk_cached is None:
+        _write_fp8_dequant_hot_cache(loaded)
+    _store_fp8_attention_weight_cache(key, loaded, max_bytes=max_bytes)
+    return loaded
+
+
+def _fp8_attention_prefetch_workers() -> int:
+    raw = os.environ.get("PCKETLM_FP8_ATTENTION_PREFETCH_WORKERS", "").strip()
+    if not raw:
+        return 2
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 2
+
+
+def _prefetch_fp8_attention_weights(model_id: str, layer_index: int, *, dtype: torch.dtype) -> None:
+    if os.environ.get("PCKETLM_DISABLE_FP8_ATTENTION_PREFETCH", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    if os.environ.get("PCKETLM_ENABLE_FP8_ATTENTION_PREFETCH", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    workers = _fp8_attention_prefetch_workers()
+    if workers <= 0:
+        return
+    prefix = f"model.layers.{int(layer_index)}.self_attn"
+    weight_names = [
+        f"{prefix}.q_a_proj.weight",
+        f"{prefix}.q_b_proj.weight",
+        f"{prefix}.kv_a_proj_with_mqa.weight",
+        f"{prefix}.kv_b_proj.weight",
+        f"{prefix}.o_proj.weight",
+    ]
+    max_bytes = _fp8_attention_weight_cache_max_bytes()
+    if max_bytes <= 0:
+        return
+    global _FP8_ATTENTION_PREFETCH_EXECUTOR
+    with _FP8_ATTENTION_PREFETCH_LOCK:
+        if _FP8_ATTENTION_PREFETCH_EXECUTOR is None:
+            _FP8_ATTENTION_PREFETCH_EXECUTOR = ThreadPoolExecutor(max_workers=workers)
+        for weight_name in weight_names:
+            key = (str(model_id), str(weight_name), str(dtype).replace("torch.", ""))
+            if key in _FP8_ATTENTION_WEIGHT_CACHE or key in _FP8_ATTENTION_PREFETCH_FUTURES:
+                continue
+            if find_tensor_catalog_entry(model_id, weight_name) is None:
+                continue
+            _FP8_ATTENTION_PREFETCH_FUTURES[key] = _FP8_ATTENTION_PREFETCH_EXECUTOR.submit(
+                _prefetch_fp8_attention_weight_worker,
+                key,
+                model_id,
+                weight_name,
+                dtype,
+                max_bytes,
+            )
 
 
 def _store_fp8_attention_weight_cache(
@@ -2006,6 +2104,8 @@ def run_fp8_single_token_forward(
 ) -> FP8TokenForwardResult:
     """Run a bounded single-token FP8 forward path from embedding through layers."""
     _apply_fp8_cpu_thread_tuning()
+    if include_tail:
+        _prefetch_fp8_lm_head_full(model_id)
     embedding = load_fp8_token_embedding(model_id, token_id)
     blockers = list(embedding.blockers)
     hidden = embedding.output_tensor
@@ -2019,6 +2119,10 @@ def run_fp8_single_token_forward(
 
     if not blockers and hidden is not None:
         for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
+            next_layer_index = int(layer_index) + 1
+            final_layer_index = int(start_layer) + max(0, int(layer_count))
+            if next_layer_index < final_layer_index:
+                _prefetch_fp8_attention_weights(model_id, next_layer_index, dtype=dtype)
             step = run_fp8_single_token_block(
                 model_id,
                 layer_index,
@@ -3427,6 +3531,19 @@ def _load_fp8_lm_head_full_cached(entry: TensorCatalogEntry) -> tuple[torch.Tens
         _FP8_LM_HEAD_FULL_CACHE.move_to_end(key)
         _FP8_LM_HEAD_FULL_CACHE_STATS["hits"] += 1
         return cached, 0
+    with _FP8_LM_HEAD_PREFETCH_LOCK:
+        future = _FP8_LM_HEAD_PREFETCH_FUTURES.get(key)
+    if future is not None:
+        try:
+            future.result()
+        finally:
+            with _FP8_LM_HEAD_PREFETCH_LOCK:
+                _FP8_LM_HEAD_PREFETCH_FUTURES.pop(key, None)
+        cached = _FP8_LM_HEAD_FULL_CACHE.get(key)
+        if cached is not None:
+            _FP8_LM_HEAD_FULL_CACHE.move_to_end(key)
+            _FP8_LM_HEAD_FULL_CACHE_STATS["hits"] += 1
+            return cached, 0
     _FP8_LM_HEAD_FULL_CACHE_STATS["misses"] += 1
     loaded = _read_tensor_rows(entry, 0, int(entry.shape[0])).contiguous()
     while _FP8_LM_HEAD_FULL_CACHE:
@@ -3435,6 +3552,40 @@ def _load_fp8_lm_head_full_cached(entry: TensorCatalogEntry) -> tuple[torch.Tens
     _FP8_LM_HEAD_FULL_CACHE[key] = loaded
     _FP8_LM_HEAD_FULL_CACHE_STATS["stores"] += 1
     return loaded, tensor_bytes
+
+
+def _fp8_lm_head_prefetch_worker(entry: TensorCatalogEntry, key: tuple) -> None:
+    loaded = _read_tensor_rows(entry, 0, int(entry.shape[0])).contiguous()
+    while _FP8_LM_HEAD_FULL_CACHE:
+        _FP8_LM_HEAD_FULL_CACHE.popitem(last=False)
+        _FP8_LM_HEAD_FULL_CACHE_STATS["evictions"] += 1
+    _FP8_LM_HEAD_FULL_CACHE[key] = loaded
+    _FP8_LM_HEAD_FULL_CACHE_STATS["stores"] += 1
+
+
+def _prefetch_fp8_lm_head_full(model_id: str) -> None:
+    if os.environ.get("PCKETLM_DISABLE_FP8_LM_HEAD_PREFETCH", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    entry = find_tensor_catalog_entry(model_id, "lm_head.weight")
+    if entry is None or entry.dtype not in {"BF16", "F16", "F32"}:
+        return
+    tensor_bytes = int(entry.shape[0]) * int(entry.shape[1]) * _dtype_element_size(entry.dtype)
+    if tensor_bytes <= 0 or tensor_bytes > _fp8_lm_head_full_cache_max_bytes():
+        return
+    key = _fp8_lm_head_full_cache_key(entry)
+    if key in _FP8_LM_HEAD_FULL_CACHE:
+        return
+    global _FP8_LM_HEAD_PREFETCH_EXECUTOR
+    with _FP8_LM_HEAD_PREFETCH_LOCK:
+        if key in _FP8_LM_HEAD_PREFETCH_FUTURES:
+            return
+        if _FP8_LM_HEAD_PREFETCH_EXECUTOR is None:
+            _FP8_LM_HEAD_PREFETCH_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+        _FP8_LM_HEAD_PREFETCH_FUTURES[key] = _FP8_LM_HEAD_PREFETCH_EXECUTOR.submit(
+            _fp8_lm_head_prefetch_worker,
+            entry,
+            key,
+        )
 
 
 def _fp8_hot_cache_path(entry: TensorCatalogEntry, names: list[str]) -> Path | None:
