@@ -6392,3 +6392,23 @@ Result: 297 passed in 21.83s
 - Real 16-layer mmap+packspan row: `state\phase-exact-cpu-goal-mmap-hotcache-packspan-layers16.json` -> generated-token step `33.587s`, generated `[0, 28191]`, top ids `[28191, 96887, 37036, 118131, 71878]`, attention `13.202s`, FFN `14.713s`, `0` scattered reads.
 - Real full 62-layer mmap+packspan row: `state\phase-exact-cpu-goal-mmap-hotcache-packspan-full62.json` -> `245.935s`, generated `[0, 223]`, top ids `[223, 260, 343, 14, 295]`, all layers `0-61` executed, tail `1.130s`, attention `141.500s`, FFN `75.724s`, `0` scattered reads.
 - Outcome: exact full-model win from `275.327s` to `245.935s`, with unchanged generated token/top-k and no skipped layers. Remaining wall is still attention/FFN CPU memory bandwidth.
+## Phase Exact CPU Goal / Cached FP8 Verifier Evidence
+
+- Added cached DeepSeek FP8 candidate verification: prompt prefill builds KV once, candidate chunks continue from the KV cache with exact causal masking over prior + candidate tokens.
+- Synthetic FP8 fixture proves cached continuation equals full prefill slice: `pytest tests\test_runtime_fp8_source.py::test_run_fp8_prompt_prefill_continues_from_kv_cache_exactly -q` -> pass.
+- Cached verifier fixture proves token IDs match stateless verifier: `pytest tests\test_runtime_fp8_source.py::test_verify_fp8_candidates_cached_once_matches_stateless_prefill -q` -> pass.
+- Focused regression: `python -m pytest tests\test_runtime_fp8_source.py tests\test_speculative.py -q` -> `45 passed`.
+- Real DeepSeek 8-layer stateless vs cached, candidates `[223]*4`: stateless `106.1445s`, cached `70.222s`, same verifier IDs `[0, 28997, 28997, 120726, 120726]`.
+- Real DeepSeek cached continuation after prompt KV, 8 layers:
+  - k=8: continuation+tail `23.5458s`, `2.9432s/candidate`.
+  - k=16: continuation+tail `27.5528s`, `1.7221s/candidate`.
+  - k=32: continuation+tail `36.7498s`, `1.1484s/candidate`.
+  - k=64: continuation+tail `57.3959s`, `0.8968s/candidate`.
+- Large-batch Jacobi convergence probe did not solve real generation: k=16 accepted prefix advanced only from 1 to 2 after two iterations, so it is not a reliable exact visible-token engine.
+- Fixed batched MoE inefficiency: native `fp8_mlp_many` was computing every selected expert for the whole batch; for batch rows >1 it is now bypassed so each expert only sees routed rows.
+- Real DeepSeek 16-layer k=64 after batched MoE fix: `112.2941s`, `1.7546s/candidate`, continuation `95.22s`, tail `17.0739s`.
+- Full 62-layer k=96 proof attempt was stopped after exceeding 32 minutes without completion: `state/phase-exact-cpu-goal-cached-verifier-full62-k96-stopped.json`.
+- Full 62-layer k=64 proof attempt after batched MoE fix was stopped after exceeding 17 minutes without completion: `state/phase-exact-cpu-goal-cached-verifier-full62-k64-stopped.json`.
+- Full 62-layer k=8 profile completed: prefill `284.4959s`, verify `780.1613s`, `97.5202s/candidate`, continuation `763.6708s`, tail `16.4901s`; evidence in `state/phase-exact-cpu-goal-cached-verifier-full62-k8-profile.json`.
+- Full k=8 bottleneck: later layer FFN time dominates. Example top layers: layer 58 total `36.9258s`, attention `2.4479s`, FFN `33.9890s`, selected experts `26`; layer 50 total `34.4305s`, attention `2.1261s`, FFN `31.8704s`, selected experts `29`.
+- Expert span RAM cache was tested with 4 GB and min-layer filtering. It got hits in the second pass (`97` hits) but slowed from `91.9191s` to `105.9466s` on 16-layer k=32, so RAM caching is not a win on this machine.

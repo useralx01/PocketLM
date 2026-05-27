@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -29,6 +30,38 @@ from pcketlm.core.storage.paths import artifacts_root
 
 DEFAULT_SPECULATOR_MODEL_ID = "qwen3-1.7b"
 DEFAULT_VERIFIER_MODEL_ID = "qwen3-30b-a3b"
+
+
+@contextmanager
+def _temporary_fp8_batch_threads():
+    raw = os.environ.get("PCKETLM_FP8_BATCH_CPU_THREADS", "").strip()
+    if raw.lower() in {"off", "disable", "disabled", "0"}:
+        yield
+        return
+    if not raw:
+        yield
+        return
+    try:
+        threads = int(raw)
+    except ValueError:
+        threads = 4
+    if threads <= 0:
+        yield
+        return
+    previous = None
+    try:
+        previous = torch.get_num_threads()
+        torch.set_num_threads(int(threads))
+    except (RuntimeError, ValueError):
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            try:
+                torch.set_num_threads(int(previous))
+            except (RuntimeError, ValueError):
+                pass
 
 
 @dataclass(slots=True)
@@ -516,6 +549,196 @@ class SpeculativeSession:
         )
 
 
+@dataclass(slots=True)
+class FP8CachedVerifierPassResult:
+    """One cached DeepSeek FP8 verifier pass over a candidate chunk."""
+
+    model_id: str
+    prompt_token_count: int
+    committed_token_count: int
+    candidate_token_ids: list[int]
+    verifier_token_ids: list[int]
+    elapsed_seconds: float
+    continuation_elapsed_seconds: float
+    tail_elapsed_seconds: float
+    layers_executed: int
+    expected_layers_executed: int
+    layer_summaries: list[dict] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "prompt_token_count": self.prompt_token_count,
+            "committed_token_count": self.committed_token_count,
+            "candidate_token_ids": list(self.candidate_token_ids),
+            "verifier_token_ids": list(self.verifier_token_ids),
+            "elapsed_seconds": self.elapsed_seconds,
+            "continuation_elapsed_seconds": self.continuation_elapsed_seconds,
+            "tail_elapsed_seconds": self.tail_elapsed_seconds,
+            "layers_executed": self.layers_executed,
+            "expected_layers_executed": self.expected_layers_executed,
+            "layer_summaries": [dict(item) for item in self.layer_summaries],
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+class FP8CachedVerifierSession:
+    """Prompt-cached DeepSeek FP8 verifier for exact batched candidate checks."""
+
+    def __init__(
+        self,
+        verifier_model_id: str,
+        prompt_token_ids: list[int],
+        *,
+        layer_count: int | None = None,
+        lm_head_chunk_rows: int = DEFAULT_LM_HEAD_CHUNK_ROWS,
+    ) -> None:
+        self.verifier_model_id = verifier_model_id
+        self.prompt_token_ids = [int(value) for value in prompt_token_ids]
+        self.committed_token_ids: list[int] = []
+        self.lm_head_chunk_rows = int(lm_head_chunk_rows)
+        self.blockers: list[str] = []
+        self.ready = False
+        self.kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.next_token_id: int | None = None
+        self.layers_executed = 0
+        self.expected_layers_executed = 0
+        self.prefill_elapsed_seconds = 0.0
+        self._tentative_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None
+        self._tentative_candidate_token_ids: list[int] = []
+        self._tentative_verifier_token_ids: list[int] = []
+
+        from pcketlm.core.runtime.fp8_source import _load_deepseek_config, run_fp8_prompt_prefill
+
+        config = _load_deepseek_config(verifier_model_id)
+        self.expected_layers_executed = int(layer_count) if layer_count is not None else int(config["num_hidden_layers"])
+        if not self.prompt_token_ids:
+            self.blockers.append("Verifier prompt token ids must not be empty.")
+            return
+        with _temporary_fp8_batch_threads():
+            started = time.perf_counter()
+            prefill = run_fp8_prompt_prefill(
+                verifier_model_id,
+                self.prompt_token_ids,
+                layer_count=self.expected_layers_executed,
+                include_tail=True,
+            )
+            self.prefill_elapsed_seconds = round(time.perf_counter() - started, 4)
+        self.blockers.extend(prefill.blockers)
+        self.layers_executed += len(prefill.executed_layers)
+        if prefill.ready and prefill.tail is not None and prefill.tail.top_token_ids:
+            self.kv_caches = dict(prefill.next_kv_caches)
+            self.next_token_id = int(prefill.tail.top_token_ids[0])
+            self.ready = True
+        elif not self.blockers:
+            self.blockers.append("DeepSeek FP8 prompt prefill did not produce a verifier tail token.")
+
+    @property
+    def committed_count(self) -> int:
+        return len(self.prompt_token_ids) + len(self.committed_token_ids)
+
+    def verify(self, candidate_token_ids: list[int]) -> FP8CachedVerifierPassResult:
+        started = time.perf_counter()
+        blockers = list(self.blockers)
+        candidates = [int(value) for value in candidate_token_ids]
+        if not self.ready or self.next_token_id is None:
+            blockers.append("DeepSeek FP8 cached verifier session is not ready.")
+        if not candidates:
+            blockers.append("Candidate token ids must not be empty.")
+        if blockers:
+            return FP8CachedVerifierPassResult(
+                model_id=self.verifier_model_id,
+                prompt_token_count=len(self.prompt_token_ids),
+                committed_token_count=len(self.committed_token_ids),
+                candidate_token_ids=candidates,
+                verifier_token_ids=[],
+                elapsed_seconds=round(time.perf_counter() - started, 4),
+                continuation_elapsed_seconds=0.0,
+                tail_elapsed_seconds=0.0,
+                layers_executed=0,
+                expected_layers_executed=self.expected_layers_executed,
+                layer_summaries=[],
+                blockers=blockers,
+                ready=False,
+            )
+
+        from pcketlm.core.runtime.fp8_source import run_fp8_decode_tail_topk_batch, run_fp8_prompt_prefill
+
+        verifier_token_ids = [int(self.next_token_id)]
+        continuation_elapsed = 0.0
+        tail_elapsed = 0.0
+        continuation = None
+        with _temporary_fp8_batch_threads():
+            continuation_start = time.perf_counter()
+            continuation = run_fp8_prompt_prefill(
+                self.verifier_model_id,
+                candidates,
+                layer_count=self.expected_layers_executed,
+                include_tail=False,
+                start_pos=self.committed_count,
+                previous_kv_caches=self.kv_caches,
+            )
+            continuation_elapsed = time.perf_counter() - continuation_start
+            blockers.extend(continuation.blockers)
+            tail_start = time.perf_counter()
+            if not blockers and continuation.ready and continuation.output_tensor is not None:
+                tail = run_fp8_decode_tail_topk_batch(
+                    self.verifier_model_id,
+                    continuation.output_tensor,
+                    top_k=1,
+                    chunk_rows=self.lm_head_chunk_rows,
+                )
+                blockers.extend(tail.blockers)
+                if tail.ready:
+                    verifier_token_ids.extend(int(row[0]) for row in tail.top_token_ids_by_position if row)
+            elif not blockers:
+                blockers.append("DeepSeek FP8 cached verifier continuation did not produce hidden states.")
+            tail_elapsed = time.perf_counter() - tail_start
+
+        expected_count = len(candidates) + 1
+        if not blockers and len(verifier_token_ids) != expected_count:
+            blockers.append(f"DeepSeek FP8 cached verifier produced {len(verifier_token_ids)} ids, expected {expected_count}.")
+        self._tentative_candidate_token_ids = list(candidates)
+        self._tentative_verifier_token_ids = list(verifier_token_ids)
+        self._tentative_kv_caches = None if continuation is None else dict(continuation.next_kv_caches)
+        layers = 0 if continuation is None else len(continuation.executed_layers)
+        return FP8CachedVerifierPassResult(
+            model_id=self.verifier_model_id,
+            prompt_token_count=len(self.prompt_token_ids),
+            committed_token_count=len(self.committed_token_ids),
+            candidate_token_ids=candidates,
+            verifier_token_ids=verifier_token_ids,
+            elapsed_seconds=round(time.perf_counter() - started, 4),
+            continuation_elapsed_seconds=round(continuation_elapsed, 4),
+            tail_elapsed_seconds=round(tail_elapsed, 4),
+            layers_executed=layers,
+            expected_layers_executed=self.expected_layers_executed,
+            layer_summaries=[] if continuation is None else [dict(item) for item in continuation.step_summaries],
+            blockers=blockers,
+            ready=not blockers and len(verifier_token_ids) == expected_count,
+        )
+
+    def accept_prefix(self, accepted_count: int) -> None:
+        if self._tentative_kv_caches is None:
+            self.blockers.append("No tentative verifier state is available to accept from.")
+            return
+        count = max(0, min(int(accepted_count), len(self._tentative_candidate_token_ids)))
+        self.committed_token_ids.extend(self._tentative_candidate_token_ids[:count])
+        keep_len = self.committed_count
+        self.kv_caches = {
+            int(layer): (kv[:, :keep_len, :].detach().contiguous(), pe[:, :keep_len, :].detach().contiguous())
+            for layer, (kv, pe) in self._tentative_kv_caches.items()
+        }
+        if count < len(self._tentative_verifier_token_ids):
+            self.next_token_id = int(self._tentative_verifier_token_ids[count])
+        self._tentative_kv_caches = None
+        self._tentative_candidate_token_ids = []
+        self._tentative_verifier_token_ids = []
+
+
 def _slice_kv_caches(
     kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]],
     target_length: int,
@@ -718,6 +941,102 @@ def verify_fp8_candidates_once(
         logits_count=len(verifier_token_ids),
         layers_executed=len(prefill.executed_layers),
         expected_layers_executed=effective_layers,
+        elapsed_seconds=round(time.perf_counter() - started, 4),
+        blockers=blockers,
+        ready=not blockers and len(verifier_token_ids) == expected_count,
+    )
+
+
+def verify_fp8_candidates_cached_once(
+    verifier_model_id: str,
+    prompt_token_ids: list[int],
+    candidate_token_ids: list[int],
+    *,
+    layer_count: int | None = None,
+    lm_head_chunk_rows: int = DEFAULT_LM_HEAD_CHUNK_ROWS,
+) -> VerifierBatchResult:
+    """Verify DeepSeek FP8 candidates using prompt KV cache plus one cached chunk pass."""
+    started = time.perf_counter()
+    blockers: list[str] = []
+    if not prompt_token_ids:
+        blockers.append("Verifier prompt token ids must not be empty.")
+    if not candidate_token_ids:
+        blockers.append("Verifier candidate token ids must not be empty.")
+    if blockers:
+        return VerifierBatchResult(
+            model_id=verifier_model_id,
+            prompt_token_count=len(prompt_token_ids),
+            candidate_token_ids=list(candidate_token_ids),
+            verifier_token_ids=[],
+            logits_count=0,
+            layers_executed=0,
+            expected_layers_executed=0,
+            elapsed_seconds=round(time.perf_counter() - started, 4),
+            blockers=blockers,
+            ready=False,
+        )
+
+    from pcketlm.core.runtime.fp8_source import (
+        _load_deepseek_config,
+        run_fp8_decode_tail_topk_batch,
+        run_fp8_prompt_prefill,
+    )
+
+    config = _load_deepseek_config(verifier_model_id)
+    effective_layers = int(layer_count) if layer_count is not None else int(config["num_hidden_layers"])
+    with _temporary_fp8_batch_threads():
+        prompt_prefill = run_fp8_prompt_prefill(
+            verifier_model_id,
+            list(prompt_token_ids),
+            layer_count=effective_layers,
+            include_tail=True,
+        )
+        blockers.extend(prompt_prefill.blockers)
+        verifier_token_ids: list[int] = []
+        layers_executed = len(prompt_prefill.executed_layers)
+        if prompt_prefill.ready and prompt_prefill.tail is not None and prompt_prefill.tail.top_token_ids:
+            verifier_token_ids.append(int(prompt_prefill.tail.top_token_ids[0]))
+        elif not blockers:
+            blockers.append("DeepSeek FP8 prompt prefill did not produce a verifier tail token.")
+
+        continuation = None
+        if not blockers:
+            continuation = run_fp8_prompt_prefill(
+                verifier_model_id,
+                list(candidate_token_ids),
+                layer_count=effective_layers,
+                include_tail=False,
+                start_pos=len(prompt_token_ids),
+                previous_kv_caches=prompt_prefill.next_kv_caches,
+            )
+            blockers.extend(continuation.blockers)
+            layers_executed += len(continuation.executed_layers)
+
+        if not blockers and continuation is not None and continuation.ready and continuation.output_tensor is not None:
+            tail = run_fp8_decode_tail_topk_batch(
+                verifier_model_id,
+                continuation.output_tensor,
+                top_k=1,
+                chunk_rows=lm_head_chunk_rows,
+            )
+            blockers.extend(tail.blockers)
+            if tail.ready:
+                verifier_token_ids.extend(int(row[0]) for row in tail.top_token_ids_by_position if row)
+        elif not blockers:
+            blockers.append("DeepSeek FP8 cached verifier continuation did not produce hidden states.")
+
+    expected_count = len(candidate_token_ids) + 1
+    if not blockers and len(verifier_token_ids) != expected_count:
+        blockers.append(f"DeepSeek FP8 cached verifier produced {len(verifier_token_ids)} ids, expected {expected_count}.")
+
+    return VerifierBatchResult(
+        model_id=verifier_model_id,
+        prompt_token_count=len(prompt_token_ids),
+        candidate_token_ids=list(candidate_token_ids),
+        verifier_token_ids=verifier_token_ids,
+        logits_count=len(verifier_token_ids),
+        layers_executed=layers_executed,
+        expected_layers_executed=effective_layers * 2,
         elapsed_seconds=round(time.perf_counter() - started, 4),
         blockers=blockers,
         ready=not blockers and len(verifier_token_ids) == expected_count,

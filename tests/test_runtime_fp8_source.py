@@ -5,6 +5,11 @@ from pathlib import Path
 import torch
 
 import pcketlm.core.runtime.fp8_source as fp8_source
+from pcketlm.core.runtime.speculative import (
+    FP8CachedVerifierSession,
+    verify_fp8_candidates_cached_once,
+    verify_fp8_candidates_once,
+)
 from pcketlm.core.runtime.fp8_source import (
     clear_fp8_lm_head_full_cache,
     clear_fp8_prefill_cache,
@@ -465,6 +470,61 @@ def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monk
     assert result.step_summaries[0]["ffn_elapsed_seconds"] >= 0.0
     assert result.step_summaries[0]["total_elapsed_seconds"] >= 0.0
     assert result.tail_elapsed_seconds == 0.0
+
+
+def test_run_fp8_prompt_prefill_continues_from_kv_cache_exactly(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    full = run_fp8_prompt_prefill(model_id, [1, 2, 1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+    prompt = run_fp8_prompt_prefill(model_id, [1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+    continued = run_fp8_prompt_prefill(
+        model_id,
+        [1, 2],
+        layer_count=1,
+        include_tail=False,
+        dtype=torch.float32,
+        start_pos=2,
+        previous_kv_caches=prompt.next_kv_caches,
+    )
+
+    assert full.ready is True
+    assert prompt.ready is True
+    assert continued.ready is True
+    assert continued.next_kv_caches[0][0].shape[1] == 4
+    assert continued.output_tensor is not None
+    assert full.output_tensor is not None
+    assert torch.allclose(continued.output_tensor, full.output_tensor[:, 2:, :], atol=1e-5, rtol=1e-5)
+
+
+def test_verify_fp8_candidates_cached_once_matches_stateless_prefill(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    stateless = verify_fp8_candidates_once(model_id, [1, 2], [1, 2], layer_count=1)
+    cached = verify_fp8_candidates_cached_once(model_id, [1, 2], [1, 2], layer_count=1)
+
+    assert stateless.ready is True
+    assert cached.ready is True
+    assert cached.verifier_token_ids == stateless.verifier_token_ids
+    assert cached.layers_executed == 2
+
+
+def test_fp8_cached_verifier_session_reuses_prompt_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    session = FP8CachedVerifierSession(model_id, [1, 2], layer_count=1)
+    result = session.verify([1, 2])
+    stateless = verify_fp8_candidates_once(model_id, [1, 2], [1, 2], layer_count=1)
+
+    assert session.ready is True
+    assert result.ready is True
+    assert result.verifier_token_ids == stateless.verifier_token_ids
+    assert result.layers_executed == 1
+    session.accept_prefix(2)
+    assert session.committed_token_ids == [1, 2]
+    assert all(kv.shape[1] == 4 and pe.shape[1] == 4 for kv, pe in session.kv_caches.values())
 
 
 def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatch) -> None:

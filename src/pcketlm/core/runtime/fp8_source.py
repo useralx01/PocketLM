@@ -56,6 +56,7 @@ _FP8_LM_HEAD_FULL_CACHE: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 _FP8_LM_HEAD_FULL_CACHE_STATS = {"hits": 0, "misses": 0, "stores": 0, "evictions": 0}
 _FUSED_DS_ATTENTION_SESSIONS: dict[tuple[str, int, int, int], DeepSeekNativeSession] = {}
 _FUSED_DS_ATTENTION_STATS = {"calls": 0, "fallbacks": 0, "errors": 0}
+_FP8_CPU_THREAD_TUNING_APPLIED = False
 from pcketlm.core.runtime.tensor_catalog import (
     TensorCatalogEntry,
     find_tensor_catalog_entry,
@@ -63,6 +64,28 @@ from pcketlm.core.runtime.tensor_catalog import (
     load_tensor_catalog,
     load_tensor_entry_index,
 )
+
+
+def _apply_fp8_cpu_thread_tuning() -> None:
+    global _FP8_CPU_THREAD_TUNING_APPLIED
+    if _FP8_CPU_THREAD_TUNING_APPLIED:
+        return
+    _FP8_CPU_THREAD_TUNING_APPLIED = True
+    raw = os.environ.get("PCKETLM_FP8_CPU_THREADS", "").strip()
+    if raw.lower() in {"off", "disable", "disabled"}:
+        return
+    if not raw:
+        return
+    try:
+        threads = int(raw)
+    except ValueError:
+        threads = 4
+    if threads <= 0:
+        return
+    try:
+        torch.set_num_threads(int(threads))
+    except (RuntimeError, ValueError):
+        return
 
 
 @dataclass(slots=True)
@@ -1214,7 +1237,12 @@ def run_fp8_moe(
         workers = _fp8_moe_expert_workers()
         routed_start = time.perf_counter()
         many_attempted = False
-        if _native_fp8_mlp_many_enabled() and native_fp8_mlp_many_available() and expert_jobs:
+        if (
+            _native_fp8_mlp_many_enabled()
+            and native_fp8_mlp_many_available()
+            and expert_jobs
+            and int(flat_hidden.shape[0]) == 1
+        ):
             ordered_prefixes = [expert_prefixes[int(expert_index)] for expert_index, *_rest in expert_jobs]
             if all(prefix in preloaded_mlps for prefix in ordered_prefixes):
                 many_attempted = True
@@ -1356,8 +1384,6 @@ def run_fp8_single_token_attention(
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
     if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) < 1:
         blockers.append("FP8 attention requires hidden shape [batch, seq, hidden] with at least one token.")
-    if previous_kv_cache is not None and int(hidden_3d.shape[1]) != 1:
-        blockers.append("FP8 cached attention currently supports one appended token at a time.")
 
     prefix = f"model.layers.{int(layer_index)}.self_attn"
     weight_names = {
@@ -1434,9 +1460,18 @@ def run_fp8_single_token_attention(
                 torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
                 + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
             ) * float(deepseek_config["softmax_scale"])
-            if previous_kv_cache is None and seq_len > 1:
-                causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
-                scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
+            if seq_len > 1:
+                total_len = int(scores.shape[-1])
+                previous_len = max(0, total_len - seq_len)
+                query_positions = torch.arange(
+                    previous_len,
+                    previous_len + seq_len,
+                    dtype=torch.long,
+                    device=scores.device,
+                )
+                key_positions = torch.arange(total_len, dtype=torch.long, device=scores.device)
+                causal_mask = key_positions.view(1, -1) > query_positions.view(-1, 1)
+                scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, total_len), float("-inf"))
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
             attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
             attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
@@ -1761,6 +1796,8 @@ def _run_fp8_prefill_block(
     hidden: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    start_pos: int = 0,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> FP8BlockResult:
     block_start = time.perf_counter()
     attention_elapsed = 0.0
@@ -1785,8 +1822,8 @@ def _run_fp8_prefill_block(
             layer_index,
             normed,
             dtype=dtype,
-            start_pos=0,
-            previous_kv_cache=None,
+            start_pos=int(start_pos),
+            previous_kv_cache=previous_kv_cache,
         )
         attention_elapsed = time.perf_counter() - attention_start
         blockers.extend(attention.blockers)
@@ -1833,8 +1870,11 @@ def run_fp8_prompt_prefill(
     layer_count: int = 1,
     include_tail: bool = True,
     dtype: torch.dtype = torch.bfloat16,
+    start_pos: int = 0,
+    previous_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> FP8PromptPrefillResult:
     """Run a bounded prompt prefill layer-wise so prompt weights are loaded once per layer."""
+    _apply_fp8_cpu_thread_tuning()
     prompt = [int(value) for value in token_ids]
     hidden, blockers = _load_fp8_prompt_embeddings(model_id, prompt)
     executed_layers: list[int] = []
@@ -1850,7 +1890,14 @@ def run_fp8_prompt_prefill(
     if not blockers and hidden is not None:
         for layer_index in range(int(start_layer), int(start_layer) + max(0, int(layer_count))):
             layer_start = time.perf_counter()
-            step = _run_fp8_prefill_block(model_id, layer_index, hidden.to(dtype=dtype), dtype=dtype)
+            step = _run_fp8_prefill_block(
+                model_id,
+                layer_index,
+                hidden.to(dtype=dtype),
+                dtype=dtype,
+                start_pos=int(start_pos),
+                previous_kv_cache=None if previous_kv_caches is None else previous_kv_caches.get(layer_index),
+            )
             summaries.append(
                 {
                     "layer_index": int(layer_index),
@@ -1910,6 +1957,7 @@ def run_fp8_single_token_forward(
     previous_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> FP8TokenForwardResult:
     """Run a bounded single-token FP8 forward path from embedding through layers."""
+    _apply_fp8_cpu_thread_tuning()
     embedding = load_fp8_token_embedding(model_id, token_id)
     blockers = list(embedding.blockers)
     hidden = embedding.output_tensor
@@ -1988,6 +2036,7 @@ def run_fp8_decode_loop(
     dtype: torch.dtype = torch.bfloat16,
 ) -> FP8DecodeLoopResult:
     """Run a small greedy decode loop with request-scoped safetensors handles."""
+    _apply_fp8_cpu_thread_tuning()
     from pcketlm.core.runtime.tensor_loader import scoped_tensor_handle_cache
 
     with scoped_tensor_handle_cache():
@@ -2437,10 +2486,21 @@ def _store_fp8_mlp_span_cache(
         return
     if not _fp8_mlp_span_cache_accepts(tensor_slices.keys()):
         return
+    min_layer = _fp8_mlp_span_cache_min_layer()
+    if min_layer is not None:
+        layers = [layer for layer in (_tensor_name_layer_index(name) for name in tensor_slices.keys()) if layer is not None]
+        if not layers or max(layers) < int(min_layer):
+            return
     cache_bytes = int(raw.nelement() * raw.element_size())
     if cache_bytes <= 0 or cache_bytes > max_bytes:
         return
     global _FP8_MLP_SPAN_CACHE_BYTES
+    if (
+        _fp8_mlp_span_cache_policy() == "preserve-full"
+        and _FP8_MLP_SPAN_CACHE
+        and _FP8_MLP_SPAN_CACHE_BYTES + cache_bytes > max_bytes
+    ):
+        return
     while _FP8_MLP_SPAN_CACHE and _FP8_MLP_SPAN_CACHE_BYTES + cache_bytes > max_bytes:
         _old_key, old_value = _FP8_MLP_SPAN_CACHE.popitem(last=False)
         _FP8_MLP_SPAN_CACHE_BYTES -= int(old_value[0].nelement() * old_value[0].element_size())
@@ -3166,6 +3226,34 @@ def _fp8_mlp_span_cache_filters() -> tuple[str, ...]:
     return tuple(dict.fromkeys(item.strip() for item in raw.replace(";", ",").split(",") if item.strip()))
 
 
+def _fp8_mlp_span_cache_min_layer() -> int | None:
+    raw = os.environ.get("PCKETLM_FP8_MLP_SPAN_CACHE_MIN_LAYER", "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return None
+
+
+def _fp8_mlp_span_cache_policy() -> str:
+    raw = os.environ.get("PCKETLM_FP8_MLP_SPAN_CACHE_POLICY", "").strip().lower()
+    if raw in {"preserve-full"}:
+        return raw
+    return "lru"
+
+
+def _tensor_name_layer_index(name: object) -> int | None:
+    parts = str(name).split(".")
+    for index, part in enumerate(parts[:-1]):
+        if part == "layers":
+            try:
+                return int(parts[index + 1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
 def _fp8_mlp_span_cache_accepts(names: object) -> bool:
     filters = _fp8_mlp_span_cache_filters()
     if not filters:
@@ -3309,9 +3397,6 @@ def _run_fp8_single_token_attention_materialized(
     hidden_3d = hidden.reshape(1, 1, hidden.shape[-1]) if hidden.ndim == 2 else hidden
     if hidden_3d.ndim != 3 or int(hidden_3d.shape[1]) < 1:
         blockers.append("FP8 attention requires hidden shape [batch, seq, hidden] with at least one token.")
-    if previous_kv_cache is not None and int(hidden_3d.shape[1]) != 1:
-        blockers.append("FP8 cached attention currently supports one appended token at a time.")
-
     prefix = f"model.layers.{int(layer_index)}.self_attn"
     weight_names = {
         "q_a": f"{prefix}.q_a_proj.weight",
@@ -3438,9 +3523,18 @@ def _run_fp8_single_token_attention_materialized(
                         torch.einsum("bshc,btc->bsht", q_nope_absorbed, kv_cache)
                         + torch.einsum("bshr,btr->bsht", q_pe, pe_cache)
                     ) * float(deepseek_config["softmax_scale"])
-                    if previous_kv_cache is None and seq_len > 1:
-                        causal_mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device).triu(1)
-                        scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, seq_len), float("-inf"))
+                    if seq_len > 1:
+                        total_len = int(scores.shape[-1])
+                        previous_len = max(0, total_len - seq_len)
+                        query_positions = torch.arange(
+                            previous_len,
+                            previous_len + seq_len,
+                            dtype=torch.long,
+                            device=scores.device,
+                        )
+                        key_positions = torch.arange(total_len, dtype=torch.long, device=scores.device)
+                        causal_mask = key_positions.view(1, -1) > query_positions.view(-1, 1)
+                        scores = scores.masked_fill(causal_mask.view(1, seq_len, 1, total_len), float("-inf"))
                     probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
                     attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
                     attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])

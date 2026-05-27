@@ -1689,3 +1689,11 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Default packed MLP span reads to mmap-backed buffers. The old copy path remains behind `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1` for debugging.
 - Keep native flash MLA opt-in only. It is exact enough for smaller rows but changed the close full-model 5th top-k token in the strict proof, so it is not acceptable as the main exact path.
 - Keep the attention RAM cache at `4096 MB`; `6144 MB` was tested and rejected because total generated-token wall regressed on the 32-layer row.
+## Phase Exact CPU Goal / Cached Verifier Decisions
+
+- Exact candidate batching is allowed only as verification: DeepSeek FP8 still computes the logits/top-1 that decide accepted tokens. Candidate tokens are not trusted unless the verifier matches them.
+- Cached FP8 verifier continues from prompt KV instead of re-running prompt+candidate from scratch. This keeps quality exact and removes duplicate prompt work.
+- Cached attention now supports multi-token continuation by masking future candidate positions while allowing all previous KV positions.
+- Native `fp8_mlp_many` remains valid for one token, but is disabled for batched hidden rows because it computes every selected expert against the full batch. Batched MoE now uses per-expert routed rows.
+- `PCKETLM_FP8_CPU_THREADS` and `PCKETLM_FP8_BATCH_CPU_THREADS` are opt-in only. Forced 4-thread execution helped small probes but hurt deeper/full runs.
+- `PCKETLM_FP8_MLP_SPAN_CACHE_MIN_LAYER` and `PCKETLM_FP8_MLP_SPAN_CACHE_POLICY=preserve-full` exist for experiments, but are not recommended by default because the 4 GB cache hit path was slower under real memory pressure.

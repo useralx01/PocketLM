@@ -464,3 +464,10 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Evidence: `state\phase-exact-cpu-goal-mmap-flashmla-full62.json` completed all `0-61` layers and improved wall time to `250.304s`, but changed the close 5th token.
 - Root cause: the flash MLA kernel uses a different floating-point path/order than the strict PyTorch materialized attention path, enough to reorder a close 5th logit.
 - Fix: keep flash MLA opt-in only. The exact default uses mmap hot-cache plus mmap packed spans and preserves `[223, 260, 343, 14, 295]`.
+## Phase Exact CPU Goal / Failed Routes
+
+- Blanket `torch.set_num_threads(4)` is rejected. It improved some small batched probes but made a full 62-layer single-token run slower (`331.2939s`) and changed the measured prompt row, so thread tuning is now opt-in only.
+- Full 62-layer k=96 exact candidate benchmark exceeded 32 minutes before completion and was stopped. This disproves the naive "bigger candidate batch fixes CPU speed" route on the current laptop.
+- Full 62-layer k=64 exact candidate benchmark exceeded 17 minutes before completion even after disabling batched `fp8_mlp_many`; large batches still activate too many routed experts in later MoE layers.
+- Jacobi/parallel decoding without a good draft does not converge fast enough: k=16 accepted prefix reached only 2 tokens after two iterations on the real DeepSeek probe.
+- 4 GB FP8 MLP span RAM cache did not help. It either thrashed with LRU or, when preserved, produced hits but slowed the run due memory bandwidth pressure.
