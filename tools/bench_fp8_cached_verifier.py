@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from pcketlm.core.runtime.speculative import FP8CachedVerifierSession
+from pcketlm.core.runtime.fp8_source import _load_deepseek_config
 
 
 def main() -> int:
@@ -16,14 +17,15 @@ def main() -> int:
     parser.add_argument("--prompt-token", type=int, action="append", default=None)
     parser.add_argument("--candidate-token", type=int, default=223)
     parser.add_argument("--candidate-count", type=int, default=96)
-    parser.add_argument("--layer-count", type=int, default=62)
+    parser.add_argument("--layer-count", type=int, default=None)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     prompt = list(args.prompt_token or [0, 1])
     candidates = [int(args.candidate_token)] * max(1, int(args.candidate_count))
     started = time.perf_counter()
-    session = FP8CachedVerifierSession(args.model_id, prompt, layer_count=int(args.layer_count))
+    layer_count = int(args.layer_count) if args.layer_count is not None else int(_load_deepseek_config(args.model_id)["num_hidden_layers"])
+    session = FP8CachedVerifierSession(args.model_id, prompt, layer_count=layer_count)
     prefill_elapsed = time.perf_counter() - started
     verify_started = time.perf_counter()
     result = session.verify(candidates)
@@ -33,7 +35,7 @@ def main() -> int:
         "prompt_token_ids": prompt,
         "candidate_token": int(args.candidate_token),
         "candidate_count": len(candidates),
-        "layer_count": int(args.layer_count),
+        "layer_count": int(layer_count),
         "session_ready": bool(session.ready),
         "session_blockers": list(session.blockers),
         "prefill_elapsed_seconds": round(prefill_elapsed, 4),

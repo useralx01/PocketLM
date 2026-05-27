@@ -476,3 +476,8 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - DeepSeek tokenizer loading originally failed for D-drive sources because `tokenizer_runtime` only looked under `models/<id>/original`. Fixed by falling back to tensor catalog `model_dir`.
 - A full 62-layer k=128 repeat-next live run completed compute but lost the result at final serialization because the wrapper used `as_dict()` instead of the real `to_dict()` method. Fixed operationally by adding `tools\bench_fp8_repeat_next.py`, which writes progress after each pass and avoids losing long-run evidence.
 - The first under-10 repeat-next result was exact but whitespace-only. After adding DeepSeek chat formatting, the real full 62-layer k=32 row still generated only `“` followed by spaces, so the current local FP8 verifier path has a generation-quality/correctness blocker.
+## PLM-13 Exact CPU Useful Answer Fix
+
+- Root cause of the quote/spaces collapse: the runtime treated DeepSeek's physical catalog layer count (`62`) as the normal chat stack, but DeepSeek V3 config says `61` hidden layers plus `1` next-token-prediction layer. Running the extra MTP layer as a transformer block corrupts normal generation. Fix: default normal chat and benchmark tools to config `num_hidden_layers`.
+- Follow-up product bug: after the 61-layer fix, DeepSeek produced `Hello!!` then EOS, but the benchmark kept decoding past EOS into raw special tokens. Fix: stop generation at EOS and trim visible decode output before EOS.
+- Current remaining blocker after the correctness fix: useful exact local output is real, but speed is far above target. The corrected proof is `277.921s/token`, so the old `9.4418s/token` whitespace row is not a valid useful-answer win.

@@ -423,9 +423,18 @@ def _encode_with_catalog_tokenizer(model_id: str, prompt: str) -> tuple[list[int
 
 def _decode_with_catalog_tokenizer(model_id: str, token_ids: list[int]) -> tuple[str, list[str]]:
     from tokenizers import Tokenizer
+    from pcketlm.core.runtime.tokenizer_runtime import load_generation_settings
     from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
 
     if not token_ids:
+        return "", []
+    eos_ids = {int(value) for value in load_generation_settings(model_id).eos_token_ids}
+    visible_ids: list[int] = []
+    for token_id in token_ids:
+        if int(token_id) in eos_ids:
+            break
+        visible_ids.append(int(token_id))
+    if not visible_ids:
         return "", []
     catalog = load_tensor_catalog(model_id)
     tokenizer_path = catalog.model_dir / "tokenizer.json"
@@ -433,7 +442,7 @@ def _decode_with_catalog_tokenizer(model_id: str, token_ids: list[int]) -> tuple
         return "", [f"Missing tokenizer at {tokenizer_path}."]
     try:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
-        return tokenizer.decode([int(value) for value in token_ids], skip_special_tokens=False), []
+        return tokenizer.decode([int(value) for value in visible_ids], skip_special_tokens=False), []
     except Exception as exc:
         return "", [f"Tokenizer decode failed: {exc}."]
 

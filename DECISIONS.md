@@ -1706,3 +1706,8 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep `tools\bench_fp8_repeat_next.py` as the real long-run CPU proof harness because it saves progress after each pass. Long DeepSeek runs must not depend on one final JSON write after 20-30 minutes of compute.
 - Apply DeepSeek's own chat wrapper when `tokenizer_config.json` exposes `<｜User｜>` and `<｜Assistant｜>`. Raw prompts are no longer acceptable evidence for DeepSeek chat quality.
 - Do not count whitespace-only or near-blank repeat-next generations as meeting the useful local DeepSeek goal, even if they are exact and under `10s/token`. Speed proof and useful-answer proof are now separate gates.
+## PLM-13 Exact CPU Useful Answer Decisions
+
+- For DeepSeek V3 normal chat, trust `config.json` `num_hidden_layers=61` over the catalog's physical `62` layer indices. The extra physical layer is accounted for by `num_nextn_predict_layers=1` and must not be run as part of ordinary assistant generation.
+- Stop FP8 decode/benchmark generation at configured EOS tokens and decode only visible tokens before EOS for user-facing text. Raw token traces stay in JSON evidence for debugging.
+- A short EOS-ended answer such as `Hello!!` is allowed to pass the useful-text gate even if it is shorter than the long-answer default thresholds; speed target evaluation remains separate.

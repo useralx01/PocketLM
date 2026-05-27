@@ -590,7 +590,13 @@ def fp8_source_status(model_id: str) -> dict:
         config_payload = _load_json_payload(str(config_path), config_path.stat().st_mtime_ns)
     config_layer_count = int(config_payload.get("num_hidden_layers", 0) or 0)
     catalog_layer_count = int(catalog.layer_count or catalog.num_hidden_layers or 0)
-    layer_count = max(config_layer_count, catalog_layer_count)
+    nextn_predict_layers = int(config_payload.get("num_nextn_predict_layers", 0) or 0)
+    if config_layer_count > 0:
+        layer_count = config_layer_count
+        layer_count_source = "config"
+    else:
+        layer_count = catalog_layer_count
+        layer_count_source = "catalog"
     first_dense = int(config_payload.get("first_k_dense_replace", config_payload.get("n_dense_layers", 0)) or 0)
     top_k = int(config_payload.get("num_experts_per_tok", config_payload.get("n_activated_experts", 0)) or 0)
     return {
@@ -607,8 +613,10 @@ def fp8_source_status(model_id: str) -> dict:
             "first_dense_layers": first_dense,
             "config_layer_count": config_layer_count,
             "catalog_layer_count": catalog_layer_count,
+            "nextn_predict_layers": nextn_predict_layers,
+            "excluded_predict_layers": max(0, catalog_layer_count - layer_count),
             "layer_count": layer_count,
-            "layer_count_source": "catalog" if catalog_layer_count >= config_layer_count else "config",
+            "layer_count_source": layer_count_source,
             "top_k_experts": top_k,
             "native_fp8_linear": _native_fp8_linear_enabled() and native_fp8_linear_available(),
             "native_fp8_mlp": _native_fp8_linear_enabled() and native_fp8_mlp_available(),
@@ -2060,6 +2068,8 @@ def _run_fp8_decode_loop_impl(
     dtype: torch.dtype = torch.bfloat16,
 ) -> FP8DecodeLoopResult:
     """Run a small greedy decode loop using the FP8 KV-carrying token step."""
+    from pcketlm.core.runtime.tokenizer_runtime import load_generation_settings
+
     prompt = [int(value) for value in token_ids]
     generated: list[int] = []
     blockers: list[str] = []
@@ -2069,6 +2079,7 @@ def _run_fp8_decode_loop_impl(
     final_top_logits: list[float] = []
     position = 0
     current_tokens = list(prompt)
+    eos_token_ids = {int(value) for value in load_generation_settings(model_id).eos_token_ids}
     if not current_tokens:
         blockers.append("At least one token id is required.")
 
@@ -2154,6 +2165,25 @@ def _run_fp8_decode_loop_impl(
             token_id = int(final_top_ids[0])
             generated.append(token_id)
             current_tokens.append(token_id)
+            if token_id in eos_token_ids:
+                position += 1
+                summaries.append(
+                    {
+                        "position": int(position - 1),
+                        "phase": "generate_eos_stop",
+                        "token_id": int(token_id),
+                        "ready": True,
+                        "executed_layers": [],
+                        "tail_top_token_ids": list(final_top_ids),
+                        "cache_sequence_lengths": {
+                            str(key): int(value[0].shape[1]) for key, value in caches.items()
+                        },
+                        "elapsed_seconds": 0.0,
+                        "stopped_by_eos": True,
+                        "blockers": [],
+                    }
+                )
+                break
             include_tail = len(generated) < int(max_new_tokens)
             phase = "generate"
             if not include_tail and not _fp8_prepare_final_cache_enabled():

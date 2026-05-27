@@ -66,12 +66,56 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["config_layer_count"] == 1
     assert status["runtime_policy"]["catalog_layer_count"] == 1
     assert status["runtime_policy"]["layer_count"] == 1
-    assert status["runtime_policy"]["layer_count_source"] == "catalog"
+    assert status["runtime_policy"]["layer_count_source"] == "config"
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
     assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 4096 * 1024 * 1024
     assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
     assert status["runtime_policy"]["lm_head_full_cache_max_mb"] == 2048
+
+
+def test_fp8_source_status_excludes_deepseek_next_token_prediction_layer(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "deepseek-fp8-nextn-test"
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v3",
+                "num_hidden_layers": 1,
+                "num_nextn_predict_layers": 1,
+                "num_experts_per_tok": 1,
+                "quantization_config": {"fmt": "e4m3", "quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    tensors = {
+        "model.layers.0.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [128, 128], bytes(128 * 128)),
+        "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.1.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [128, 128], bytes(128 * 128)),
+        "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+    }
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    _write_safetensors_bytes(shard, tensors)
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": shard.stat().st_size}, "weight_map": {name: shard.name for name in tensors}}),
+        encoding="utf-8",
+    )
+    build_tensor_catalog(model_id, model_dir)
+
+    status = fp8_source_status(model_id)
+
+    assert status["runtime_policy"]["config_layer_count"] == 1
+    assert status["runtime_policy"]["catalog_layer_count"] == 2
+    assert status["runtime_policy"]["nextn_predict_layers"] == 1
+    assert status["runtime_policy"]["excluded_predict_layers"] == 1
+    assert status["runtime_policy"]["layer_count"] == 1
+    assert status["runtime_policy"]["layer_count_source"] == "config"
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:

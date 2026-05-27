@@ -8,12 +8,17 @@ from pathlib import Path
 def _quality(text: str, token_ids: list[int], *, min_non_whitespace: int, min_unique_tokens: int) -> dict:
     non_whitespace = sum(1 for char in text if not char.isspace())
     unique_tokens = len(set(int(value) for value in token_ids))
+    complete_short_answer = non_whitespace >= 3 and bool(token_ids)
     return {
         "non_whitespace_chars": non_whitespace,
         "unique_token_count": unique_tokens,
         "min_non_whitespace_chars": int(min_non_whitespace),
         "min_unique_token_count": int(min_unique_tokens),
-        "is_useful_text": non_whitespace >= int(min_non_whitespace) and unique_tokens >= int(min_unique_tokens),
+        "is_complete_short_answer": complete_short_answer,
+        "is_useful_text": (
+            non_whitespace >= int(min_non_whitespace) and unique_tokens >= int(min_unique_tokens)
+        )
+        or complete_short_answer,
     }
 
 

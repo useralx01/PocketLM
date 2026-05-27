@@ -6440,3 +6440,12 @@ Result: 297 passed in 21.83s
 - Re-analysis of the old k=192 speed proof: `9.4418s/token`, but `0` non-whitespace chars and `1` unique token, so it fails useful-text target. Evidence: `state\phase-exact-cpu-goal-repeat-next-full62-k192-quality.json`.
 - Real full 62-layer DeepSeek chat-template repeat-next, k=32: generated `“                               `, `31/32` accepted, anti-cheat `186/186`, total `1581.5001s`, `49.4219s/token`, `1` non-whitespace char, `2` unique tokens. Evidence: `state\phase-exact-cpu-goal-deepseek-chat-repeat-next-full62-k32.json`.
 - Outcome revision: the exact verifier speed machinery works, but the local DeepSeek FP8 path is not yet producing useful normal answers. The next blocker is verifier output correctness/generation quality, not draft acceptance.
+## PLM-13 Exact CPU Goal / DeepSeek Config Layer Fix
+
+- Root cause found: DeepSeek V3's `config.json` has `num_hidden_layers=61` and `num_nextn_predict_layers=1`; the tensor catalog sees physical layers `0-61`, but layer `61` is the extra next-token-prediction/MTP layer, not part of normal chat generation.
+- Fixed `fp8_source_status` and the FP8 benchmark tools so default full chat uses config `num_hidden_layers` (`61`) instead of the catalog's physical `62` layers. The status now reports `config_layer_count=61`, `catalog_layer_count=62`, `nextn_predict_layers=1`, `excluded_predict_layers=1`, `layer_count=61`.
+- Added EOS stopping for the FP8 decode loop and visible-text trimming for FP8 chat decode/benchmark output, so DeepSeek no longer keeps emitting raw special tokens after a complete answer.
+- Real corrected 61-layer DeepSeek chat-template repeat-next proof, prompt `Say hello in one short sentence.`, k=4: visible text `Hello!!`, raw text `Hello!!<｜end▁of▁sentence｜>`, stopped by EOS, anti-cheat `183/183`, generated ids `[19923, 3, 3, 1]`, elapsed `1111.6842s`, `277.921s/token`. Evidence: `state\phase-exact-cpu-goal-deepseek-chat-repeat-next-config61-eos-k4.json`.
+- Re-analysis now classifies `Hello!!` as useful short EOS-ended text, but the `<=10s/token` target still fails hard: `277.921s/token` on the corrected useful-answer proof. This replaces the old whitespace-only under-10 claim as the honest current state.
+- Focused tests: `python -m pytest tests\test_runtime_fp8_source.py tests\test_tokenizer_runtime.py -q` -> `35 passed`.
+- Full suite: `python -m pytest tests\ -q` -> `506 passed, 2 skipped in 83.43s`.
