@@ -12,6 +12,16 @@ from pcketlm.core.runtime.speculative import FP8CachedVerifierSession
 from pcketlm.core.runtime.tokenizer_runtime import decode_token_ids_to_text, prepare_prompt_text
 
 
+def _text_quality(text: str, token_ids: list[int]) -> dict:
+    non_whitespace = sum(1 for char in text if not char.isspace())
+    unique_tokens = len(set(int(value) for value in token_ids))
+    return {
+        "non_whitespace_chars": non_whitespace,
+        "unique_token_count": unique_tokens,
+        "is_nonblank": non_whitespace > 0,
+    }
+
+
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -25,6 +35,8 @@ def main() -> int:
     parser.add_argument("--k", type=int, default=96)
     parser.add_argument("--layers", type=int, default=62)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--min-non-whitespace", type=int, default=8)
+    parser.add_argument("--min-unique-tokens", type=int, default=3)
     args = parser.parse_args()
 
     out_path = Path(args.out)
@@ -105,11 +117,24 @@ def main() -> int:
         )
         elapsed = time.perf_counter() - started
         generated_text, text_blockers = decode_token_ids_to_text(args.model_id, generated)
+        quality = _text_quality(generated_text, generated)
+        quality["min_non_whitespace_chars"] = int(args.min_non_whitespace)
+        quality["min_unique_token_count"] = int(args.min_unique_tokens)
+        quality["is_useful_text"] = (
+            int(quality["non_whitespace_chars"]) >= int(args.min_non_whitespace)
+            and int(quality["unique_token_count"]) >= int(args.min_unique_tokens)
+        )
         payload.update(
             {
-                "ready": bool(not session.blockers and not text_blockers and len(generated) >= int(args.max_new)),
+                "ready": bool(
+                    not session.blockers
+                    and not text_blockers
+                    and len(generated) >= int(args.max_new)
+                    and quality["is_useful_text"]
+                ),
                 "generated_token_ids": list(generated),
                 "generated_text": generated_text,
+                "text_quality": quality,
                 "generated_tokens": len(generated),
                 "accepted_token_count": accepted,
                 "corrected_token_count": corrected,
@@ -119,7 +144,10 @@ def main() -> int:
                 "layers_executed": layers_executed,
                 "expected_layers_executed": expected_layers,
                 "anti_cheat_passed": layers_executed == expected_layers,
-                "blockers": list(session.blockers) + list(text_blockers),
+                "blockers": list(session.blockers)
+                + list(text_blockers)
+                + ([] if quality["is_nonblank"] else ["Generated text is blank/whitespace only."])
+                + ([] if quality["is_useful_text"] else ["Generated text did not meet useful-text gate."]),
             }
         )
         _write(out_path, payload)

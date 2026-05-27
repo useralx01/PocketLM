@@ -6430,3 +6430,13 @@ Result: 297 passed in 21.83s
 - Real full 62-layer repeat-next, prompt `Say hello in one short sentence.`, k=96: ready `true`, `96/96` accepted, `0` corrected, anti-cheat `124/124`, verify `764.2922s`, total `1195.8159s`, `12.4564s/token`. Evidence: `state\phase-exact-cpu-goal-repeat-next-runner-full62-k96.json`.
 - Real full 62-layer repeat-next, same prompt, k=192: ready `true`, `192/192` accepted, `0` corrected, anti-cheat `124/124`, verify `1428.9817s`, total `1812.8191s`, `9.4418s/token`. Evidence: `state\phase-exact-cpu-goal-repeat-next-runner-full62-k192.json`.
 - Outcome: the first local CPU-only exact target is met on the measured long-run repeat-next path: full DeepSeek FP8, all `62` layers, no skipped layers, no Q4, no cloud/GPU, no smaller replacement, and measured `<=10s/token` including prompt prefill.
+
+## PLM-13 Exact CPU Goal / Useful Text Gate
+
+- Added DeepSeek V3 chat-template preparation from `tokenizer_config.json`: prompts now use `<｜begin▁of▁sentence｜><｜User｜>...<｜Assistant｜>` instead of raw text when the tokenizer exposes DeepSeek's chat template.
+- Verified the new DeepSeek prompt wrapper matches HuggingFace `apply_chat_template` rendering exactly for `Say hello in one short sentence.`. Evidence: `state\phase-exact-cpu-goal-deepseek-chat-template-match.json`.
+- Added a useful-text quality gate to `tools\bench_fp8_repeat_next.py` and a standalone analyzer `tools\analyze_fp8_generation_quality.py`. A speed row no longer counts as useful unless the generated text has enough non-whitespace characters and token diversity.
+- Focused tests: `python -m pytest tests\test_tokenizer_runtime.py -q` -> `3 passed`.
+- Re-analysis of the old k=192 speed proof: `9.4418s/token`, but `0` non-whitespace chars and `1` unique token, so it fails useful-text target. Evidence: `state\phase-exact-cpu-goal-repeat-next-full62-k192-quality.json`.
+- Real full 62-layer DeepSeek chat-template repeat-next, k=32: generated `“                               `, `31/32` accepted, anti-cheat `186/186`, total `1581.5001s`, `49.4219s/token`, `1` non-whitespace char, `2` unique tokens. Evidence: `state\phase-exact-cpu-goal-deepseek-chat-repeat-next-full62-k32.json`.
+- Outcome revision: the exact verifier speed machinery works, but the local DeepSeek FP8 path is not yet producing useful normal answers. The next blocker is verifier output correctness/generation quality, not draft acceptance.

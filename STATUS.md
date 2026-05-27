@@ -739,3 +739,4 @@ PLM-13 exact CPU latest: mmap attention hot-cache + mmap packed MLP spans cut fu
 Exact local CPU DeepSeek now has an exact cached FP8 verifier path that measured `6.5966s` per verified candidate on a full 62-layer, k=96 DeepSeek run using sequential-copy packed spans; visible-token speed depends on candidate acceptance.
 Exact FP8 live generation plumbing is implemented, but available Qwen drafts have low acceptance (`2/4` on the layer-8 probe), so the next remaining blocker is high-quality local DeepSeek-compatible draft candidates.
 PLM-13 exact CPU target met: full 62-layer DeepSeek FP8 repeat-next verifier path produced `192` exact tokens in `1812.8191s` = `9.4418s/token`, anti-cheat `124/124`, no cloud/GPU/Q4/smaller-model replacement.
+PLM-13 exact CPU useful-answer gate: not met yet. DeepSeek chat formatting is fixed, but full 62-layer output still collapses to quote/spaces; the old under-10 row fails useful-text quality despite being exact.

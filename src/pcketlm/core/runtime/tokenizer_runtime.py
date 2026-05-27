@@ -194,6 +194,10 @@ def prepare_prompt_text(
             f"<|im_start|>user\n{prompt}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
+    elif apply_chat_format and _is_deepseek_chat_template(tokenizer_config):
+        bos_text = _added_token_content(tokenizer_config.get("bos_token")) or "<｜begin▁of▁sentence｜>"
+        system_text = "" if system_prompt is None else str(system_prompt)
+        prepared_prompt = f"{bos_text}{system_text}<｜User｜>{prompt}<｜Assistant｜>"
 
     token_ids, blockers = encode_prompt_text(model_id, prepared_prompt)
     return PreparedPromptResult(
@@ -204,6 +208,20 @@ def prepare_prompt_text(
         blockers=blockers,
         ready=not blockers,
     )
+
+
+def _is_deepseek_chat_template(tokenizer_config: dict) -> bool:
+    chat_template = str(tokenizer_config.get("chat_template") or "")
+    return "<｜User｜>" in chat_template and "<｜Assistant｜>" in chat_template
+
+
+def _added_token_content(value: object) -> str | None:
+    if isinstance(value, dict):
+        content = value.get("content")
+        return None if content is None else str(content)
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def encode_prompt_text(model_id: str, prompt: str) -> tuple[list[int], list[str]]:
