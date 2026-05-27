@@ -1698,3 +1698,6 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - `PCKETLM_FP8_CPU_THREADS` and `PCKETLM_FP8_BATCH_CPU_THREADS` are opt-in only. Forced 4-thread execution helped small probes but hurt deeper/full runs.
 - `PCKETLM_FP8_MLP_SPAN_CACHE_MIN_LAYER` and `PCKETLM_FP8_MLP_SPAN_CACHE_POLICY=preserve-full` exist for experiments, but are not recommended by default because the 4 GB cache hit path was slower under real memory pressure.
 - Packed expert MLP spans now default to sequential native copy rather than mmap memoryviews. On the external SSD, lazy mmap page faults were slower for routed expert batches. `PCKETLM_ENABLE_FP8_PACK_MMAP_SPANS=1` restores the old mmap span path for experiments; `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1` still forces copy.
+- Exact FP8 live generation uses DeepSeek's own verified `next_token_id` as the first candidate in every chunk. This guarantees at least one exact accepted token per pass and prevents a draft model from replacing DeepSeek's first decision.
+- A short draft is allowed in the FP8 live loop if it produced any tokens; the verifier pads behind DeepSeek's forced first token. This avoids aborting when small local drafts emit fewer tokens than requested.
+- D-drive DeepSeek sources are first-class metadata roots for tokenizer/config loading via tensor catalog fallback.

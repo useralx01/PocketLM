@@ -737,3 +737,4 @@ PLM-13 exact CPU final: native DLLs are unblocked and tests pass (`493 passed, 2
 PLM-13 exact CPU latest: prefix RAM attention cache is now default and cuts full 62-layer cached token to `275.327s`, still blocked far above `<=10s/token` by attention/FFN compute bandwidth.
 PLM-13 exact CPU latest: mmap attention hot-cache + mmap packed MLP spans cut full 62-layer cached token to `245.935s` with exact top-k preserved; still far above `<=10s/token`.
 Exact local CPU DeepSeek now has an exact cached FP8 verifier path that measured `6.5966s` per verified candidate on a full 62-layer, k=96 DeepSeek run using sequential-copy packed spans; visible-token speed depends on candidate acceptance.
+Exact FP8 live generation plumbing is implemented, but available Qwen drafts have low acceptance (`2/4` on the layer-8 probe), so the next remaining blocker is high-quality local DeepSeek-compatible draft candidates.

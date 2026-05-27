@@ -738,6 +738,176 @@ class FP8CachedVerifierSession:
         self._tentative_candidate_token_ids = []
         self._tentative_verifier_token_ids = []
 
+    def append_token(self, token_id: int) -> FP8CachedVerifierPassResult:
+        """Append one verifier-chosen token to KV for exact correction alignment."""
+        verification = self.verify([int(token_id)])
+        if verification.ready and verification.verifier_token_ids and int(verification.verifier_token_ids[0]) == int(token_id):
+            self.accept_prefix(1)
+        elif verification.ready:
+            self.blockers.append("DeepSeek FP8 correction token did not match verifier next token.")
+        return verification
+
+
+def fp8_speculative_generate(
+    verifier_model_id: str,
+    speculator_model_id: str,
+    prompt: str,
+    max_new_tokens: int,
+    *,
+    k: int = 96,
+    layer_count: int | None = None,
+    proposer: Callable[..., CandidateProposal] | None = None,
+) -> SpeculativeGenerateResult:
+    """Exact DeepSeek FP8 generation with prompt-cached chunk verification."""
+    started = time.perf_counter()
+    blockers: list[str] = []
+    if max_new_tokens <= 0:
+        blockers.append("max_new_tokens must be greater than zero.")
+    if k <= 0:
+        blockers.append("k must be greater than zero.")
+    prepared = prepare_prompt_text(verifier_model_id, prompt, apply_chat_format=True)
+    blockers.extend(prepared.blockers)
+    if blockers or not prepared.ready:
+        return SpeculativeGenerateResult(
+            verifier_model_id=verifier_model_id,
+            speculator_model_id=speculator_model_id,
+            prompt=prompt,
+            prepared_prompt=prepared.prepared_prompt,
+            prompt_token_ids=list(prepared.token_ids),
+            generated_token_ids=[],
+            generated_text="",
+            full_text=prompt,
+            max_new_tokens=max_new_tokens,
+            k=k,
+            verifier_passes=0,
+            speculator_calls=0,
+            accepted_token_count=0,
+            corrected_token_count=0,
+            average_accepted_per_pass=0.0,
+            elapsed_seconds=round(time.perf_counter() - started, 4),
+            effective_tokens_per_second=0.0,
+            layers_executed=0,
+            expected_layers_executed=0,
+            anti_cheat_passed=False,
+            blockers=blockers,
+            ready=False,
+        )
+
+    session = FP8CachedVerifierSession(verifier_model_id, list(prepared.token_ids), layer_count=layer_count)
+    blockers.extend(session.blockers)
+    propose_fn = proposer or propose_candidates
+    generated: list[int] = []
+    verifier_passes = 0
+    speculator_calls = 0
+    accepted_token_count = 0
+    corrected_token_count = 0
+    correction_passes = 0
+    layers_executed = int(session.layers_executed)
+    expected_layers = int(session.expected_layers_executed)
+
+    while not blockers and len(generated) < int(max_new_tokens):
+        remaining = int(max_new_tokens) - len(generated)
+        batch_k = min(int(k), remaining)
+        current_ids = list(prepared.token_ids) + list(session.committed_token_ids)
+        current_text, decode_blockers = decode_token_ids_to_text(verifier_model_id, current_ids)
+        if decode_blockers:
+            blockers.extend(decode_blockers)
+            break
+        proposal = propose_fn(
+            speculator_model_id,
+            current_ids,
+            batch_k,
+            verifier_model_id=verifier_model_id,
+            prompt_text=current_text,
+        )
+        speculator_calls += 1
+        if not proposal.ready and not proposal.token_ids:
+            blockers.extend(proposal.blockers or ["Speculator failed to produce candidates."])
+            break
+        candidates = _force_fp8_first_candidate(session.next_token_id, proposal.token_ids, batch_k)
+        verification = session.verify(candidates)
+        verifier_passes += 1
+        layers_executed += int(verification.layers_executed)
+        expected_layers += int(verification.expected_layers_executed)
+        if not verification.ready:
+            blockers.extend(verification.blockers or ["DeepSeek FP8 verifier failed to check candidates."])
+            break
+
+        accepted_this_pass = 0
+        for index, candidate_token_id in enumerate(candidates):
+            verifier_token_id = int(verification.verifier_token_ids[index])
+            if int(candidate_token_id) != verifier_token_id:
+                break
+            generated.append(int(candidate_token_id))
+            accepted_this_pass += 1
+            accepted_token_count += 1
+            if len(generated) >= int(max_new_tokens):
+                break
+
+        session.accept_prefix(accepted_this_pass)
+        if len(generated) >= int(max_new_tokens):
+            break
+
+        corrected_token = int(verification.verifier_token_ids[accepted_this_pass])
+        generated.append(corrected_token)
+        corrected_token_count += 1
+        correction = session.append_token(corrected_token)
+        correction_passes += 1
+        layers_executed += int(correction.layers_executed)
+        expected_layers += int(correction.expected_layers_executed)
+        if not correction.ready:
+            blockers.extend(correction.blockers or ["DeepSeek FP8 verifier failed to append correction."])
+            break
+
+    blockers.extend(session.blockers)
+    generated_text, generated_blockers = decode_token_ids_to_text(verifier_model_id, generated)
+    full_text, full_blockers = decode_token_ids_to_text(verifier_model_id, list(prepared.token_ids) + generated)
+    blockers.extend(generated_blockers)
+    blockers.extend(full_blockers)
+    elapsed = round(time.perf_counter() - started, 4)
+    tokens_per_second = 0.0 if elapsed <= 0 else round(len(generated) / elapsed, 6)
+    average_accepted = 0.0 if verifier_passes <= 0 else round(accepted_token_count / verifier_passes, 4)
+    anti_cheat = expected_layers > 0 and layers_executed == expected_layers
+    return SpeculativeGenerateResult(
+        verifier_model_id=verifier_model_id,
+        speculator_model_id=speculator_model_id,
+        prompt=prompt,
+        prepared_prompt=prepared.prepared_prompt,
+        prompt_token_ids=list(prepared.token_ids),
+        generated_token_ids=generated[: int(max_new_tokens)],
+        generated_text=generated_text,
+        full_text=full_text,
+        max_new_tokens=int(max_new_tokens),
+        k=int(k),
+        verifier_passes=verifier_passes,
+        speculator_calls=speculator_calls,
+        accepted_token_count=accepted_token_count,
+        corrected_token_count=corrected_token_count,
+        average_accepted_per_pass=average_accepted,
+        elapsed_seconds=elapsed,
+        effective_tokens_per_second=tokens_per_second,
+        layers_executed=layers_executed,
+        expected_layers_executed=expected_layers,
+        anti_cheat_passed=anti_cheat,
+        verifier_token_positions_processed=accepted_token_count + corrected_token_count + correction_passes,
+        expert_telemetry=expert_residency_snapshot(),
+        blockers=blockers,
+        ready=not blockers and len(generated) >= int(max_new_tokens) and anti_cheat,
+    )
+
+
+def _force_fp8_first_candidate(next_token_id: int | None, proposed: list[int], k: int) -> list[int]:
+    wanted = max(1, int(k))
+    cleaned = [int(value) for value in proposed]
+    if next_token_id is None:
+        return cleaned[:wanted]
+    forced = [int(next_token_id)]
+    forced.extend(value for value in cleaned if int(value) != int(next_token_id))
+    if len(forced) < wanted:
+        filler = forced[-1]
+        forced.extend([filler] * (wanted - len(forced)))
+    return forced[:wanted]
+
 
 def _slice_kv_caches(
     kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]],

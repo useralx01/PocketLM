@@ -629,6 +629,146 @@ def test_stateful_speculative_fuses_first_prefill_and_verify(monkeypatch) -> Non
     assert result.layers_executed == 2
 
 
+def test_fp8_speculative_generate_forces_verified_first_candidate(monkeypatch) -> None:
+    prompt_ids = [1, 2]
+    calls = {"verify": 0, "append": 0}
+
+    monkeypatch.setattr(
+        speculative,
+        "prepare_prompt_text",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True, blockers=[], prepared_prompt="prompt", token_ids=prompt_ids),
+    )
+    monkeypatch.setattr(
+        speculative,
+        "decode_token_ids_to_text",
+        lambda _model_id, token_ids: (" ".join(str(token_id) for token_id in token_ids), []),
+    )
+    monkeypatch.setattr(speculative, "expert_residency_snapshot", lambda: {})
+
+    class FakeFP8Session:
+        def __init__(self, verifier_model_id, prompt_token_ids, *, layer_count=None):
+            self.verifier_model_id = verifier_model_id
+            self.prompt_token_ids = list(prompt_token_ids)
+            self.committed_token_ids = []
+            self.next_token_id = 42
+            self.layers_executed = 2
+            self.expected_layers_executed = 2
+            self.blockers = []
+
+        def verify(self, candidate_token_ids):
+            calls["verify"] += 1
+            assert candidate_token_ids[0] == 42
+            return speculative.FP8CachedVerifierPassResult(
+                model_id="deepseek-v3",
+                prompt_token_count=len(self.prompt_token_ids),
+                committed_token_count=len(self.committed_token_ids),
+                candidate_token_ids=list(candidate_token_ids),
+                verifier_token_ids=[42, 100, 101],
+                elapsed_seconds=1.0,
+                continuation_elapsed_seconds=0.8,
+                tail_elapsed_seconds=0.2,
+                layers_executed=2,
+                expected_layers_executed=2,
+                ready=True,
+            )
+
+        def accept_prefix(self, accepted_count):
+            self.committed_token_ids.extend([42][:accepted_count])
+            self.next_token_id = 100
+
+        def append_token(self, token_id):
+            calls["append"] += 1
+            self.committed_token_ids.append(int(token_id))
+            self.next_token_id = 101
+            return speculative.FP8CachedVerifierPassResult(
+                model_id="deepseek-v3",
+                prompt_token_count=len(self.prompt_token_ids),
+                committed_token_count=len(self.committed_token_ids),
+                candidate_token_ids=[int(token_id)],
+                verifier_token_ids=[int(token_id), 101],
+                elapsed_seconds=1.0,
+                continuation_elapsed_seconds=0.8,
+                tail_elapsed_seconds=0.2,
+                layers_executed=2,
+                expected_layers_executed=2,
+                ready=True,
+            )
+
+    def proposer(_speculator, _current_ids, k, **_kwargs):
+        return CandidateProposal("spec", "prompt", "bad", token_ids=[99, 100][:k], ready=True)
+
+    monkeypatch.setattr(speculative, "FP8CachedVerifierSession", FakeFP8Session)
+
+    result = speculative.fp8_speculative_generate("deepseek-v3", "spec", "prompt", 2, k=2, proposer=proposer)
+
+    assert result.ready is True
+    assert result.generated_token_ids == [42, 100]
+    assert result.accepted_token_count == 1
+    assert result.corrected_token_count == 1
+    assert calls == {"verify": 1, "append": 1}
+
+
+def test_fp8_speculative_generate_uses_short_draft(monkeypatch) -> None:
+    prompt_ids = [1, 2]
+
+    monkeypatch.setattr(
+        speculative,
+        "prepare_prompt_text",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True, blockers=[], prepared_prompt="prompt", token_ids=prompt_ids),
+    )
+    monkeypatch.setattr(
+        speculative,
+        "decode_token_ids_to_text",
+        lambda _model_id, token_ids: (" ".join(str(token_id) for token_id in token_ids), []),
+    )
+    monkeypatch.setattr(speculative, "expert_residency_snapshot", lambda: {})
+
+    class FakeFP8Session:
+        def __init__(self, verifier_model_id, prompt_token_ids, *, layer_count=None):
+            self.verifier_model_id = verifier_model_id
+            self.prompt_token_ids = list(prompt_token_ids)
+            self.committed_token_ids = []
+            self.next_token_id = 7
+            self.layers_executed = 1
+            self.expected_layers_executed = 1
+            self.blockers = []
+
+        def verify(self, candidate_token_ids):
+            assert candidate_token_ids == [7, 8, 8]
+            return speculative.FP8CachedVerifierPassResult(
+                model_id="deepseek-v3",
+                prompt_token_count=len(self.prompt_token_ids),
+                committed_token_count=len(self.committed_token_ids),
+                candidate_token_ids=list(candidate_token_ids),
+                verifier_token_ids=[7, 8, 8, 9],
+                elapsed_seconds=1.0,
+                continuation_elapsed_seconds=0.8,
+                tail_elapsed_seconds=0.2,
+                layers_executed=1,
+                expected_layers_executed=1,
+                ready=True,
+            )
+
+        def accept_prefix(self, accepted_count):
+            self.committed_token_ids.extend([7, 8, 8][:accepted_count])
+            self.next_token_id = 9
+
+        def append_token(self, token_id):
+            raise AssertionError("all candidates should be accepted")
+
+    def proposer(_speculator, _current_ids, _k, **_kwargs):
+        return CandidateProposal("spec", "prompt", "short", token_ids=[8], blockers=["short"], ready=False)
+
+    monkeypatch.setattr(speculative, "FP8CachedVerifierSession", FakeFP8Session)
+
+    result = speculative.fp8_speculative_generate("deepseek-v3", "spec", "prompt", 3, k=3, proposer=proposer)
+
+    assert result.ready is True
+    assert result.generated_token_ids == [7, 8, 8]
+    assert result.accepted_token_count == 3
+    assert result.blockers == []
+
+
 def test_verify_fp8_candidates_once_uses_batched_tail(monkeypatch) -> None:
     calls = {"prefill": 0, "tail_batch": 0}
 

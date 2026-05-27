@@ -6415,3 +6415,8 @@ Result: 297 passed in 21.83s
 - Follow-up exact span I/O fix: packed expert MLP spans now default to sequential copy instead of mmap-backed lazy page faults. Real DeepSeek 16-layer k=64 improved to `88.2057s`, `1.3782s/candidate`.
 - Full 62-layer exact cached verifier with sequential-copy spans, k=64: `724.3411s`, `11.3178s/candidate`, not enough.
 - Full 62-layer exact cached verifier with sequential-copy spans, k=96: `633.2696s`, `6.5966s/candidate`, layers executed `62/62`, no blockers. Evidence: `state/phase-exact-cpu-goal-seqcopy-full62-k96.json`.
+- Added exact FP8 speculative generation plumbing: prompt-cached DeepSeek verifier forces the first candidate to DeepSeek's verified `next_token_id`, verifies draft chunks, commits accepted KV, and appends exact correction KV when the draft misses.
+- Fixed DeepSeek tokenizer lookup for D-drive sources: tokenizer metadata now falls back to the tensor catalog model directory when `models/<id>/original` is not present.
+- Live draft probe, layer_count=8, prompt `Say hello in one short sentence.`, qwen3-1.7b draft: `4` exact tokens in `229.303s`, accepted `2`, corrected `2`, layers `40/40`, anti-cheat true. Evidence: `state/phase-exact-cpu-goal-fp8-live-spec-layer8-v2.json`.
+- qwen3-0.6b and qwen3-1.7b both produced the same exact DeepSeek token sequence on the layer-8 probe and both had low acceptance (`2/4`), so the available Qwen drafts are not good enough to realize the `6.5966s/candidate` verifier speed as visible-token speed.
+- Full 62-layer live qwen3-1.7b draft probe for only 2 tokens exceeded 20 minutes and was stopped: `state/phase-exact-cpu-goal-fp8-live-spec-full62-max2-stopped.json`.

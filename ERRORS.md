@@ -472,3 +472,5 @@ Next fix direction: make Q4 tensor loading grouped and persistent at the bridge/
 - Jacobi/parallel decoding without a good draft does not converge fast enough: k=16 accepted prefix reached only 2 tokens after two iterations on the real DeepSeek probe.
 - 4 GB FP8 MLP span RAM cache did not help. It either thrashed with LRU or, when preserved, produced hits but slowed the run due memory bandwidth pressure.
 - Mmap-backed packed expert spans were the wrong default for the external SSD path. Sequential native copy made the full 62-layer k=96 verifier land at `6.5966s/candidate`.
+- qwen3-0.6b/qwen3-1.7b are not adequate DeepSeek FP8 drafts on the tested prompt. They are exact-safe because DeepSeek verifies them, but low acceptance causes correction passes and live speed remains far above target.
+- DeepSeek tokenizer loading originally failed for D-drive sources because `tokenizer_runtime` only looked under `models/<id>/original`. Fixed by falling back to tensor catalog `model_dir`.
