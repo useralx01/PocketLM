@@ -13,12 +13,43 @@ from pcketlm.core.runtime.fp8_source import (
     run_fp8_mtp_draft_step,
     run_fp8_prompt_prefill,
 )
-from pcketlm.core.runtime.tokenizer_runtime import decode_token_ids_to_text, prepare_prompt_text
+from pcketlm.core.runtime.tokenizer_runtime import decode_token_ids_to_text, load_generation_settings, prepare_prompt_text
+
+
+_PUNCTUATION_TOKEN_IDS = {
+    3,  # !
+    4,  # .
+    5,  # ,
+    13,  # ?
+    14,  # ;
+    16,  # :
+    29,
+    30,
+    201,
+    223,
+}
 
 
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _select_mtp_candidate(top_ids: list[int], previous_token_id: int, eos_token_ids: set[int], *, prefer_eos_after_punctuation: bool) -> int:
+    if prefer_eos_after_punctuation and int(previous_token_id) in _PUNCTUATION_TOKEN_IDS:
+        for token_id in top_ids:
+            if int(token_id) in eos_token_ids:
+                return int(token_id)
+    return int(top_ids[0])
+
+
+def _visible_token_ids(token_ids: list[int], eos_token_ids: set[int]) -> tuple[list[int], bool]:
+    visible: list[int] = []
+    for token_id in token_ids:
+        if int(token_id) in eos_token_ids:
+            return visible, True
+        visible.append(int(token_id))
+    return visible, False
 
 
 def main() -> int:
@@ -28,15 +59,22 @@ def main() -> int:
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--layers", type=int, default=None)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--prefer-eos-after-punctuation",
+        action="store_true",
+        help="Proposal-only heuristic: if MTP sees EOS in top-k after punctuation, try it; the full verifier still decides.",
+    )
     args = parser.parse_args()
 
     out_path = Path(args.out)
     started = time.perf_counter()
     prepared = prepare_prompt_text(args.model_id, args.prompt, apply_chat_format=True)
+    eos_token_ids = {int(value) for value in load_generation_settings(args.model_id).eos_token_ids}
     payload: dict = {
         "model_id": args.model_id,
         "prompt": args.prompt,
         "k": int(args.k),
+        "prefer_eos_after_punctuation": bool(args.prefer_eos_after_punctuation),
         "prepared_ready": bool(prepared.ready),
         "prepared_blockers": list(prepared.blockers),
         "ready": False,
@@ -85,7 +123,12 @@ def main() -> int:
         mtp_steps.append(step.to_dict())
         if not step.ready or not step.top_token_ids or step.output_tensor is None:
             break
-        token_id = int(step.top_token_ids[0])
+        token_id = _select_mtp_candidate(
+            [int(value) for value in step.top_token_ids],
+            input_token,
+            eos_token_ids,
+            prefer_eos_after_punctuation=bool(args.prefer_eos_after_punctuation),
+        )
         candidates.append(token_id)
         input_token = token_id
         previous_hidden = step.output_tensor
@@ -93,6 +136,8 @@ def main() -> int:
         position += 1
         payload.update({"mtp_candidates": list(candidates), "mtp_steps": mtp_steps})
         _write(out_path, payload)
+        if token_id in eos_token_ids:
+            break
 
     verifier_ids = [int(prefill.tail.top_token_ids[0])]
     verify_started = time.perf_counter()
@@ -120,19 +165,33 @@ def main() -> int:
         if int(candidate) != int(verifier):
             break
         accepted += 1
-    draft_text, draft_text_blockers = decode_token_ids_to_text(args.model_id, candidates)
-    accepted_text, accepted_text_blockers = decode_token_ids_to_text(args.model_id, candidates[:accepted])
+    draft_visible_ids, draft_stopped_by_eos = _visible_token_ids(candidates, eos_token_ids)
+    accepted_visible_ids, accepted_stopped_by_eos = _visible_token_ids(candidates[:accepted], eos_token_ids)
+    draft_text, draft_text_blockers = decode_token_ids_to_text(args.model_id, draft_visible_ids)
+    accepted_text, accepted_text_blockers = decode_token_ids_to_text(args.model_id, accepted_visible_ids)
+    raw_draft_text, raw_draft_text_blockers = decode_token_ids_to_text(args.model_id, candidates)
+    raw_accepted_text, raw_accepted_text_blockers = decode_token_ids_to_text(args.model_id, candidates[:accepted])
     payload.update(
         {
             "mtp_candidates": list(candidates),
             "mtp_draft_text": draft_text,
+            "raw_mtp_draft_text": raw_draft_text,
             "accepted_text": accepted_text,
+            "raw_accepted_text": raw_accepted_text,
+            "accepted_visible_token_ids": accepted_visible_ids,
+            "draft_stopped_by_eos": bool(draft_stopped_by_eos),
+            "accepted_stopped_by_eos": bool(accepted_stopped_by_eos),
             "mtp_steps": mtp_steps,
             "verifier_token_ids": verifier_ids,
             "accepted_prefix": int(accepted),
             "verify_elapsed_seconds": round(time.perf_counter() - verify_started, 4),
             "elapsed_seconds": round(time.perf_counter() - started, 4),
-            "blockers": verify_blockers + draft_text_blockers + accepted_text_blockers,
+            "seconds_per_visible_token": round((time.perf_counter() - started) / max(1, len(accepted_visible_ids)), 4),
+            "blockers": verify_blockers
+            + draft_text_blockers
+            + accepted_text_blockers
+            + raw_draft_text_blockers
+            + raw_accepted_text_blockers,
         }
     )
     payload["ready"] = bool(not payload["blockers"] and accepted > 0)

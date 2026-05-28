@@ -85,6 +85,7 @@ def main() -> int:
     generated: list[int] = []
     accepted = 0
     corrected = 0
+    pending_correction: int | None = None
     layers_executed = int(session.layers_executed)
     expected_layers = int(session.expected_layers_executed)
     while len(generated) < int(args.max_new):
@@ -100,7 +101,10 @@ def main() -> int:
         for index, candidate in enumerate(candidates):
             if int(candidate) != int(verification.verifier_token_ids[index]):
                 break
-            generated.append(int(candidate))
+            if pending_correction is not None and accepted_this_pass == 0 and int(candidate) == int(pending_correction):
+                pending_correction = None
+            else:
+                generated.append(int(candidate))
             accepted += 1
             accepted_this_pass += 1
             if int(candidate) in eos_token_ids:
@@ -113,6 +117,7 @@ def main() -> int:
         if len(generated) < int(args.max_new) and not stopped_by_eos:
             corrected_token = int(verification.verifier_token_ids[accepted_this_pass])
             generated.append(corrected_token)
+            pending_correction = corrected_token
             corrected += 1
             stopped_by_eos = corrected_token in eos_token_ids
         payload["passes"].append(
@@ -145,7 +150,6 @@ def main() -> int:
             int(quality["non_whitespace_chars"]) >= int(args.min_non_whitespace)
             and int(quality["unique_token_count"]) >= int(args.min_unique_tokens)
         ) or bool(quality["is_complete_short_answer"])
-        )
         payload.update(
             {
                 "ready": bool(
@@ -164,7 +168,7 @@ def main() -> int:
                 "accepted_token_count": accepted,
                 "corrected_token_count": corrected,
                 "elapsed_seconds": round(elapsed, 4),
-                "seconds_per_visible_token": round(elapsed / max(1, len(generated)), 4),
+                "seconds_per_visible_token": round(elapsed / max(1, len(visible_ids)), 4),
                 "verify_seconds_per_accepted_token": None if accepted <= 0 else round(sum(p["verify_elapsed_seconds"] for p in payload["passes"]) / accepted, 4),
                 "layers_executed": layers_executed,
                 "expected_layers_executed": expected_layers,
