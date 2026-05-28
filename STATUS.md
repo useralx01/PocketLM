@@ -747,3 +747,4 @@ PLM-13 exact CPU follow-through: lm_head prefetch cuts full 61-layer exact token
 PLM-13 exact CPU native attention probe: opt-in u16 projection kernel landed with tests, but real DeepSeek keeps the Torch/MKL path as default; cache/worker sweeps did not produce a new full-model speed win.
 PLM-13 exact CPU MTP probe: real DeepSeek MTP draft path now exists and verifies exact prefixes, but chat k=4 accepted only 2 draft tokens and BF16/FP16 CPU projection math remains opt-in because it changes close logits.
 PLM-13 exact CPU correction fix: repeat-next evidence no longer double-counts correction tokens; MTP+EOS proposal gives the cleanest exact useful proof (`Hello!`, accepted `[19923,3,1]`) but still measures `424.709s/visible token` on this CPU.
+PLM-13 exact CPU 10-token proof: exact MTP+verifier generation produced `Blue, vast, endless, clouds, stars,` with `10` accepted tokens, anti-cheat `549/549`, no blockers, and `609.717s/visible token`.

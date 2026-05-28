@@ -6494,3 +6494,11 @@ Result: 297 passed in 21.83s
 - Added a verifier-protected MTP EOS proposal option. After punctuation, MTP may propose EOS if it is already in its top-k list, but the full 61-layer DeepSeek verifier still accepts or rejects every token.
 - Official MTP draft proof with EOS proposal: candidates `[19923, 3, 1]`, verifier ids `[19923, 3, 1, 0]`, accepted prefix `3`, visible text `Hello!`, anti-cheat verifier pass clean, elapsed `849.4177s`, `424.7089s/visible token`. Evidence: `state\phase-exact-cpu-mtp-tool-eos-heuristic-chatprompt-k4.json`.
 - Outcome: the last evidence bug is fixed and the best exact local CPU useful-answer proof is now the MTP draft route, but the useful-answer speed is still hundreds of seconds per visible token because the full verifier matrix pass remains CPU-bound.
+
+## PLM-13 Exact CPU / 10 Visible Token Proof
+
+- Added `tools\bench_fp8_mtp_generate.py`, a progress-safe exact generation runner. It uses DeepSeek's MTP layer for proposals, forces the first candidate to the full verifier's known next token when needed, commits only verifier-accepted tokens, carries KV caches, and writes JSON after every pass.
+- Real full 61-layer DeepSeek V3 exact CPU proof for prompt `Write exactly ten short words about the sky.` reached 10 visible tokens: `Blue, vast, endless, clouds, stars,`.
+- Evidence: `state\phase-exact-cpu-mtp-generate-full61-tenvisible-k8.json`.
+- Result: accepted `10` verified tokens, forced first token `2` times, anti-cheat `549/549`, no blockers, elapsed `6097.1683s`, `609.7168s/visible token`.
+- Outcome: this satisfies the requested 10-token proof, but it also proves the exact CPU-only path is nowhere near the `<=10s/token` goal. MTP did not solve the speed problem because acceptance stayed around one useful token per full verifier pass.
