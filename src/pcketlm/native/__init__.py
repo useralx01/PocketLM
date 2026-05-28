@@ -1447,6 +1447,17 @@ def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
             ctypes.c_longlong,
         ]
         lib.native_fp16_matmul.restype = ctypes.c_int
+        if hasattr(lib, "native_u16_weight_linear_f32"):
+            lib.native_u16_weight_linear_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_int,
+            ]
+            lib.native_u16_weight_linear_f32.restype = ctypes.c_int
         if hasattr(lib, "native_lm_head_topk_u16"):
             lib.native_lm_head_topk_u16.argtypes = [
                 ctypes.c_void_p,
@@ -2105,6 +2116,36 @@ def fp16_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     if code != 0:
         raise RuntimeError(f"native_fp16_matmul failed with code {code}")
     return out
+
+
+def u16_weight_linear_f32(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    lib = _load_fp16_matmul_lib()
+    if lib is None or not hasattr(lib, "native_u16_weight_linear_f32"):
+        reason = "disabled" if _native_matmul_disabled() else _FP16_MATMUL_ERROR
+        raise RuntimeError(f"Native u16-weight linear is unavailable: {reason}")
+    if weight.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError("u16_weight_linear_f32 requires fp16 or bf16 weight")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    weight_cpu = weight.detach().cpu().contiguous()
+    if weight_cpu.ndim != 2:
+        raise ValueError("weight must have shape [rows, cols]")
+    rows = int(weight_cpu.shape[0])
+    cols = int(weight_cpu.shape[1])
+    if int(hidden_cpu.shape[1]) != cols:
+        raise ValueError("hidden size does not match weight")
+    out = torch.empty((int(hidden_cpu.shape[0]), rows), dtype=torch.float32)
+    code = lib.native_u16_weight_linear_f32(
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(rows),
+        ctypes.c_longlong(cols),
+        ctypes.c_int(_u16_storage_dtype_code(weight_cpu.dtype)),
+    )
+    if code != 0:
+        raise RuntimeError(f"native_u16_weight_linear_f32 failed with code {code}")
+    return out.reshape(*hidden.shape[:-1], rows)
 
 
 def lm_head_topk_u16(

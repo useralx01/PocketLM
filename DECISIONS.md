@@ -1721,3 +1721,7 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep exact full lm_head prefetch enabled by default for FP8 single-token forward. It is lossless and hides most of the final 1.85 GB head read behind layer compute.
 - Keep attention prefetch opt-in only. On the real full 61-layer row it competed with memory/disk and made total wall time worse despite reducing measured attention wait.
 - Do not use DeepSeek V3's MTP layer as an acceptance source yet. The current local implementation's MTP top candidates did not match normal exact next-token outputs on the probe, so it fails the exactness goal.
+- Keep the native BF16/FP16 `u16_weight_linear_f32` attention projection path opt-in through `PCKETLM_ENABLE_NATIVE_U16_WEIGHT_LINEAR=1`. On real DeepSeek it was slower than MKL-backed Torch and introduced small logit drift, so it is a diagnostic kernel, not the exact default.
+- Keep the FP8 hot cache enabled. Turning it off made the 16-layer exact row much worse, confirming the current path is already relying on disk-backed dequant reuse correctly.
+- Do not raise the default attention RAM cache above `4096 MB` on this laptop. `8192 MB` helps a bounded 16-layer second token, but it consumes about `6 GB` before full-model scale and risks pushing the 16 GB machine into paging.
+- Do not change `PCKETLM_FP8_PACK_PREFETCH_WORKERS` default from `8` based on the shallow 16-layer win at `2` workers. The 32-layer validation reversed the result, so worker count remains an opt-in tuning knob.

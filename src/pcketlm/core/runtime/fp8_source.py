@@ -33,6 +33,7 @@ from pcketlm.native import (
     lm_head_topk_u16,
     native_fp16_loader_available,
     native_fp16_matmul_available,
+    u16_weight_linear_f32,
     native_fused_ds_attention_available,
     native_flash_mla_available,
     native_fp8_dual_linear_available,
@@ -3204,6 +3205,23 @@ def _rms_norm_any(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float)
     return (normalized * weight.float().view(*view_shape)).to(dtype=output_dtype)
 
 
+def _linear_u16_weight_or_torch(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    if (
+        hidden.device.type == "cpu"
+        and weight.device.type == "cpu"
+        and weight.dtype in {torch.float16, torch.bfloat16}
+        and native_fp16_matmul_available()
+        and os.environ.get("PCKETLM_ENABLE_NATIVE_U16_WEIGHT_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
+        and os.environ.get("PCKETLM_DISABLE_NATIVE_U16_WEIGHT_LINEAR", "").strip().lower()
+        not in {"1", "true", "yes", "on"}
+    ):
+        try:
+            return u16_weight_linear_f32(hidden.float(), weight)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass
+    return F.linear(hidden.float(), weight.float())
+
+
 def _streamed_fp8_attention_enabled() -> bool:
     return os.environ.get("PCKETLM_ENABLE_STREAMED_FP8_ATTENTION", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -3724,12 +3742,12 @@ def _run_fp8_single_token_attention_materialized(
                     next_cache = None
 
             if output is None:
-                q_low = F.linear(working, q_a.float())
+                q_low = _linear_u16_weight_or_torch(working, q_a)
                 q_low = _rms_norm_any(q_low, q_norm[0].float(), float(deepseek_config["rms_norm_eps"]))
-                q = F.linear(q_low, q_b.float())
+                q = _linear_u16_weight_or_torch(q_low, q_b)
                 q = q.view(int(hidden_3d.shape[0]), seq_len, n_heads, qk_nope + qk_rope)
                 q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
-                kv = F.linear(working, kv_a.float())
+                kv = _linear_u16_weight_or_torch(working, kv_a)
                 kv_latent, k_pe = torch.split(kv, [kv_lora_rank, qk_rope], dim=-1)
                 q_pe = _apply_rope_real(q_pe, start_pos=int(start_pos), config=deepseek_config)
                 k_pe = _apply_rope_real(k_pe.unsqueeze(2), start_pos=int(start_pos), config=deepseek_config).squeeze(2)
@@ -3777,7 +3795,7 @@ def _run_fp8_single_token_attention_materialized(
                     probs = scores.softmax(dim=-1, dtype=torch.float32).to(dtype=working.dtype)
                     attention_latent = torch.einsum("bsht,btc->bshc", probs, kv_cache)
                     attention_heads = torch.einsum("bshc,hdc->bshd", attention_latent, wkv_b[:, -v_head_dim:])
-                output = F.linear(attention_heads.flatten(2), o_proj.float()).to(dtype=dtype).contiguous()
+                output = _linear_u16_weight_or_torch(attention_heads.flatten(2), o_proj).to(dtype=dtype).contiguous()
                 next_cache = (kv_cache.detach().contiguous(), pe_cache.detach().contiguous())
                 if _fused_ds_attention_runtime_enabled():
                     _FUSED_DS_ATTENTION_STATS["fallbacks"] += 1
