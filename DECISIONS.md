@@ -1725,3 +1725,5 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Keep the FP8 hot cache enabled. Turning it off made the 16-layer exact row much worse, confirming the current path is already relying on disk-backed dequant reuse correctly.
 - Do not raise the default attention RAM cache above `4096 MB` on this laptop. `8192 MB` helps a bounded 16-layer second token, but it consumes about `6 GB` before full-model scale and risks pushing the 16 GB machine into paging.
 - Do not change `PCKETLM_FP8_PACK_PREFETCH_WORKERS` default from `8` based on the shallow 16-layer win at `2` workers. The 32-layer validation reversed the result, so worker count remains an opt-in tuning knob.
+- Use DeepSeek's MTP layer only as an exact-verifier draft source. It can propose the correct first chat token and sometimes a useful prefix, but verifier acceptance is still too low to solve local CPU speed by itself.
+- Keep `PCKETLM_ENABLE_TORCH_U16_WEIGHT_LINEAR` opt-in. BF16/FP16 CPU projection math is faster in shallow attention probes, but it changes logits and can reorder close top-k positions, so the strict path continues to use FP32 Torch/MKL projections.

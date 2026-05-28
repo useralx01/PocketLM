@@ -463,6 +463,48 @@ class FP8DecodeTailBatchResult:
 
 
 @dataclass(slots=True)
+class FP8MTPDraftStepResult:
+    """One DeepSeek MTP draft step used only for exact speculative proposals."""
+
+    model_id: str
+    input_token_id: int
+    position: int
+    mtp_layer_index: int
+    top_token_ids: list[int]
+    top_logits: list[float]
+    hidden_shape: list[int]
+    output_tensor: torch.Tensor | None = None
+    next_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    embedding_elapsed_seconds: float = 0.0
+    projection_elapsed_seconds: float = 0.0
+    block_elapsed_seconds: float = 0.0
+    tail_elapsed_seconds: float = 0.0
+    elapsed_seconds: float = 0.0
+    blockers: list[str] = field(default_factory=list)
+    ready: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "input_token_id": int(self.input_token_id),
+            "position": int(self.position),
+            "mtp_layer_index": int(self.mtp_layer_index),
+            "top_token_ids": list(self.top_token_ids),
+            "top_logits": list(self.top_logits),
+            "hidden_shape": list(self.hidden_shape),
+            "output_materialized": self.output_tensor is not None,
+            "cache_sequence_length": 0 if self.next_kv_cache is None else int(self.next_kv_cache[0].shape[1]),
+            "embedding_elapsed_seconds": float(self.embedding_elapsed_seconds),
+            "projection_elapsed_seconds": float(self.projection_elapsed_seconds),
+            "block_elapsed_seconds": float(self.block_elapsed_seconds),
+            "tail_elapsed_seconds": float(self.tail_elapsed_seconds),
+            "elapsed_seconds": float(self.elapsed_seconds),
+            "blockers": list(self.blockers),
+            "ready": self.ready,
+        }
+
+
+@dataclass(slots=True)
 class FP8TokenEmbeddingResult:
     """One token embedding row loaded from the DeepSeek source."""
 
@@ -1722,15 +1764,16 @@ def run_fp8_single_token_block(
     )
 
 
-def run_fp8_decode_tail_topk(
+def _run_fp8_named_tail_topk(
     model_id: str,
     hidden: torch.Tensor,
     *,
+    norm_name: str,
+    head_name: str,
     top_k: int = 5,
     chunk_rows: int | None = None,
 ) -> FP8DecodeTailResult:
-    """Run final norm and stream lm_head chunks to get top-k logits."""
-    norm_tensor, blockers = _load_regular_tensor(model_id, "model.norm.weight")
+    norm_tensor, blockers = _load_regular_tensor(model_id, norm_name)
     hidden_2d = hidden.reshape(-1, hidden.shape[-1])[-1:].to(dtype=torch.bfloat16)
     config = _load_deepseek_config(model_id)
     top_values: torch.Tensor | None = None
@@ -1738,12 +1781,12 @@ def run_fp8_decode_tail_topk(
     chunk_count = 0
     loaded_bytes = 0
     if norm_tensor is None:
-        blockers.append("Final norm tensor did not materialize.")
-    lm_head_entry = find_tensor_catalog_entry(model_id, "lm_head.weight")
+        blockers.append(f"Final norm tensor {norm_name} did not materialize.")
+    lm_head_entry = find_tensor_catalog_entry(model_id, head_name)
     if lm_head_entry is None:
-        blockers.append("lm_head.weight is not present in the tensor catalog.")
+        blockers.append(f"{head_name} is not present in the tensor catalog.")
     if lm_head_entry is not None and lm_head_entry.dtype not in {"BF16", "F16", "F32"}:
-        blockers.append(f"lm_head.weight has unsupported dtype {lm_head_entry.dtype}.")
+        blockers.append(f"{head_name} has unsupported dtype {lm_head_entry.dtype}.")
 
     if not blockers and norm_tensor is not None and lm_head_entry is not None:
         normalized_u16 = _rms_norm_any(hidden_2d, norm_tensor.float(), float(config["rms_norm_eps"]))
@@ -1758,7 +1801,9 @@ def run_fp8_decode_tail_topk(
             keep_k = max(1, min(int(top_k), vocab_size))
             rows_per_chunk = max(1, int(_fp8_lm_head_chunk_rows() if chunk_rows is None else chunk_rows))
             cached_lm_head, cache_loaded_bytes = (
-                _load_fp8_lm_head_full_cached(lm_head_entry) if chunk_rows is None else (None, 0)
+                _load_fp8_lm_head_full_cached(lm_head_entry)
+                if chunk_rows is None and head_name == "lm_head.weight"
+                else (None, 0)
             )
             loaded_bytes += cache_loaded_bytes
             for start in range(0, vocab_size, rows_per_chunk):
@@ -1809,6 +1854,24 @@ def run_fp8_decode_tail_topk(
         loaded_lm_head_bytes=int(loaded_bytes),
         blockers=blockers,
         ready=not blockers and bool(token_ids),
+    )
+
+
+def run_fp8_decode_tail_topk(
+    model_id: str,
+    hidden: torch.Tensor,
+    *,
+    top_k: int = 5,
+    chunk_rows: int | None = None,
+) -> FP8DecodeTailResult:
+    """Run final norm and stream lm_head chunks to get top-k logits."""
+    return _run_fp8_named_tail_topk(
+        model_id,
+        hidden,
+        norm_name="model.norm.weight",
+        head_name="lm_head.weight",
+        top_k=top_k,
+        chunk_rows=chunk_rows,
     )
 
 
@@ -2176,6 +2239,121 @@ def run_fp8_single_token_forward(
         next_kv_caches=next_kv_caches,
         blockers=blockers,
         ready=not blockers and hidden is not None and (not include_tail or (tail is not None and tail.ready)),
+    )
+
+
+def run_fp8_mtp_draft_step(
+    model_id: str,
+    input_token_id: int,
+    previous_hidden: torch.Tensor,
+    *,
+    position: int,
+    previous_kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    top_k: int = 5,
+    dtype: torch.dtype = torch.bfloat16,
+) -> FP8MTPDraftStepResult:
+    """Run DeepSeek's extra MTP layer as a draft proposer.
+
+    The result is intentionally not trusted as output. It is only a candidate
+    source for the exact 61-layer verifier.
+    """
+    started = time.perf_counter()
+    config = _load_deepseek_config(model_id)
+    mtp_layer = int(config["num_hidden_layers"])
+    blockers: list[str] = []
+    if int(config.get("num_nextn_predict_layers", 0)) <= 0:
+        blockers.append("DeepSeek config does not expose an MTP/next-token prediction layer.")
+    if find_tensor_catalog_entry(model_id, f"model.layers.{mtp_layer}.eh_proj.weight") is None:
+        blockers.append(f"MTP eh_proj tensor for layer {mtp_layer} is not present.")
+
+    embed_elapsed = 0.0
+    projection_elapsed = 0.0
+    block_elapsed = 0.0
+    tail_elapsed = 0.0
+    next_cache = None
+    top_ids: list[int] = []
+    top_logits: list[float] = []
+    mtp_hidden = None
+
+    if not blockers:
+        embed_start = time.perf_counter()
+        embedding = load_fp8_token_embedding(model_id, int(input_token_id))
+        embed_elapsed = time.perf_counter() - embed_start
+        blockers.extend(embedding.blockers)
+        enorm, enorm_blockers = _load_regular_tensor(model_id, f"model.layers.{mtp_layer}.enorm.weight")
+        hnorm, hnorm_blockers = _load_regular_tensor(model_id, f"model.layers.{mtp_layer}.hnorm.weight")
+        eh_proj, eh_blockers = _load_regular_tensor(model_id, f"model.layers.{mtp_layer}.eh_proj.weight")
+        blockers.extend(enorm_blockers)
+        blockers.extend(hnorm_blockers)
+        blockers.extend(eh_blockers)
+        if embedding.output_tensor is None:
+            blockers.append("MTP input token embedding did not materialize.")
+        if enorm is None or hnorm is None or eh_proj is None:
+            blockers.append("MTP projection tensors did not all materialize.")
+
+    if not blockers and embedding.output_tensor is not None and enorm is not None and hnorm is not None and eh_proj is not None:
+        prev = previous_hidden.reshape(1, 1, previous_hidden.shape[-1]).to(dtype=dtype)
+        if int(prev.shape[-1]) != int(embedding.output_tensor.shape[-1]):
+            blockers.append("MTP previous hidden size does not match token embedding size.")
+        else:
+            projection_start = time.perf_counter()
+            embed_norm = _rms_norm_any(embedding.output_tensor.to(dtype=dtype), enorm.float(), float(config["rms_norm_eps"]))
+            hidden_norm = _rms_norm_any(prev, hnorm.float(), float(config["rms_norm_eps"]))
+            fused = torch.cat([embed_norm, hidden_norm], dim=-1)
+            mtp_input = _linear_u16_weight_or_torch(fused, eh_proj).to(dtype=dtype).contiguous()
+            projection_elapsed = time.perf_counter() - projection_start
+
+            block_start = time.perf_counter()
+            block = run_fp8_single_token_block(
+                model_id,
+                mtp_layer,
+                mtp_input,
+                dtype=dtype,
+                start_pos=int(position),
+                previous_kv_cache=previous_kv_cache,
+            )
+            block_elapsed = time.perf_counter() - block_start
+            blockers.extend(block.blockers)
+            if block.output_tensor is None:
+                blockers.append("MTP layer did not produce hidden state.")
+            else:
+                mtp_hidden = block.output_tensor
+                next_cache = block.next_kv_cache
+
+    if not blockers and mtp_hidden is not None:
+        tail_start = time.perf_counter()
+        tail = _run_fp8_named_tail_topk(
+            model_id,
+            mtp_hidden,
+            norm_name=f"model.layers.{mtp_layer}.shared_head.norm.weight",
+            head_name=f"model.layers.{mtp_layer}.shared_head.head.weight",
+            top_k=top_k,
+        )
+        tail_elapsed = time.perf_counter() - tail_start
+        blockers.extend(tail.blockers)
+        if tail.ready:
+            top_ids = list(tail.top_token_ids)
+            top_logits = list(tail.top_logits)
+        else:
+            blockers.append("MTP shared head did not produce top-k tokens.")
+
+    return FP8MTPDraftStepResult(
+        model_id=model_id,
+        input_token_id=int(input_token_id),
+        position=int(position),
+        mtp_layer_index=int(mtp_layer),
+        top_token_ids=top_ids,
+        top_logits=top_logits,
+        hidden_shape=[] if mtp_hidden is None else [int(value) for value in mtp_hidden.shape],
+        output_tensor=mtp_hidden,
+        next_kv_cache=next_cache,
+        embedding_elapsed_seconds=float(embed_elapsed),
+        projection_elapsed_seconds=float(projection_elapsed),
+        block_elapsed_seconds=float(block_elapsed),
+        tail_elapsed_seconds=float(tail_elapsed),
+        elapsed_seconds=float(time.perf_counter() - started),
+        blockers=blockers,
+        ready=not blockers and bool(top_ids) and mtp_hidden is not None,
     )
 
 
@@ -3151,6 +3329,7 @@ def _load_deepseek_config(model_id: str) -> dict:
         "softmax_scale": float(softmax_scale),
         "first_k_dense_replace": int(payload.get("first_k_dense_replace", payload.get("n_dense_layers", 0)) or 0),
         "num_hidden_layers": int(payload.get("num_hidden_layers", catalog.num_hidden_layers or catalog.layer_count) or 0),
+        "num_nextn_predict_layers": int(payload.get("num_nextn_predict_layers", 0) or 0),
         "rope_theta": float(payload.get("rope_theta", 10000.0) or 10000.0),
     }
 
@@ -3206,6 +3385,20 @@ def _rms_norm_any(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float)
 
 
 def _linear_u16_weight_or_torch(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    torch_u16_mode = os.environ.get("PCKETLM_ENABLE_TORCH_U16_WEIGHT_LINEAR", "").strip().lower()
+    if (
+        hidden.device.type == "cpu"
+        and weight.device.type == "cpu"
+        and weight.dtype in {torch.float16, torch.bfloat16}
+        and torch_u16_mode in {"1", "true", "yes", "on", "bf16", "fp16", "native"}
+        and os.environ.get("PCKETLM_DISABLE_TORCH_U16_WEIGHT_LINEAR", "").strip().lower()
+        not in {"1", "true", "yes", "on"}
+    ):
+        compute_dtype = torch.float16 if torch_u16_mode == "fp16" else weight.dtype
+        try:
+            return F.linear(hidden.to(dtype=compute_dtype), weight.to(dtype=compute_dtype)).float()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass
     if (
         hidden.device.type == "cpu"
         and weight.device.type == "cpu"
