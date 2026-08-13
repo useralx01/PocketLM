@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from pcketlm.core.model_import.inspect import inspect_qwen_source
+from pcketlm.core.model_import.inspect import inspect_model_source
 from pcketlm.core.model_families import normalize_family_key
 from pcketlm.core.registry.models import ModelRecord, ValidationSummary
 from pcketlm.core.registry.repository import upsert_model_record
@@ -14,7 +14,7 @@ from pcketlm.core.storage.paths import (
     original_model_root,
     profiles_root,
 )
-from pcketlm.core.validation.files import validate_qwen_source
+from pcketlm.core.validation.files import validate_model_source
 
 
 @dataclass(slots=True)
@@ -37,8 +37,8 @@ def import_model(request: ImportRequest) -> ModelRecord:
     ensure_base_directories()
 
     family = normalize_family_key(request.family)
-    inspection = inspect_qwen_source(request.source_path)
-    validation = validate_qwen_source(request.source_path)
+    inspection = inspect_model_source(request.source_path)
+    validation = validate_model_source(request.source_path, family=family)
     original_path = original_model_root(request.model_id)
 
     for path in (
@@ -63,11 +63,12 @@ def import_model(request: ImportRequest) -> ModelRecord:
         config=inspection.config,
         imported=True,
         validated=validation.result == "ok",
-        runnable=validation.result == "ok" and inspection.expected_shards > 0,
+        runnable=validation.result == "ok" and inspection.present_shards > 0,
         validation=ValidationSummary(
             result=validation.result,
             missing_files=validation.missing_files,
             warnings=validation.warnings,
         ),
+        artifact_paths=[path for path in request.source_path.rglob("*.gguf") if path.is_file()],
     )
     return upsert_model_record(record)

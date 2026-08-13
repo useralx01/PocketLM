@@ -21,7 +21,9 @@ def test_family_labels_and_runtime_status_are_product_facing() -> None:
     assert family_runtime_status("qwen3-moe") == "active"
     assert family_label("mixtral-moe") == "Mixtral"
     assert family_runtime_status("mistralai") == "active"
-    assert family_runtime_status("kimi") == "planned"
+    assert family_runtime_status("kimi") == "experimental"
+    assert family_runtime_status("gemma3") == "experimental"
+    assert family_runtime_status("kronos") == "experimental"
     assert family_label("new-family") == "New Family"
     assert family_runtime_status("new-family") == "unverified"
 

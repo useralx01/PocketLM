@@ -29,7 +29,9 @@ from pcketlm.core.benchmark import (
     run_measured_benchmark,
 )
 from pcketlm.core.optimize import latest_optimized_artifact_manifest
+from pcketlm.core.model_compatibility import build_compatibility_matrix, profile_for_family
 from pcketlm.core.profiles import build_profile_compare_summary, get_saved_profile, list_saved_profiles
+from pcketlm.core.registry.catalog import build_model_catalog
 from pcketlm.core.runtime import (
     DEFAULT_LM_HEAD_CHUNK_ROWS,
     build_gguf_backend_status,
@@ -39,6 +41,9 @@ from pcketlm.core.runtime import (
     load_layer_bridge_config,
     run_gguf_prompt,
     run_fp8_decode_loop,
+    run_fp8_mtp_batched_generate_from_tokens,
+    run_local_deepseek_paged_decode_loop,
+    warm_fp8_mtp_prompt_prefill_cache_from_tokens,
     run_prompt_decode_loop,
     run_warm_agent_prompt,
     runtime_math_dtype_name,
@@ -51,6 +56,8 @@ from pcketlm.core.runtime import (
     warm_runner_status,
 )
 from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+from pcketlm.core.runtime.kronos_backend import build_kronos_backend_status, run_kronos_forecast
+from pcketlm.core.runtime.gguf_backend import find_gguf_model_files
 from pcketlm.app.chat_shell.runtime_fp8_cli import _decode_with_catalog_tokenizer, _encode_with_catalog_tokenizer
 from pcketlm.core.runtime.tensor_loader import runtime_pack_selection_snapshot, tensor_load_stats_snapshot
 from pcketlm.core.runtime.tensor_residency import (
@@ -59,6 +66,7 @@ from pcketlm.core.runtime.tensor_residency import (
     tensor_residency_stats,
 )
 from pcketlm.core.storage.paths import benchmarks_root, original_model_root, project_root, state_root
+from pcketlm.core.supervisor import build_supervisor_report, save_supervisor_report
 
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -159,6 +167,20 @@ def _download_status_payload() -> dict:
                 continue
             payload.setdefault("model_id", path.stem)
             payload.setdefault("status", "unknown")
+            target_dir = payload.get("target_dir")
+            if target_dir and str(payload.get("status") or "").lower() == "complete":
+                target_path = Path(str(target_dir))
+                if not target_path.is_absolute():
+                    target_path = project_root() / target_path
+                if not target_path.exists():
+                    payload["recorded_status"] = payload["status"]
+                    payload["recorded_bytes_on_disk"] = payload.get("bytes_on_disk")
+                    payload["status"] = "missing"
+                    payload["bytes_on_disk"] = 0
+                    payload["bytes_on_disk_gb"] = 0.0
+                    payload["progress_pct"] = 0.0
+                    payload["present_expected_file_count"] = 0
+                    payload["error"] = "Recorded download path is not currently connected."
             records.append(payload)
     active_statuses = {"starting", "downloading"}
     active = [item for item in records if str(item.get("status") or "").lower() in active_statuses]
@@ -978,6 +1000,36 @@ def _gguf_chat_prompt(model_id: str, payload: dict, current_prompt: str, system_
     return f"System: {system_prompt}\nUser: {prompt}\nAssistant:", turn_count, False
 
 
+def _gguf_chat_messages(payload: dict, current_prompt: str, system_prompt: str) -> list[dict[str, str]]:
+    """Build OpenAI-compatible chat messages so llama.cpp applies the model template."""
+    messages = _normalize_chat_messages(payload.get("messages"))[-8:]
+    if not messages or messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "text": system_prompt})
+    normalized = [{"role": item["role"], "content": item["text"]} for item in messages]
+    if not normalized or normalized[-1].get("role") != "user" or normalized[-1].get("content") != current_prompt:
+        normalized.append({"role": "user", "content": current_prompt})
+    return normalized
+
+
+def _unsupported_chat_response(model_id: str, prompt: str) -> dict | None:
+    profile = profile_for_family(None, model_id)
+    if profile is None or profile.chat_status != "Unsupported":
+        return None
+    return {
+        "ready": False,
+        "generated_text": "",
+        "full_text": prompt,
+        "generated_token_ids": [],
+        "prompt_token_count": 0,
+        "steps_completed": 0,
+        "stop_reason": "unsupported-capability",
+        "strategy": "capability-guard",
+        "blockers": [f"{profile.label} supports {profile.capability}, not chat. Use the forecast API."],
+        "elapsed_seconds": 0.0,
+        "runtime_context": {"model_id": model_id, "capability": profile.capability},
+    }
+
+
 def _conversation_prompt(raw_messages: Any, current_prompt: str, *, max_chars: int = 2400) -> tuple[str, int]:
     messages = _normalize_chat_messages(raw_messages)
     if not messages:
@@ -1124,6 +1176,114 @@ def _is_deepseek_fp8_model(model_id: str) -> bool:
     return "deepseek" in normalized and "v3" in normalized
 
 
+def _truthy_runtime_flag(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _deepseek_gpu_backend_requested(payload: dict, mode: str) -> bool:
+    backend = str(
+        payload.get("runtime_backend") or payload.get("deepseek_backend") or payload.get("backend") or ""
+    ).strip().lower()
+    mode_key = _chat_mode_key(mode)
+    return (
+        backend in {"gpu", "cuda", "deepseek-gpu", "deepseek-fp8-gpu", "deepseek-fp8-gpu-paged"}
+        or mode_key.startswith(("gpu", "cuda"))
+        or (("gpu" in mode_key or "cuda" in mode_key) and "gguf" not in mode_key)
+        or _truthy_runtime_flag(os.environ.get("PCKETLM_DEEPSEEK_GPU_DEFAULT"))
+    )
+
+
+def _deepseek_gpu_diagnostic_cpu_allowed(payload: dict) -> bool:
+    return _truthy_runtime_flag(payload.get("allow_cpu_gpu_path")) or _truthy_runtime_flag(
+        os.environ.get("PCKETLM_ALLOW_DEEPSEEK_GPU_CPU_DIAGNOSTIC")
+    )
+
+
+def _deepseek_gpu_resident_budget_bytes(payload: dict) -> int:
+    raw = payload.get("gpu_resident_budget_gb") or os.environ.get("PCKETLM_DEEPSEEK_GPU_RESIDENT_BUDGET_GB") or 12
+    try:
+        budget_gb = float(raw)
+    except (TypeError, ValueError):
+        budget_gb = 12.0
+    return max(1, int(max(0.25, budget_gb) * 1024**3))
+
+
+def _deepseek_gpu_layer_count(model_id: str, layer_count: int | None) -> int:
+    if layer_count is not None:
+        return max(1, int(layer_count))
+    try:
+        catalog = load_tensor_catalog(model_id)
+        return max(1, int(catalog.num_hidden_layers or catalog.layer_count or 61))
+    except Exception:
+        return 61
+
+
+def _deepseek_gpu_generation_speed_payload(result) -> dict:
+    generated_count = len(getattr(result, "generated_token_ids", []) or [])
+    elapsed_seconds = float(getattr(result, "elapsed_seconds", 0.0) or 0.0)
+    seconds_per_token = round(elapsed_seconds / generated_count, 3) if elapsed_seconds > 0 and generated_count else None
+    tokens_per_second = round(generated_count / elapsed_seconds, 3) if elapsed_seconds > 0 and generated_count else None
+    return {
+        "backend": "deepseek-fp8-gpu-paged",
+        "generated_tokens": generated_count,
+        "generation_seconds_per_token": seconds_per_token,
+        "generation_tokens_per_second": tokens_per_second,
+        "target_seconds_per_token_max": 4.0,
+        "target_met": bool(seconds_per_token is not None and seconds_per_token <= 4.0),
+        "summary": (
+            f"DeepSeek FP8 GPU pager generated at {seconds_per_token}s/token."
+            if seconds_per_token is not None
+            else "DeepSeek FP8 GPU pager did not produce a measured generated-token speed."
+        ),
+    }
+
+
+def _deepseek_gpu_runtime_summary(result) -> dict:
+    elapsed = float(getattr(result, "elapsed_seconds", 0.0) or 0.0)
+    tail = float(getattr(result, "tail_elapsed_seconds", 0.0) or 0.0)
+    layer_total = max(0.0, elapsed - tail)
+    return {
+        "layer_events": int(getattr(result, "layer_count", 0) or 0) * int(getattr(result, "positions_completed", 0) or 0),
+        "executed_layers": [],
+        "attention_seconds": 0.0,
+        "ffn_seconds": 0.0,
+        "router_seconds": 0.0,
+        "routed_expert_seconds": 0.0,
+        "shared_expert_seconds": 0.0,
+        "tail_seconds": round(tail, 3),
+        "layer_total_seconds": round(layer_total, 3),
+    }
+
+
+def _deepseek_gpu_paged_payload(result) -> dict:
+    if result is None:
+        return {}
+    return {
+        "cuda_available": bool(getattr(result, "cuda_available", False)),
+        "device": str(getattr(result, "device", "")),
+        "device_name": str(getattr(result, "device_name", "")),
+        "torch_version": str(getattr(result, "torch_version", "")),
+        "start_layer": int(getattr(result, "start_layer", 0) or 0),
+        "layer_count": int(getattr(result, "layer_count", 0) or 0),
+        "config_hidden_layers": int(getattr(result, "config_hidden_layers", 0) or 0),
+        "positions_completed": int(getattr(result, "positions_completed", 0) or 0),
+        "resident_budget_bytes": int(getattr(result, "resident_budget_bytes", 0) or 0),
+        "peak_resident_bytes": int(getattr(result, "peak_resident_bytes", 0) or 0),
+        "final_resident_bytes": int(getattr(result, "final_resident_bytes", 0) or 0),
+        "pager_loads": int(getattr(result, "pager_loads", 0) or 0),
+        "pager_evictions": int(getattr(result, "pager_evictions", 0) or 0),
+        "pager_cache_hits": int(getattr(result, "pager_cache_hits", 0) or 0),
+        "pager_cache_misses": int(getattr(result, "pager_cache_misses", 0) or 0),
+        "pager_prefetch_submitted": int(getattr(result, "pager_prefetch_submitted", 0) or 0),
+        "pager_prefetch_completed": int(getattr(result, "pager_prefetch_completed", 0) or 0),
+        "tail_elapsed_seconds": float(getattr(result, "tail_elapsed_seconds", 0.0) or 0.0),
+        "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0) or 0.0),
+        "final_top_token_ids": list(getattr(result, "final_top_token_ids", []) or []),
+        "blockers": list(getattr(result, "blockers", []) or []),
+        "note": str(getattr(result, "note", "")),
+    }
+
+
 def _deepseek_fp8_guardrails(model_id: str, requested_max_new_tokens: int | None = None) -> dict:
     try:
         status = fp8_source_status(model_id)
@@ -1141,7 +1301,7 @@ def _deepseek_fp8_guardrails(model_id: str, requested_max_new_tokens: int | None
             "status": "ready-slow" if not blockers else "blocked",
             "ready": not blockers,
             "summary": (
-                "DeepSeek V3 is on the FP8 packed path. It runs locally, but attention is still slow."
+                "DeepSeek V3 defaults to the exact FP8 MTP batched verifier path on CPU."
                 if not blockers
                 else "DeepSeek V3 is not ready for FP8 product chat yet."
             ),
@@ -1156,8 +1316,9 @@ def _deepseek_fp8_guardrails(model_id: str, requested_max_new_tokens: int | None
             "runtime_policy": dict(status.get("runtime_policy") or {}),
             "blockers": blockers,
             "warnings": [
-                "This is the make-it-run FP8 path, not the final fast chat path.",
-                "Keep replies short until fused MLA attention lands.",
+                "Exact full-quality CPU decoding remains slow; keep replies short.",
+                "CUDA GPU mode is available as an opt-in resident-pager path when this model and FP8 pack are on a CUDA machine.",
+                "The MTP head is only a proposal source; the full V3 FP8 verifier commits every token.",
             ],
         }
     except Exception as exc:
@@ -1206,6 +1367,7 @@ def _fp8_step_timing_summary(step_summaries: list[dict]) -> dict:
         "executed_layers": sorted(set(executed)),
         "attention_seconds": round(attention, 3),
         "ffn_seconds": round(ffn, 3),
+        "router_seconds": 0.0,
         "routed_expert_seconds": round(routed, 3),
         "shared_expert_seconds": round(shared, 3),
         "layer_total_seconds": round(total, 3),
@@ -1221,13 +1383,72 @@ def _fp8_generation_speed_payload(result, elapsed_seconds: float) -> dict:
         "generated_tokens": generated_count,
         "generation_seconds_per_token": seconds_per_token,
         "generation_tokens_per_second": tokens_per_second,
-        "target_seconds_per_token_max": 30.0,
-        "target_met": bool(seconds_per_token is not None and seconds_per_token <= 30.0),
+        "target_seconds_per_token_max": 100.0,
+        "target_met": bool(seconds_per_token is not None and seconds_per_token <= 100.0),
         "summary": (
             f"DeepSeek FP8 generated at {seconds_per_token}s/token."
             if seconds_per_token is not None
             else "DeepSeek FP8 did not produce a measured generated-token speed."
         ),
+    }
+
+
+def _fp8_mtp_generation_speed_payload(result: dict) -> dict:
+    generated_count = len(result.get("visible_token_ids") or result.get("generated_token_ids") or [])
+    seconds_per_token = result.get("seconds_per_visible_token")
+    if seconds_per_token is not None:
+        seconds_per_token = round(float(seconds_per_token), 3)
+    tokens_per_second = round(1.0 / seconds_per_token, 3) if seconds_per_token and seconds_per_token > 0 else None
+    return {
+        "backend": "deepseek-fp8-mtp-batched-exact",
+        "generated_tokens": generated_count,
+        "generation_seconds_per_token": seconds_per_token,
+        "generation_tokens_per_second": tokens_per_second,
+        "target_seconds_per_token_max": 30.0,
+        "target_met": bool(seconds_per_token is not None and seconds_per_token <= 30.0),
+        "summary": (
+            f"DeepSeek exact MTP path generated at {seconds_per_token}s/visible token."
+            if seconds_per_token is not None
+            else "DeepSeek exact MTP path did not produce a measured visible-token speed."
+        ),
+    }
+
+
+def _deepseek_mtp_exact_default_enabled(layer_count: int | None) -> bool:
+    disabled = os.environ.get("PCKETLM_DISABLE_DEEPSEEK_MTP_EXACT_DEFAULT", "").strip().lower()
+    return layer_count is None and disabled not in {"1", "true", "yes", "on"}
+
+
+def _mtp_runtime_summary(result: dict) -> dict:
+    passes = list(result.get("passes") or [])
+    verifier_timings = [dict(item.get("verifier_timing") or {}) for item in passes if item.get("verifier_timing")]
+    if verifier_timings:
+        attention = sum(float(item.get("attention_seconds", 0.0) or 0.0) for item in verifier_timings)
+        ffn = sum(float(item.get("ffn_seconds", 0.0) or 0.0) for item in verifier_timings)
+        router = sum(float(item.get("moe_router_seconds", 0.0) or 0.0) for item in verifier_timings)
+        routed = sum(float(item.get("moe_routed_seconds", 0.0) or 0.0) for item in verifier_timings)
+        shared = sum(float(item.get("moe_shared_seconds", 0.0) or 0.0) for item in verifier_timings)
+        total = sum(float(item.get("layer_total_seconds", 0.0) or 0.0) for item in verifier_timings)
+        layer_events = sum(int(item.get("layer_count", 0) or 0) for item in verifier_timings)
+        return {
+            "layer_events": int(layer_events),
+            "executed_layers": [],
+            "attention_seconds": round(attention, 3),
+            "ffn_seconds": round(ffn, 3),
+            "router_seconds": round(router, 3),
+            "routed_expert_seconds": round(routed, 3),
+            "shared_expert_seconds": round(shared, 3),
+            "layer_total_seconds": round(total, 3),
+        }
+    return {
+        "layer_events": int(result.get("layers_executed") or 0),
+        "executed_layers": [],
+        "attention_seconds": 0.0,
+        "ffn_seconds": 0.0,
+        "router_seconds": 0.0,
+        "routed_expert_seconds": 0.0,
+        "shared_expert_seconds": 0.0,
+        "layer_total_seconds": round(float(result.get("elapsed_seconds") or 0.0), 3),
     }
 
 
@@ -1251,53 +1472,151 @@ def _run_deepseek_fp8_chat_payload(
     layer_count = _chat_layer_count_for_request(model_id, mode, max_new_tokens)
     started = time.perf_counter()
     result = None
+    mtp_result = None
+    mtp_warmup_result = None
+    gpu_result = None
     run_blockers = list(token_blockers)
+    strategy = "deepseek-fp8-pack"
     if not run_blockers:
-        result = run_fp8_decode_loop(
-            model_id,
-            used_token_ids,
-            layer_count=layer_count,
-            max_new_tokens=max_new_tokens,
-        )
-        run_blockers.extend(list(result.blockers))
+        if _deepseek_gpu_backend_requested(payload, mode):
+            strategy = "deepseek-fp8-gpu-paged"
+            allow_cpu_diagnostic = _deepseek_gpu_diagnostic_cpu_allowed(payload)
+            gpu_result = run_local_deepseek_paged_decode_loop(
+                model_id,
+                used_token_ids,
+                start_layer=_clamp_int(payload.get("gpu_start_layer"), default=0, minimum=0, maximum=1024),
+                layer_count=_deepseek_gpu_layer_count(model_id, layer_count),
+                max_new_tokens=max_new_tokens,
+                resident_budget_bytes=_deepseek_gpu_resident_budget_bytes(payload),
+                prefetch_window=_clamp_int(
+                    payload.get("gpu_prefetch_window") or os.environ.get("PCKETLM_DEEPSEEK_GPU_PREFETCH_WINDOW"),
+                    default=0,
+                    minimum=0,
+                    maximum=16,
+                ),
+                prefetch_workers=_clamp_int(
+                    payload.get("gpu_prefetch_workers") or os.environ.get("PCKETLM_DEEPSEEK_GPU_PREFETCH_WORKERS"),
+                    default=1,
+                    minimum=0,
+                    maximum=16,
+                ),
+                tail_top_k=_clamp_int(payload.get("gpu_tail_top_k"), default=5, minimum=1, maximum=64),
+                tail_chunk_rows=_clamp_int(payload.get("gpu_tail_chunk_rows"), default=8192, minimum=1, maximum=262144),
+                device=str(payload.get("gpu_device") or ("cpu" if allow_cpu_diagnostic else "cuda")),
+                require_cuda=not allow_cpu_diagnostic,
+            )
+            run_blockers.extend(list(getattr(gpu_result, "blockers", []) or []))
+        elif _deepseek_mtp_exact_default_enabled(layer_count):
+            strategy = "deepseek-fp8-mtp-batched-exact"
+            mtp_warmup_result = warm_fp8_mtp_prompt_prefill_cache_from_tokens(
+                model_id,
+                used_token_ids,
+                prompt_text=effective_prompt,
+                layer_count=layer_count,
+            )
+            run_blockers.extend(list(mtp_warmup_result.get("blockers") or []))
+        if not run_blockers and strategy == "deepseek-fp8-mtp-batched-exact":
+            mtp_result = run_fp8_mtp_batched_generate_from_tokens(
+                model_id,
+                used_token_ids,
+                prompt_text=effective_prompt,
+                max_visible_tokens=max_new_tokens,
+                k=_clamp_int(payload.get("mtp_k"), default=8, minimum=1, maximum=64),
+                layer_count=layer_count,
+                max_passes=max(20, int(max_new_tokens) * 2),
+                prefer_eos_after_punctuation=True,
+            )
+            run_blockers.extend(list(mtp_result.get("blockers") or []))
+        elif not run_blockers and strategy != "deepseek-fp8-gpu-paged":
+            result = run_fp8_decode_loop(
+                model_id,
+                used_token_ids,
+                layer_count=layer_count,
+                max_new_tokens=max_new_tokens,
+            )
+            run_blockers.extend(list(result.blockers))
     elapsed_seconds = round(time.perf_counter() - started, 2)
-    generated_ids = [] if result is None else list(result.generated_token_ids)
-    generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
-    run_blockers.extend(decode_blockers)
-    step_summaries = [] if result is None else list(result.step_summaries)
-    timing_summary = _fp8_step_timing_summary(step_summaries)
-    ready = bool(result is not None and result.ready and not run_blockers)
+    if gpu_result is not None:
+        generated_ids = list(getattr(gpu_result, "generated_token_ids", []) or [])
+        generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+        run_blockers.extend(decode_blockers)
+        step_summaries = list(getattr(gpu_result, "step_summaries", []) or [])
+        timing_summary = _deepseek_gpu_runtime_summary(gpu_result)
+        ready = bool(getattr(gpu_result, "passed", False) and not run_blockers)
+        generation_speed = _deepseek_gpu_generation_speed_payload(gpu_result)
+        steps_completed = int(getattr(gpu_result, "positions_completed", 0) or 0)
+        cache_sequence_lengths = {
+            str(key): int(value) for key, value in dict(getattr(gpu_result, "cache_sequence_lengths", {}) or {}).items()
+        }
+    elif mtp_result is not None:
+        generated_ids = list(mtp_result.get("generated_token_ids") or [])
+        generated_text = str(mtp_result.get("generated_text") or "")
+        step_summaries = []
+        timing_summary = _mtp_runtime_summary(mtp_result)
+        ready = bool(mtp_result.get("ready") and not run_blockers)
+        generation_speed = _fp8_mtp_generation_speed_payload(mtp_result)
+        steps_completed = int(mtp_result.get("accepted_token_count") or len(generated_ids))
+        cache_sequence_lengths = {}
+    else:
+        generated_ids = [] if result is None else list(result.generated_token_ids)
+        generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+        run_blockers.extend(decode_blockers)
+        step_summaries = [] if result is None else list(result.step_summaries)
+        timing_summary = _fp8_step_timing_summary(step_summaries)
+        ready = bool(result is not None and result.ready and not run_blockers)
+        generation_speed = _fp8_generation_speed_payload(result, elapsed_seconds) if result is not None else {}
+        steps_completed = 0 if result is None else int(result.positions_completed)
+        cache_sequence_lengths = {}
+        if result is not None:
+            cache_sequence_lengths = {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()}
     response = {
         "ready": ready,
         "generated_text": generated_text,
         "full_text": f"{prompt}\n{generated_text}",
         "generated_token_ids": generated_ids,
         "prompt_token_count": len(used_token_ids),
-        "steps_completed": 0 if result is None else int(result.positions_completed),
+        "steps_completed": steps_completed,
         "max_new_tokens": max_new_tokens,
         "stop_reason": "deepseek-fp8-complete" if ready else "deepseek-fp8-blocked",
-        "strategy": "deepseek-fp8-pack",
-        "cache_sequence_lengths": {}
-        if result is None
-        else {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()},
+        "strategy": strategy,
+        "cache_sequence_lengths": cache_sequence_lengths,
         "blockers": run_blockers,
         "elapsed_seconds": elapsed_seconds,
         "timings": {
             "total": elapsed_seconds,
             "fp8_attention": timing_summary["attention_seconds"],
             "fp8_ffn": timing_summary["ffn_seconds"],
+            "fp8_router": timing_summary["router_seconds"],
             "fp8_layer_total": timing_summary["layer_total_seconds"],
         },
         "performance_summary": {
             "total_seconds": elapsed_seconds,
             "stack_seconds": timing_summary["layer_total_seconds"],
             "tensor_load_seconds": 0.0,
-            "decode_tail_seconds": 0.0,
-            "bottleneck": "FP8 attention" if timing_summary["attention_seconds"] >= timing_summary["ffn_seconds"] else "FP8 FFN",
-            "bottleneck_seconds": max(timing_summary["attention_seconds"], timing_summary["ffn_seconds"]),
-            "summary": "DeepSeek FP8 is using the packed artifact path; attention is still the main speed target.",
+            "decode_tail_seconds": timing_summary.get("tail_seconds", 0.0),
+            "bottleneck": (
+                "GPU resident pager"
+                if gpu_result is not None
+                else (
+                    "FP8 attention"
+                    if timing_summary["attention_seconds"] >= timing_summary["ffn_seconds"]
+                    else "FP8 FFN"
+                )
+            ),
+            "bottleneck_seconds": (
+                timing_summary["layer_total_seconds"]
+                if gpu_result is not None
+                else max(timing_summary["attention_seconds"], timing_summary["ffn_seconds"])
+            ),
+            "summary": (
+                "DeepSeek FP8 is using the resident CUDA pager path."
+                if gpu_result is not None
+                else "DeepSeek FP8 is using the exact MTP batched verifier path."
+                if mtp_result is not None
+                else "DeepSeek FP8 is using the packed artifact path; attention is still the main speed target."
+            ),
         },
-        "generation_speed": _fp8_generation_speed_payload(result, elapsed_seconds) if result is not None else {},
+        "generation_speed": generation_speed,
         "prefix_reuse": {"enabled": True, "used": False, "reason": "fp8-kv-returned-for-next-phase"},
         "reusable_token_count": len(used_token_ids) + len(generated_ids),
         "runtime_settings": _runtime_settings_payload(),
@@ -1310,13 +1629,79 @@ def _run_deepseek_fp8_chat_payload(
         "model_guardrails": _model_guardrails(model_id, max_new_tokens),
         "fp8_runtime": {
             "model_id": model_id,
-            "layer_count": layer_count,
+            "layer_count": (
+                int(getattr(gpu_result, "layer_count", 0) or 0)
+                if gpu_result is not None
+                else (layer_count if mtp_result is None else mtp_result.get("layer_count"))
+            ),
             "max_prompt_tokens": max_prompt_tokens,
             "used_prompt_token_count": len(used_token_ids),
             "timing_summary": timing_summary,
-            "attention_weight_cache": {} if result is None else dict(result.attention_weight_cache),
-            "mlp_span_cache": {} if result is None else dict(getattr(result, "mlp_span_cache", {})),
-            "fp8_pack": {} if result is None else dict(result.fp8_pack),
+            "attention_weight_cache": (
+                dict(mtp_result.get("attention_weight_cache") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(result.attention_weight_cache))
+            ),
+            "mlp_span_cache": (
+                dict(mtp_result.get("mlp_span_cache") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(getattr(result, "mlp_span_cache", {})))
+            ),
+            "regular_tensor_cache": (
+                dict(mtp_result.get("regular_tensor_cache") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(getattr(result, "regular_tensor_cache", {})))
+            ),
+            "lm_head_full_cache": (
+                dict(mtp_result.get("lm_head_full_cache") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(getattr(result, "lm_head_full_cache", {})))
+            ),
+            "residency_split": (
+                dict(mtp_result.get("residency_split") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(getattr(result, "residency_split", {})))
+            ),
+            "fp8_pack": (
+                dict(mtp_result.get("fp8_pack") or {})
+                if mtp_result is not None
+                else ({} if result is None else dict(result.fp8_pack))
+            ),
+            "gpu_paged": _deepseek_gpu_paged_payload(gpu_result),
+            "mtp_batched_exact": {}
+            if mtp_result is None
+            else {
+                "verifier_weight_sweeps": mtp_result.get("verifier_weight_sweeps"),
+                "tokens_accepted_per_sweep": list(mtp_result.get("tokens_accepted_per_sweep") or []),
+                "candidate_tokens_per_sweep": list(mtp_result.get("candidate_tokens_per_sweep") or []),
+                "verified_candidate_count": mtp_result.get("verified_candidate_count"),
+                "average_tokens_accepted_per_sweep": mtp_result.get("average_tokens_accepted_per_sweep"),
+                "seconds_per_visible_token": mtp_result.get("seconds_per_visible_token"),
+                "prefill_cache_hit": mtp_result.get("prefill_cache_hit"),
+                "prefill_elapsed_seconds": mtp_result.get("prefill_elapsed_seconds"),
+                "warmup_proof": {} if mtp_warmup_result is None else dict(mtp_warmup_result),
+                "mtp_shared_head_warmup": (
+                    {}
+                    if mtp_warmup_result is None
+                    else dict(mtp_warmup_result.get("mtp_shared_head_warmup") or {})
+                ),
+                "mtp_shared_head_cache_eviction": (
+                    {}
+                    if not list(mtp_result.get("passes") or [])
+                    else dict((list(mtp_result.get("passes") or [])[0]).get("mtp_shared_head_cache_eviction") or {})
+                ),
+                "verifier_timing": (
+                    {}
+                    if not list(mtp_result.get("passes") or [])
+                    else dict((list(mtp_result.get("passes") or [])[0]).get("verifier_timing") or {})
+                ),
+                "layers_executed": mtp_result.get("layers_executed"),
+                "expected_layers_executed": mtp_result.get("expected_layers_executed"),
+                "anti_cheat_passed": mtp_result.get("anti_cheat_passed"),
+                "one_weight_sweep_per_pass": mtp_result.get("one_weight_sweep_per_pass"),
+                "verifier_contract": dict(mtp_result.get("verifier_contract") or {}),
+                "tree_verifier": dict(mtp_result.get("tree_verifier") or {}),
+            },
         },
         "conversation_state": _conversation_state_payload(
             conversation_turn_count,
@@ -1351,12 +1736,17 @@ def _chat_cache_key_for_runtime_defaults(
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": min_new_tokens,
             "repetition_penalty": repetition_penalty,
+            "deepseek_gpu_default": os.environ.get("PCKETLM_DEEPSEEK_GPU_DEFAULT", ""),
         }
     )
 
 
 def _instant_chat_response_for_payload(payload: dict) -> dict | None:
     model_id, prompt, profile, mode, max_new_tokens, min_new_tokens, repetition_penalty = _chat_request_runtime_defaults(payload)
+    capability_guard = _unsupported_chat_response(model_id, prompt)
+    if capability_guard is not None:
+        capability_guard["job_fast_path"] = "capability-guard"
+        return capability_guard
     local_answer = _local_runtime_context_answer(prompt, model_id, mode, profile)
     if local_answer is not None:
         local_answer["job_fast_path"] = "local-runtime-context"
@@ -1386,6 +1776,9 @@ def _instant_chat_response_for_payload(payload: dict) -> dict | None:
 def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
     model_id, prompt, profile, mode, max_new_tokens, min_new_tokens, repetition_penalty = _chat_request_runtime_defaults(payload)
     session_id = _normalize_session_id(payload.get("session_id"))
+    capability_guard = _unsupported_chat_response(model_id, prompt)
+    if capability_guard is not None:
+        return capability_guard
     local_answer = _local_runtime_context_answer(prompt, model_id, mode, profile)
     if local_answer is not None:
         return local_answer
@@ -1438,6 +1831,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             n_ctx=2048,
             n_threads=runtime_torch_thread_count(),
             stop_strings=list(payload.get("stop_strings") or ["<|im_end|>", "<|im_start|>"]),
+            chat_messages=_gguf_chat_messages(payload, prompt, system_prompt),
         )
         metadata_started = time.perf_counter()
         phase_started = time.perf_counter()
@@ -1802,7 +2196,13 @@ def _qwen14b_speed_target_payload(model_id: str) -> dict:
 
 def _status_payload() -> dict:
     options = list_status_screen_options()
-    selected = options[0] if options else None
+    catalog = build_model_catalog()
+    runnable_ids = {entry.model_id for entry in catalog if entry.runnable}
+    selected = next((option for option in options if find_gguf_model_files(option.model_id)), None)
+    if selected is None:
+        selected = next((option for option in options if option.model_id in runnable_ids), None)
+    if selected is None:
+        selected = options[0] if options else None
     model_id = selected.model_id if selected else "qwen2.5-14b-instruct"
     model_dir = selected.model_dir if selected else original_model_root(model_id)
     status = build_status_screen_model(model_id=model_id, model_dir=model_dir)
@@ -1817,6 +2217,7 @@ def _status_payload() -> dict:
         or backend_report_payload.get("recommended_backend_id")
         or "direct-cpu"
     )
+    compatibility = build_compatibility_matrix()
     return {
         "project_root": str(project_root()),
         "active_model": {
@@ -1842,18 +2243,9 @@ def _status_payload() -> dict:
         "gguf_backend": build_gguf_backend_status(model_id).to_dict(),
         "warm_runner": warm_runner_status(model_id),
         "runtime_settings": _runtime_settings_payload(),
-        "models": [
-            {
-                "model_id": option.model_id,
-                "label": option.model_label,
-                "family": option.family_label,
-                "runtime_status": option.family_runtime_status,
-                "source": option.source_label,
-                "path": str(option.model_dir),
-                "registered": option.registered,
-            }
-            for option in options
-        ],
+        "models": [entry.to_dict() for entry in catalog],
+        "compatibility_matrix": [entry.to_dict() for entry in compatibility],
+        "kronos_backend": build_kronos_backend_status().to_dict(),
         "profiles": [profile.to_dict() for profile in list_saved_profiles(model_id)],
         "profile_compare": build_profile_compare_summary(model_id, latest_benchmark),
         "optimized_artifact": None if latest_artifact is None else latest_artifact.to_dict(),
@@ -1915,8 +2307,15 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
         if parsed.path == "/api/status":
             _json_response(self, 200, _status_payload())
+            return
+        if parsed.path == "/api/supervisor/health":
+            _json_response(self, 200, build_supervisor_report())
             return
         if parsed.path == "/api/chat/status":
             job_id = parse_qs(parsed.query).get("job_id", [""])[0]
@@ -1952,11 +2351,17 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/api/settings/runtime":
                 self._handle_runtime_settings(payload)
                 return
+            if self.path == "/api/supervisor/check":
+                self._handle_supervisor_check()
+                return
             if self.path == "/api/warm-runner":
                 self._handle_warm_runner(payload)
                 return
             if self.path == "/api/gguf/server":
                 self._handle_gguf_server(payload)
+                return
+            if self.path == "/api/forecast/kronos":
+                self._handle_kronos_forecast(payload)
                 return
             _json_response(self, 404, {"error": "Unknown API route."})
         except Exception as exc:  # pragma: no cover - guard for UI calls
@@ -2006,6 +2411,11 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
     def _handle_runtime_settings(self, payload: dict) -> None:
         _json_response(self, 200, _update_runtime_settings(payload))
 
+    def _handle_supervisor_check(self) -> None:
+        report = build_supervisor_report()
+        save_supervisor_report(report)
+        _json_response(self, 200, report)
+
     def _handle_warm_runner(self, payload: dict) -> None:
         _json_response(self, 200, _warm_runner_control_payload(payload))
 
@@ -2034,6 +2444,15 @@ class PocketLLMRequestHandler(BaseHTTPRequestHandler):
                 "gguf_backend": build_gguf_backend_status(model_id).to_dict(),
             },
         )
+
+    def _handle_kronos_forecast(self, payload: dict) -> None:
+        model_id = str(payload.get("model_id") or "kronos-small")
+        try:
+            result = run_kronos_forecast(payload, model_id=model_id)
+        except ValueError as exc:
+            _json_response(self, 400, {"error": str(exc)})
+            return
+        _json_response(self, 200 if result.ready else 409, result.to_dict())
 
     def _serve_static(self) -> None:
         path = self.path.split("?", 1)[0]

@@ -520,6 +520,7 @@ def run_gguf_prompt(
     stop_strings: list[str] | None = None,
     llama_factory: Any | None = None,
     prefer_server: bool = True,
+    chat_messages: list[dict[str, str]] | None = None,
 ) -> GGUFPromptResult:
     """Run a prompt through a local GGUF model when the optional backend is available."""
     selected = _select_gguf_model_file(model_id, model_path)
@@ -535,6 +536,7 @@ def run_gguf_prompt(
             n_ctx=n_ctx,
             n_threads=n_threads,
             stop_strings=stop_strings,
+            chat_messages=chat_messages,
         )
         if server_result.ready or server_result.blockers:
             return server_result
@@ -736,6 +738,7 @@ def _run_gguf_prompt_server(
     n_ctx: int,
     n_threads: int | None,
     stop_strings: list[str] | None,
+    chat_messages: list[dict[str, str]] | None = None,
 ) -> GGUFPromptResult:
     started = time.perf_counter()
     if not _start_llama_server(selected, n_ctx=n_ctx, n_threads=n_threads, model_id=model_id):
@@ -746,17 +749,26 @@ def _run_gguf_prompt_server(
             elapsed_seconds=round(time.perf_counter() - started, 2),
             blockers=["llama.cpp server is not available and could not be started."],
         )
-    payload = {
-        "prompt": prompt,
-        "n_predict": int(max_tokens),
-        "cache_prompt": True,
-        "temperature": 0,
-    }
+    if chat_messages:
+        payload = {
+            "messages": chat_messages,
+            "max_tokens": int(max_tokens),
+            "temperature": 0,
+        }
+        endpoint = "/v1/chat/completions"
+    else:
+        payload = {
+            "prompt": prompt,
+            "n_predict": int(max_tokens),
+            "cache_prompt": True,
+            "temperature": 0,
+        }
+        endpoint = "/completion"
     if stop_strings:
         payload["stop"] = list(stop_strings)
     request_payload = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
-        f"{llama_server_url()}/completion",
+        f"{llama_server_url()}{endpoint}",
         data=request_payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -773,11 +785,16 @@ def _run_gguf_prompt_server(
             blockers=[f"llama.cpp server request failed: {exc}"],
         )
     elapsed = round(time.perf_counter() - started, 2)
+    generated_text = str(payload.get("content") or "")
+    if chat_messages:
+        choices = payload.get("choices") or []
+        message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
+        generated_text = str(message.get("content") or generated_text)
     return GGUFPromptResult(
         model_id=model_id,
         model_path=selected.path,
         ready=True,
-        generated_text=_clean_stop_text(str(payload.get("content") or ""), stop_strings),
+        generated_text=_clean_stop_text(generated_text, stop_strings),
         elapsed_seconds=elapsed,
         backend="llama-cpp-gguf-server",
         timings={"total": elapsed, "server": payload.get("timings", {})},

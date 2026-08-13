@@ -27,6 +27,24 @@ function escapeText(value) {
   }[char]));
 }
 
+function statusClass(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "proven" || normalized === "ready" || normalized === "active") return "status-proven";
+  if (normalized === "experimental") return "status-experimental";
+  if (normalized === "unsupported" || normalized === "blocked") return "status-unsupported";
+  return "status-missing";
+}
+
+function runLaunchSequence() {
+  const overlay = $("#launch-sequence");
+  const status = $("#launch-status");
+  if (!overlay || !status) return;
+  const steps = ["Starting local control", "Checking runtimes", "Reading model evidence", "Ready"];
+  steps.forEach((step, index) => window.setTimeout(() => { status.textContent = step; }, index * 260));
+  window.setTimeout(() => overlay.classList.add("complete"), 1150);
+  window.setTimeout(() => overlay.remove(), 1600);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -49,7 +67,7 @@ function setMode(mode) {
   state.mode = mode;
   $$("#mode-picker button").forEach((button) => button.classList.toggle("selected", button.dataset.mode === mode));
   const hints = {
-    GGUF: "GGUF is the fast Qwen 14B chat path. First use may load the model; loaded replies are the speed target.",
+    GGUF: "GGUF uses the installed model's native llama.cpp chat template.",
     "Direct Quality": "Direct Quality uses Pocket's dense runtime and is currently slow.",
     "Direct Quick": "Direct Quick uses the dense runtime for one-token checks.",
     "Direct Agent": "Direct Agent caps dense-runtime replies to two tokens for short local work.",
@@ -88,12 +106,15 @@ function renderStatus(payload) {
   renderProfileSelect(payload.profiles || []);
   renderRuntimePresetControls(payload);
 
-  $("#model-list").innerHTML = (payload.models || []).map((item) => `
+  $("#model-list").innerHTML = (payload.models || []).map((item) => {
+    const stateLabel = item.runnable ? item.implementation_status : item.source_status === "missing" ? "Missing" : item.implementation_status;
+    return `
     <div class="item">
-      <div class="item-title"><span>${escapeText(item.label)}</span><span class="pill">${escapeText(item.runtime_status)}</span></div>
-      <p>${escapeText(item.family)} - ${escapeText(item.source)}<br>${escapeText(item.path)}</p>
+      <div class="item-title"><span>${escapeText(item.label)}</span><span class="status-chip ${statusClass(stateLabel)}">${escapeText(stateLabel)}</span></div>
+      <p>${escapeText(item.family)} / ${escapeText(item.capability)} / ${escapeText(item.backend)}</p>
+      <div class="mini-metrics"><span>${escapeText(item.source_status)}</span><span>${escapeText(item.source_origin)}</span><span>${escapeText(item.format_name)}</span></div>
     </div>
-  `).join("") || `<p class="muted">No registered models found.</p>`;
+  `; }).join("") || `<p class="muted">No registered models found.</p>`;
 
   $("#profile-list").innerHTML = (payload.profiles || []).map((item) => `
     <div class="item">
@@ -109,6 +130,49 @@ function renderStatus(payload) {
 
   renderBenchmark(payload.benchmark, payload.benchmark_history);
   renderBackendComparison(payload.backend_comparison);
+}
+
+function renderSupervisor(report) {
+  const chip = $("#supervisor-status");
+  const summary = $("#supervisor-summary");
+  const grid = $("#supervisor-grid");
+  if (!chip || !summary || !grid) return;
+  const reportStatus = report.status || "unknown";
+  const system = report.system || {};
+  const gpu = report.gpu || {};
+  const modelSummary = report.summary || {};
+  chip.textContent = reportStatus;
+  chip.className = `status-chip ${statusClass(reportStatus)}`;
+  summary.textContent = reportStatus === "ready"
+    ? "This desktop has a runnable local model. The report stays on this computer."
+    : reportStatus === "partial"
+      ? "PocketLM works, but this desktop still needs a model before generation can be tested."
+      : "This installation has a blocking compatibility issue.";
+  const metrics = [
+    ["Install", String(report.installation_id || "unknown").slice(0, 8)],
+    ["System", `${system.os || "Unknown"} ${system.os_release || ""}`.trim()],
+    ["CPU threads", system.logical_cpu_count ?? "n/a"],
+    ["Memory", system.memory_total_gb == null ? "n/a" : `${system.memory_total_gb} GB`],
+    ["GPU", gpu.available ? `${gpu.device_count} CUDA` : "CPU only"],
+    ["Models", modelSummary.runnable_model_count ?? 0],
+  ];
+  grid.innerHTML = metrics.map(([label, value]) => `
+    <div class="runtime-metric"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>
+  `).join("");
+}
+
+async function runSupervisorCheck() {
+  const button = $("#supervisor-check");
+  const summary = $("#supervisor-summary");
+  if (button) button.disabled = true;
+  if (summary) summary.textContent = "Checking hardware, runtimes, and local models...";
+  try {
+    renderSupervisor(await api("/api/supervisor/check", { method: "POST", body: "{}" }));
+  } catch (error) {
+    if (summary) summary.textContent = `Check failed: ${error.message}`;
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function renderSpeedTarget(target) {
@@ -228,15 +292,17 @@ function renderLoadRuntime(payload) {
       <p>${escapeText(model.model_dir || "No folder detected")}</p>
     </div>
   `;
-  $("#support-plan").innerHTML = [
-    ["Qwen", "Active", "Chat, benchmark, direct local runtime"],
-    ["Kimi", "Planned", "Importer and runtime compatibility next"],
-    ["Kronos/Kronk", "Planned", "Depends on a real supported open model path"],
-    ["Gemma", "Planned", "Dense text support after the first non-Qwen path"],
-  ].map(([family, status, detail]) => `
+  $("#support-plan").innerHTML = (payload.compatibility_matrix || []).map((entry) => `
     <div class="item compact-item">
-      <div class="item-title"><span>${family}</span><span class="pill">${status}</span></div>
-      <p>${detail}</p>
+      <div class="item-title"><span>${escapeText(entry.label)}</span><span class="status-chip ${statusClass(entry.status)}">${escapeText(entry.status)}</span></div>
+      <p>${escapeText(entry.capability)} / ${escapeText(entry.backend)} / chat ${escapeText(entry.chat_status)}</p>
+      <p>${escapeText(entry.evidence)}</p>
+      <div class="mini-metrics">
+        <span>${escapeText(entry.local_ready ? "local path ready" : "weights absent")}</span>
+        <span>${escapeText(entry.implementation_status)}</span>
+        <span>${escapeText(entry.default_path ? "default when installed" : "specialized path")}</span>
+      </div>
+      ${(entry.blockers || []).length ? `<p class="blocker-text">${escapeText(entry.blockers.join(" "))}</p>` : ""}
     </div>
   `).join("");
 }
@@ -877,6 +943,7 @@ async function controlGgufServer(action) {
 }
 
 async function boot() {
+  runLaunchSequence();
   $$(".nav-item").forEach((item) => item.addEventListener("click", () => setScreen(item.dataset.screen)));
   $$("#mode-picker button").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
   $("#chat-form").addEventListener("submit", sendPrompt);
@@ -890,6 +957,7 @@ async function boot() {
   $("#agent-warm-runner").addEventListener("change", updateRuntimePreset);
   $("#warm-runner-start").addEventListener("click", () => controlWarmRunner("start"));
   $("#warm-runner-stop").addEventListener("click", () => controlWarmRunner("stop"));
+  $("#supervisor-check").addEventListener("click", runSupervisorCheck);
   $("#profile-select").addEventListener("change", (event) => {
     state.activeProfileId = event.target.value;
     const profile = (state.status?.profiles || []).find((item) => item.profile_id === state.activeProfileId);
@@ -903,6 +971,7 @@ async function boot() {
   setMode("GGUF");
   try {
     renderStatus(await api("/api/status"));
+    renderSupervisor(await api("/api/supervisor/health"));
     state.statusRefreshTimer = window.setInterval(async () => {
       if (!state.status?.downloads?.active_count) return;
       try {

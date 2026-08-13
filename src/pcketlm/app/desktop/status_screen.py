@@ -181,7 +181,7 @@ def build_status_screen_model(
     model_dir: Path | None = None,
 ) -> StatusScreenModel:
     """Build a desktop-ready status model from live pcketlm state."""
-    option = resolve_status_screen_option(model_id) if model_dir is None else None
+    option = resolve_status_screen_option(model_id)
     resolved_label = model_label or (option.model_label if option else DEFAULT_MODEL_LABEL)
     source_dir = model_dir or (option.model_dir if option else original_model_root(model_id))
     family_label_value = option.family_label if option else "Qwen"

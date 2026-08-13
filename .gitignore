@@ -1,5 +1,12 @@
 # big assets — never commit
 models/
+.venv/
+.claude/
+.mcp.json
+.playwright-cli/
+output/
+design-concepts/
+PocketLM_DeepSeek_chat_export_*.pdf
 state/llama-server.*.log
 state/streaming/
 state/backend-runtimes/
@@ -21,11 +28,23 @@ dist/
 Thumbs.db
 
 # generated runtime state — keep out of source
+state/*
+!state/registry/
+!state/registry/models.json
 state/gguf-smoke-*.txt
 state/runtime-settings.json
 state/llama-server.json
 state/downloads/
 state/warm-runner/
+state/supervisor/
+state/auto_resume/
+state/fp8_dequant_cache/
+state/fp8_hot_cache/
+state/fp8_packs/
+state/kaggle_gpu_smoke/
+state/*.pid
+state/*.stderr.txt
+state/*.stdout.txt
 vendor/openblas/
 src/pcketlm/native/*.obj
 src/pcketlm/native/*.exp

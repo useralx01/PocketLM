@@ -22,6 +22,7 @@ _FP16_PACKED_GEMV_DLL = _NATIVE_DIR / "fp16_packed_gemv.dll"
 _ROW8_ARTIFACT_DLL = _NATIVE_DIR / "row8_artifact_cache.dll"
 _FP8_DEQUANT_DLL = _NATIVE_DIR / "fp8_dequant.dll"
 _FP8_LINEAR_DLL = _NATIVE_DIR / "fp8_linear.dll"
+_FP8_LINEAR_AVX512_DLL = _NATIVE_DIR / "fp8_linear_avx512.dll"
 _DS_FORWARD_DLL = _NATIVE_DIR / "ds_forward.dll"
 _PCKETLM_FORWARD_DLL = _NATIVE_DIR / "pcketlm_forward.dll"
 _Q4_LIB: ctypes.CDLL | None = None
@@ -44,6 +45,8 @@ _FP8_DEQUANT_LIB: ctypes.CDLL | None = None
 _FP8_DEQUANT_ERROR: Exception | None = None
 _FP8_LINEAR_LIB: ctypes.CDLL | None = None
 _FP8_LINEAR_ERROR: Exception | None = None
+_FP8_LINEAR_AVX512_LIB: ctypes.CDLL | None = None
+_FP8_LINEAR_AVX512_ERROR: Exception | None = None
 _DS_FORWARD_LIB: ctypes.CDLL | None = None
 _DS_FORWARD_ERROR: Exception | None = None
 _PCKETLM_FORWARD_LIB: ctypes.CDLL | None = None
@@ -92,6 +95,10 @@ def _native_row8_artifact_disabled() -> bool:
 
 def _native_fp8_linear_disabled() -> bool:
     return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_LINEAR", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_fp8_avx512_disabled() -> bool:
+    return os.environ.get("PCKETLM_DISABLE_NATIVE_FP8_AVX512", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _native_fp8_dequant_disabled() -> bool:
@@ -392,11 +399,111 @@ def _load_fp8_linear_lib() -> ctypes.CDLL | None:
                 ctypes.c_longlong,
             ]
             lib.fp8_e4m3_block_mlp_many_weighted_f32.restype = ctypes.c_int
+        if hasattr(lib, "fp8_e4m3_block_mlp_many_row_weighted_f32"):
+            lib.fp8_e4m3_block_mlp_many_row_weighted_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_block_mlp_many_row_weighted_f32.restype = ctypes.c_int
+        if hasattr(lib, "fp8_e4m3_block_mlp_many_pair_weighted_f32"):
+            lib.fp8_e4m3_block_mlp_many_pair_weighted_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_block_mlp_many_pair_weighted_f32.restype = ctypes.c_int
     except Exception as exc:  # pragma: no cover - defensive platform path
         _FP8_LINEAR_ERROR = exc
         return None
     _FP8_LINEAR_LIB = lib
     _FP8_LINEAR_ERROR = None
+    return lib
+
+
+def _load_fp8_linear_avx512_lib() -> ctypes.CDLL | None:
+    global _FP8_LINEAR_AVX512_LIB, _FP8_LINEAR_AVX512_ERROR
+    if _native_fp8_linear_disabled() or _native_fp8_avx512_disabled():
+        return None
+    if _FP8_LINEAR_AVX512_LIB is not None:
+        return _FP8_LINEAR_AVX512_LIB
+    if not _FP8_LINEAR_AVX512_DLL.exists():
+        _FP8_LINEAR_AVX512_ERROR = FileNotFoundError(str(_FP8_LINEAR_AVX512_DLL))
+        return None
+    try:
+        lib = ctypes.CDLL(str(_FP8_LINEAR_AVX512_DLL))
+        lib.fp8_linear_avx512_cpu_has_avx512.argtypes = []
+        lib.fp8_linear_avx512_cpu_has_avx512.restype = ctypes.c_int
+        if lib.fp8_linear_avx512_cpu_has_avx512() != 1:
+            _FP8_LINEAR_AVX512_ERROR = RuntimeError("CPU does not report AVX-512F+BW support.")
+            return None
+        if hasattr(lib, "fp8_e4m3_block_mlp_avx512_f32"):
+            lib.fp8_e4m3_block_mlp_avx512_f32.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+            ]
+            lib.fp8_e4m3_block_mlp_avx512_f32.restype = ctypes.c_int
+        lib.fp8_e4m3_block_mlp_many_weighted_avx512_f32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        lib.fp8_e4m3_block_mlp_many_weighted_avx512_f32.restype = ctypes.c_int
+    except Exception as exc:  # pragma: no cover - defensive platform path
+        _FP8_LINEAR_AVX512_ERROR = exc
+        return None
+    _FP8_LINEAR_AVX512_LIB = lib
+    _FP8_LINEAR_AVX512_ERROR = None
     return lib
 
 
@@ -407,6 +514,11 @@ def native_fp8_linear_available() -> bool:
 def native_fp8_linear_error() -> Exception | None:
     _load_fp8_linear_lib()
     return _FP8_LINEAR_ERROR
+
+
+def native_fp8_linear_avx512_error() -> Exception | None:
+    _load_fp8_linear_avx512_lib()
+    return _FP8_LINEAR_AVX512_ERROR
 
 
 _DS_TENSOR_CALLBACK = ctypes.CFUNCTYPE(
@@ -1417,6 +1529,11 @@ def native_fp8_mlp_available() -> bool:
     return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_f32"))
 
 
+def native_fp8_mlp_avx512_available() -> bool:
+    lib = _load_fp8_linear_avx512_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_avx512_f32"))
+
+
 def native_fp8_mlp_many_available() -> bool:
     lib = _load_fp8_linear_lib()
     return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_many_f32"))
@@ -1425,6 +1542,21 @@ def native_fp8_mlp_many_available() -> bool:
 def native_fp8_mlp_many_weighted_available() -> bool:
     lib = _load_fp8_linear_lib()
     return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_many_weighted_f32"))
+
+
+def native_fp8_mlp_many_row_weighted_available() -> bool:
+    lib = _load_fp8_linear_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_many_row_weighted_f32"))
+
+
+def native_fp8_mlp_many_pair_weighted_available() -> bool:
+    lib = _load_fp8_linear_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_many_pair_weighted_f32"))
+
+
+def native_fp8_mlp_many_weighted_avx512_available() -> bool:
+    lib = _load_fp8_linear_avx512_lib()
+    return bool(lib is not None and hasattr(lib, "fp8_e4m3_block_mlp_many_weighted_avx512_f32"))
 
 
 def _load_fp16_matmul_lib() -> ctypes.CDLL | None:
@@ -3458,6 +3590,66 @@ def fp8_e4m3_block_mlp_f32(
     return out
 
 
+def fp8_e4m3_block_mlp_avx512_f32(
+    gate_weight: torch.Tensor,
+    gate_scale_inv: torch.Tensor,
+    up_weight: torch.Tensor,
+    up_scale_inv: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_scale_inv: torch.Tensor,
+    hidden: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp8_linear_avx512_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_mlp_avx512_f32"):
+        reason = "disabled" if _native_fp8_avx512_disabled() else _FP8_LINEAR_AVX512_ERROR
+        raise RuntimeError(f"Native FP8 AVX-512 MLP is unavailable: {reason}")
+    if gate_weight.ndim != 2 or up_weight.ndim != 2 or down_weight.ndim != 2:
+        raise ValueError("FP8 MLP weights must be 2D")
+    gate_cpu = gate_weight.detach().cpu().contiguous().to(torch.uint8)
+    up_cpu = up_weight.detach().cpu().contiguous().to(torch.uint8)
+    down_cpu = down_weight.detach().cpu().contiguous().to(torch.uint8)
+    if tuple(gate_cpu.shape) != tuple(up_cpu.shape):
+        raise ValueError("FP8 MLP gate and up weights must have matching shapes")
+    intermediate_rows = int(gate_cpu.shape[0])
+    hidden_cols = int(gate_cpu.shape[1])
+    if tuple(down_cpu.shape) != (hidden_cols, intermediate_rows):
+        raise ValueError("FP8 MLP down weight must have shape [hidden, intermediate]")
+    gate_scale_cpu = gate_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    up_scale_cpu = up_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    down_scale_cpu = down_scale_inv.detach().cpu().contiguous().to(torch.float32)
+    if tuple(gate_scale_cpu.shape) != tuple(up_scale_cpu.shape):
+        raise ValueError("FP8 MLP gate and up scales must have matching shapes")
+    expected_gate_scale = ((intermediate_rows + 127) // 128, (hidden_cols + 127) // 128)
+    expected_down_scale = ((hidden_cols + 127) // 128, (intermediate_rows + 127) // 128)
+    if tuple(gate_scale_cpu.shape) != expected_gate_scale:
+        raise ValueError("FP8 MLP gate scale shape does not match 128x128 block layout")
+    if tuple(down_scale_cpu.shape) != expected_down_scale:
+        raise ValueError("FP8 MLP down scale shape does not match 128x128 block layout")
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_mlp_avx512_f32(
+        ctypes.c_void_p(int(gate_cpu.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_cpu.data_ptr())),
+        ctypes.c_void_p(int(up_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_cpu.data_ptr())),
+        ctypes.c_void_p(int(down_scale_cpu.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(expected_gate_scale[1]),
+        ctypes.c_longlong(expected_down_scale[1]),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_mlp_avx512_f32 failed with code {code}")
+    return out
+
+
 def fp8_e4m3_block_mlp_many_f32(
     items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     hidden: torch.Tensor,
@@ -3598,6 +3790,235 @@ def fp8_e4m3_block_mlp_many_weighted_f32(
     )
     if code != 0:
         raise RuntimeError(f"fp8_e4m3_block_mlp_many_weighted_f32 failed with code {code}")
+    return out
+
+
+def fp8_e4m3_block_mlp_many_row_weighted_f32(
+    items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    hidden: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp8_linear_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_mlp_many_row_weighted_f32"):
+        reason = "disabled" if _native_fp8_linear_disabled() else _FP8_LINEAR_ERROR
+        raise RuntimeError(f"Native FP8 row-weighted many-MLP is unavailable: {reason}")
+    if not items:
+        raise ValueError("items must not be empty")
+    prepared: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    first_gate = items[0][0].detach().cpu().contiguous().to(torch.uint8)
+    intermediate_rows = int(first_gate.shape[0])
+    hidden_cols = int(first_gate.shape[1])
+    for gate, gate_scale, up, up_scale, down, down_scale in items:
+        gate_cpu = gate.detach().cpu().contiguous().to(torch.uint8)
+        up_cpu = up.detach().cpu().contiguous().to(torch.uint8)
+        down_cpu = down.detach().cpu().contiguous().to(torch.uint8)
+        gate_scale_cpu = gate_scale.detach().cpu().contiguous().to(torch.float32)
+        up_scale_cpu = up_scale.detach().cpu().contiguous().to(torch.float32)
+        down_scale_cpu = down_scale.detach().cpu().contiguous().to(torch.float32)
+        if tuple(gate_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all gate weights must have matching shape")
+        if tuple(up_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all up weights must have matching shape")
+        if tuple(down_cpu.shape) != (hidden_cols, intermediate_rows):
+            raise ValueError("all down weights must have matching shape")
+        prepared.append((gate_cpu, gate_scale_cpu, up_cpu, up_scale_cpu, down_cpu, down_scale_cpu))
+
+    expected_gate_scale = ((intermediate_rows + 127) // 128, (hidden_cols + 127) // 128)
+    expected_down_scale = ((hidden_cols + 127) // 128, (intermediate_rows + 127) // 128)
+    for gate, gate_scale, up, up_scale, down, down_scale in prepared:
+        if tuple(gate_scale.shape) != expected_gate_scale or tuple(up_scale.shape) != expected_gate_scale:
+            raise ValueError("gate/up scale shapes do not match 128x128 block layout")
+        if tuple(down_scale.shape) != expected_down_scale:
+            raise ValueError("down scale shape does not match 128x128 block layout")
+
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+    route_cpu = route_weights.detach().cpu().contiguous().to(torch.float32)
+    if tuple(route_cpu.shape) != (len(prepared), int(hidden_cpu.shape[0])):
+        raise ValueError("route_weights must have shape [expert_count, batch]")
+    ptr_dtype = torch.int64
+    gate_ptrs = torch.tensor([int(item[0].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    gate_scale_ptrs = torch.tensor([int(item[1].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_ptrs = torch.tensor([int(item[2].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_scale_ptrs = torch.tensor([int(item[3].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_ptrs = torch.tensor([int(item[4].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_scale_ptrs = torch.tensor([int(item[5].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_mlp_many_row_weighted_f32(
+        ctypes.c_void_p(int(gate_ptrs.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(route_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(len(prepared)),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(expected_gate_scale[1]),
+        ctypes.c_longlong(expected_down_scale[1]),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_mlp_many_row_weighted_f32 failed with code {code}")
+    return out
+
+
+def fp8_e4m3_block_mlp_many_pair_weighted_f32(
+    items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    hidden: torch.Tensor,
+    pair_item_indices: torch.Tensor,
+    pair_row_indices: torch.Tensor,
+    pair_weights: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp8_linear_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_mlp_many_pair_weighted_f32"):
+        reason = "disabled" if _native_fp8_linear_disabled() else _FP8_LINEAR_ERROR
+        raise RuntimeError(f"Native FP8 pair-weighted many-MLP is unavailable: {reason}")
+    if not items:
+        raise ValueError("items must not be empty")
+    prepared: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    first_gate = items[0][0].detach().cpu().contiguous().to(torch.uint8)
+    intermediate_rows = int(first_gate.shape[0])
+    hidden_cols = int(first_gate.shape[1])
+    for gate, gate_scale, up, up_scale, down, down_scale in items:
+        gate_cpu = gate.detach().cpu().contiguous().to(torch.uint8)
+        up_cpu = up.detach().cpu().contiguous().to(torch.uint8)
+        down_cpu = down.detach().cpu().contiguous().to(torch.uint8)
+        gate_scale_cpu = gate_scale.detach().cpu().contiguous().to(torch.float32)
+        up_scale_cpu = up_scale.detach().cpu().contiguous().to(torch.float32)
+        down_scale_cpu = down_scale.detach().cpu().contiguous().to(torch.float32)
+        if tuple(gate_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all gate weights must have matching shape")
+        if tuple(up_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all up weights must have matching shape")
+        if tuple(down_cpu.shape) != (hidden_cols, intermediate_rows):
+            raise ValueError("all down weights must have matching shape")
+        prepared.append((gate_cpu, gate_scale_cpu, up_cpu, up_scale_cpu, down_cpu, down_scale_cpu))
+
+    expected_gate_scale = ((intermediate_rows + 127) // 128, (hidden_cols + 127) // 128)
+    expected_down_scale = ((hidden_cols + 127) // 128, (intermediate_rows + 127) // 128)
+    for gate, gate_scale, up, up_scale, down, down_scale in prepared:
+        if tuple(gate_scale.shape) != expected_gate_scale or tuple(up_scale.shape) != expected_gate_scale:
+            raise ValueError("gate/up scale shapes do not match 128x128 block layout")
+        if tuple(down_scale.shape) != expected_down_scale:
+            raise ValueError("down scale shape does not match 128x128 block layout")
+
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+    pair_item_cpu = pair_item_indices.detach().cpu().contiguous().reshape(-1).to(torch.int64)
+    pair_row_cpu = pair_row_indices.detach().cpu().contiguous().reshape(-1).to(torch.int64)
+    pair_weight_cpu = pair_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if int(pair_item_cpu.numel()) != int(pair_row_cpu.numel()) or int(pair_item_cpu.numel()) != int(pair_weight_cpu.numel()):
+        raise ValueError("pair index and weight tensors must have matching length")
+    ptr_dtype = torch.int64
+    gate_ptrs = torch.tensor([int(item[0].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    gate_scale_ptrs = torch.tensor([int(item[1].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_ptrs = torch.tensor([int(item[2].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_scale_ptrs = torch.tensor([int(item[3].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_ptrs = torch.tensor([int(item[4].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_scale_ptrs = torch.tensor([int(item[5].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_mlp_many_pair_weighted_f32(
+        ctypes.c_void_p(int(gate_ptrs.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(pair_item_cpu.data_ptr())),
+        ctypes.c_void_p(int(pair_row_cpu.data_ptr())),
+        ctypes.c_void_p(int(pair_weight_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(len(prepared)),
+        ctypes.c_longlong(int(pair_item_cpu.numel())),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(expected_gate_scale[1]),
+        ctypes.c_longlong(expected_down_scale[1]),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_mlp_many_pair_weighted_f32 failed with code {code}")
+    return out
+
+
+def fp8_e4m3_block_mlp_many_weighted_avx512_f32(
+    items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    hidden: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    lib = _load_fp8_linear_avx512_lib()
+    if lib is None or not hasattr(lib, "fp8_e4m3_block_mlp_many_weighted_avx512_f32"):
+        reason = "disabled" if _native_fp8_avx512_disabled() else _FP8_LINEAR_AVX512_ERROR
+        raise RuntimeError(f"Native FP8 AVX-512 weighted many-MLP is unavailable: {reason}")
+    if not items:
+        raise ValueError("items must not be empty")
+    prepared: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    first_gate = items[0][0].detach().cpu().contiguous().to(torch.uint8)
+    intermediate_rows = int(first_gate.shape[0])
+    hidden_cols = int(first_gate.shape[1])
+    for gate, gate_scale, up, up_scale, down, down_scale in items:
+        gate_cpu = gate.detach().cpu().contiguous().to(torch.uint8)
+        up_cpu = up.detach().cpu().contiguous().to(torch.uint8)
+        down_cpu = down.detach().cpu().contiguous().to(torch.uint8)
+        gate_scale_cpu = gate_scale.detach().cpu().contiguous().to(torch.float32)
+        up_scale_cpu = up_scale.detach().cpu().contiguous().to(torch.float32)
+        down_scale_cpu = down_scale.detach().cpu().contiguous().to(torch.float32)
+        if tuple(gate_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all gate weights must have matching shape")
+        if tuple(up_cpu.shape) != (intermediate_rows, hidden_cols):
+            raise ValueError("all up weights must have matching shape")
+        if tuple(down_cpu.shape) != (hidden_cols, intermediate_rows):
+            raise ValueError("all down weights must have matching shape")
+        prepared.append((gate_cpu, gate_scale_cpu, up_cpu, up_scale_cpu, down_cpu, down_scale_cpu))
+
+    expected_gate_scale = ((intermediate_rows + 127) // 128, (hidden_cols + 127) // 128)
+    expected_down_scale = ((hidden_cols + 127) // 128, (intermediate_rows + 127) // 128)
+    for gate, gate_scale, up, up_scale, down, down_scale in prepared:
+        if tuple(gate_scale.shape) != expected_gate_scale or tuple(up_scale.shape) != expected_gate_scale:
+            raise ValueError("gate/up scale shapes do not match 128x128 block layout")
+        if tuple(down_scale.shape) != expected_down_scale:
+            raise ValueError("down scale shape does not match 128x128 block layout")
+
+    hidden_cpu = hidden.detach().cpu().contiguous().reshape(-1, int(hidden.shape[-1])).to(torch.float32)
+    if int(hidden_cpu.shape[1]) != hidden_cols:
+        raise ValueError("hidden input size does not match FP8 MLP input size")
+    route_cpu = route_weights.detach().cpu().contiguous().reshape(-1).to(torch.float32)
+    if int(route_cpu.numel()) != len(prepared):
+        raise ValueError("route_weights length must match item count")
+    ptr_dtype = torch.int64
+    gate_ptrs = torch.tensor([int(item[0].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    gate_scale_ptrs = torch.tensor([int(item[1].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_ptrs = torch.tensor([int(item[2].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    up_scale_ptrs = torch.tensor([int(item[3].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_ptrs = torch.tensor([int(item[4].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    down_scale_ptrs = torch.tensor([int(item[5].data_ptr()) for item in prepared], dtype=ptr_dtype)
+    out = torch.empty((int(hidden_cpu.shape[0]), hidden_cols), dtype=torch.float32)
+    code = lib.fp8_e4m3_block_mlp_many_weighted_avx512_f32(
+        ctypes.c_void_p(int(gate_ptrs.data_ptr())),
+        ctypes.c_void_p(int(gate_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_ptrs.data_ptr())),
+        ctypes.c_void_p(int(up_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_ptrs.data_ptr())),
+        ctypes.c_void_p(int(down_scale_ptrs.data_ptr())),
+        ctypes.c_void_p(int(hidden_cpu.data_ptr())),
+        ctypes.c_void_p(int(route_cpu.data_ptr())),
+        ctypes.c_void_p(int(out.data_ptr())),
+        ctypes.c_longlong(len(prepared)),
+        ctypes.c_longlong(int(hidden_cpu.shape[0])),
+        ctypes.c_longlong(intermediate_rows),
+        ctypes.c_longlong(hidden_cols),
+        ctypes.c_longlong(expected_gate_scale[1]),
+        ctypes.c_longlong(expected_down_scale[1]),
+    )
+    if code != 0:
+        raise RuntimeError(f"fp8_e4m3_block_mlp_many_weighted_avx512_f32 failed with code {code}")
     return out
 
 

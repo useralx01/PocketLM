@@ -57,6 +57,7 @@ def main() -> int:
     parser.add_argument("model_id")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--k", type=int, default=4)
+    parser.add_argument("--mtp-top-k", type=int, default=8)
     parser.add_argument("--layers", type=int, default=None)
     parser.add_argument("--out", required=True)
     parser.add_argument(
@@ -118,7 +119,7 @@ def main() -> int:
             previous_hidden,
             position=position,
             previous_kv_cache=mtp_cache,
-            top_k=8,
+            top_k=max(1, int(args.mtp_top_k)),
         )
         mtp_steps.append(step.to_dict())
         if not step.ready or not step.top_token_ids or step.output_tensor is None:

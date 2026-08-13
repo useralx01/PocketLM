@@ -446,3 +446,44 @@ def test_run_gguf_prompt_sends_server_stop_strings(tmp_path: Path, monkeypatch) 
     assert result.ready is True
     assert captured["payload"]["stop"] == ["<|im_end|>", "<|im_start|>"]
     assert result.generated_text == "OK"
+
+
+def test_run_gguf_prompt_uses_server_chat_template_for_gemma_and_kimi(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime import gguf_backend
+
+    gguf_path = tmp_path / "fixture.gguf"
+    gguf_path.write_bytes(b"gguf")
+    server_path = tmp_path / "llama-server.exe"
+    server_path.write_bytes(b"exe")
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"template ok"}}]}'
+
+    def fake_urlopen(request, **_kwargs):
+        captured.append((request.full_url, json.loads(request.data.decode("utf-8"))))
+        return FakeResponse()
+
+    monkeypatch.setattr(gguf_backend, "llama_server_path", lambda: server_path)
+    monkeypatch.setattr(gguf_backend, "_llama_server_is_ready", lambda: True)
+    monkeypatch.setattr(gguf_backend.urllib.request, "urlopen", fake_urlopen)
+
+    for model_id in ("gemma-3-270m", "kimi-k2-instruct"):
+        result = run_gguf_prompt(
+            model_id,
+            "fallback",
+            model_path=gguf_path,
+            chat_messages=[{"role": "user", "content": "hello"}],
+        )
+        assert result.ready is True
+        assert result.generated_text == "template ok"
+
+    assert all(url.endswith("/v1/chat/completions") for url, _payload in captured)
+    assert all(payload["messages"][0]["content"] == "hello" for _url, payload in captured)

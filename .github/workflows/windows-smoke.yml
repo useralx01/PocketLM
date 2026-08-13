@@ -1,0 +1,37 @@
+name: Windows installation smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  install-and-supervise:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install PocketLM
+        shell: pwsh
+        run: .\install-pocketlm.ps1
+      - name: Run portable contract tests
+        shell: pwsh
+        run: |
+          $projectRoot = (Resolve-Path .).Path
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($projectRoot.ToLowerInvariant())
+          $hasher = [System.Security.Cryptography.SHA256]::Create()
+          $hash = ([System.BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace("-", "").Substring(0, 10).ToLowerInvariant()
+          $hasher.Dispose()
+          $python = Join-Path $env:LOCALAPPDATA "PocketLM\venvs\$hash\Scripts\python.exe"
+          & $python -m pip install pytest
+          & $python -m pytest -q tests/test_supervisor.py tests/test_model_compatibility.py tests/test_kronos_backend.py
+      - name: Upload installation proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketlm-installation-proof
+          path: state/supervisor/install-proof.json
+          if-no-files-found: error
