@@ -67,6 +67,11 @@ def _read_json(path: Path) -> dict | None:
 
 def inspect_qwen_source(model_dir: Path) -> SourceInspection:
     """Inspect a Qwen-family source directory."""
+    return inspect_model_source(model_dir)
+
+
+def inspect_model_source(model_dir: Path) -> SourceInspection:
+    """Inspect a Hugging Face, GGUF, or specialized local model folder."""
     config_payload = _read_json(model_dir / "config.json") or {}
     architectures = config_payload.get("architectures") or []
     num_experts = config_payload.get("num_experts", config_payload.get("num_local_experts"))
@@ -76,9 +81,9 @@ def inspect_qwen_source(model_dir: Path) -> SourceInspection:
     config = ConfigSummary(
         architecture=architectures[0] if architectures else None,
         model_type=config_payload.get("model_type"),
-        hidden_size=config_payload.get("hidden_size"),
-        num_hidden_layers=config_payload.get("num_hidden_layers"),
-        num_attention_heads=config_payload.get("num_attention_heads"),
+        hidden_size=config_payload.get("hidden_size", config_payload.get("d_model")),
+        num_hidden_layers=config_payload.get("num_hidden_layers", config_payload.get("n_layers")),
+        num_attention_heads=config_payload.get("num_attention_heads", config_payload.get("n_heads")),
         num_key_value_heads=config_payload.get("num_key_value_heads"),
         intermediate_size=config_payload.get("intermediate_size"),
         moe_intermediate_size=moe_intermediate_size,
@@ -91,13 +96,32 @@ def inspect_qwen_source(model_dir: Path) -> SourceInspection:
 
     index_payload = _read_json(model_dir / "model.safetensors.index.json")
     if not index_payload:
+        gguf_files = list(model_dir.rglob("*.gguf")) if model_dir.exists() else []
+        safetensor_files = list(model_dir.glob("*.safetensors")) if model_dir.exists() else []
+        pytorch_files = list(model_dir.glob("pytorch_model*.bin")) if model_dir.exists() else []
+        if gguf_files:
+            format_name = "gguf"
+            present = len(gguf_files)
+            total_size = sum(path.stat().st_size for path in gguf_files)
+        elif safetensor_files:
+            format_name = "safetensors"
+            present = len(safetensor_files)
+            total_size = sum(path.stat().st_size for path in safetensor_files)
+        elif pytorch_files:
+            format_name = "pytorch"
+            present = len(pytorch_files)
+            total_size = sum(path.stat().st_size for path in pytorch_files)
+        else:
+            format_name = "unknown"
+            present = 0
+            total_size = None
         return SourceInspection(
             config=config,
-            format_name="unknown",
+            format_name=format_name,
             index_present=False,
-            expected_shards=0,
-            present_shards=0,
-            total_size_bytes=None,
+            expected_shards=present,
+            present_shards=present,
+            total_size_bytes=total_size,
         )
 
     weight_map = index_payload.get("weight_map") or {}

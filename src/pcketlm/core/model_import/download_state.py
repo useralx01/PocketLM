@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pcketlm.core.model_import.inspect import inspect_qwen_source
+from pcketlm.core.model_import.inspect import inspect_model_source
+from pcketlm.core.model_families import normalize_family_key
 
 
 @dataclass(slots=True)
@@ -28,7 +29,7 @@ CORE_FILES = (
 )
 
 
-def estimate_download_state(model_dir: Path) -> DownloadState:
+def estimate_download_state(model_dir: Path, *, family: str | None = None) -> DownloadState:
     """Estimate the current download state for a model folder."""
     bytes_on_disk = sum(
         path.stat().st_size
@@ -36,11 +37,24 @@ def estimate_download_state(model_dir: Path) -> DownloadState:
         if path.is_file()
     ) if model_dir.exists() else 0
 
-    missing_core_files = [name for name in CORE_FILES if not (model_dir / name).exists()]
-    inspection = inspect_qwen_source(model_dir)
+    inspection = inspect_model_source(model_dir)
+    family_key = normalize_family_key(family)
+    if inspection.format_name == "gguf":
+        missing_core_files = []
+    else:
+        missing_core_files = []
+        if not (model_dir / "config.json").exists():
+            missing_core_files.append("config.json")
+        if inspection.present_shards == 0:
+            missing_core_files.append("model.safetensors.index.json")
+        if family_key != "kronos" and not any(
+            (model_dir / name).exists()
+            for name in ("tokenizer.json", "tokenizer.model", "spiece.model")
+        ):
+            missing_core_files.append("tokenizer.json")
 
     expected_bytes = inspection.total_size_bytes
-    progress_pct = round((bytes_on_disk / expected_bytes) * 100, 2) if expected_bytes else None
+    progress_pct = min(100.0, round((bytes_on_disk / expected_bytes) * 100, 2)) if expected_bytes else None
 
     if not model_dir.exists():
         status = "missing"

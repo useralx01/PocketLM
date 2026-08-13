@@ -25,6 +25,7 @@ from pcketlm.core.runtime import (
     run_fp8_single_token_block,
     run_fp8_single_token_forward,
 )
+from pcketlm.core.runtime.speculative import fp8_speculative_generate
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --prefill <token-id,...> [--layers n] [--no-tail]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --decode-loop <token-id,...> [--layers n] [--max-new n]")
         print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --chat <text> [--layers n] [--max-new n] [--max-prompt-tokens n] [--system-prompt text] [--raw-chat]")
+        print("   or: py -m pcketlm.app.chat_shell.runtime_fp8_cli <model-id> --spec-chat <text> [--speculator model-id] [--layers n] [--max-new n] [--k n]")
         return 1
 
     model_id = args[0]
@@ -274,6 +276,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(payload, indent=2))
         return 0 if result.ready and not token_blockers and not decode_blockers else 2
+    if mode == "--spec-chat":
+        if len(args) < 3:
+            print("--spec-chat requires prompt text")
+            return 1
+        prompt = args[2]
+        speculator_id = _str_option(args, "--speculator", "qwen3-1.7b")
+        layer_count = _optional_int_option(args, "--layers")
+        max_new = _int_option(args, "--max-new", 1)
+        k = _int_option(args, "--k", 96)
+        started = time.perf_counter()
+        result = fp8_speculative_generate(
+            model_id,
+            speculator_id,
+            prompt,
+            max_new_tokens=max_new,
+            k=k,
+            layer_count=layer_count,
+        )
+        payload = result.to_dict()
+        payload["elapsed_seconds"] = float(time.perf_counter() - started)
+        print(json.dumps(payload, indent=2))
+        return 0 if result.ready else 2
     if mode == "--prefill":
         if len(args) < 3:
             print("--prefill requires comma-separated token ids")
@@ -326,6 +350,15 @@ def _int_option(args: list[str], name: str, default: int) -> int:
     index = args.index(name)
     if index + 1 >= len(args):
         return int(default)
+    return int(args[index + 1])
+
+
+def _optional_int_option(args: list[str], name: str) -> int | None:
+    if name not in args:
+        return None
+    index = args.index(name)
+    if index + 1 >= len(args):
+        return None
     return int(args[index + 1])
 
 
@@ -390,9 +423,18 @@ def _encode_with_catalog_tokenizer(model_id: str, prompt: str) -> tuple[list[int
 
 def _decode_with_catalog_tokenizer(model_id: str, token_ids: list[int]) -> tuple[str, list[str]]:
     from tokenizers import Tokenizer
+    from pcketlm.core.runtime.tokenizer_runtime import load_generation_settings
     from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
 
     if not token_ids:
+        return "", []
+    eos_ids = {int(value) for value in load_generation_settings(model_id).eos_token_ids}
+    visible_ids: list[int] = []
+    for token_id in token_ids:
+        if int(token_id) in eos_ids:
+            break
+        visible_ids.append(int(token_id))
+    if not visible_ids:
         return "", []
     catalog = load_tensor_catalog(model_id)
     tokenizer_path = catalog.model_dir / "tokenizer.json"
@@ -400,7 +442,7 @@ def _decode_with_catalog_tokenizer(model_id: str, token_ids: list[int]) -> tuple
         return "", [f"Missing tokenizer at {tokenizer_path}."]
     try:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
-        return tokenizer.decode([int(value) for value in token_ids], skip_special_tokens=False), []
+        return tokenizer.decode([int(value) for value in visible_ids], skip_special_tokens=False), []
     except Exception as exc:
         return "", [f"Tokenizer decode failed: {exc}."]
 

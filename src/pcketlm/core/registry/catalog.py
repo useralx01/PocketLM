@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pcketlm.core.model_import.download_state import estimate_download_state
+from pcketlm.core.model_compatibility import profile_for_family
 from pcketlm.core.registry.repository import load_model_registry
 
 
@@ -26,6 +27,10 @@ class CatalogEntry:
     progress_pct: float | None
     missing_core_files: list[str]
     warnings: list[str]
+    compatibility_status: str
+    capability: str
+    backend: str
+    implementation_status: str
 
     def to_dict(self) -> dict:
         """Serialize the catalog entry."""
@@ -44,6 +49,10 @@ class CatalogEntry:
             "progress_pct": self.progress_pct,
             "missing_core_files": list(self.missing_core_files),
             "warnings": list(self.warnings),
+            "compatibility_status": self.compatibility_status,
+            "capability": self.capability,
+            "backend": self.backend,
+            "implementation_status": self.implementation_status,
         }
 
 
@@ -53,8 +62,14 @@ def build_model_catalog() -> list[CatalogEntry]:
     entries: list[CatalogEntry] = []
 
     for record in sorted(records.values(), key=lambda item: item.model_id):
-        download_state = estimate_download_state(record.source_path)
+        download_state = estimate_download_state(record.source_path, family=record.family)
         warnings = list(record.validation.warnings if record.validation else [])
+        profile = profile_for_family(record.family, record.model_id)
+        artifact_ready = any(path.exists() for path in record.artifact_paths)
+        source_ready = download_state.status == "ready"
+        effective_runnable = bool(record.runnable and (source_ready or artifact_ready))
+        if record.runnable and not effective_runnable:
+            warnings.append("Registry readiness was stale; no complete live source or artifact was found.")
 
         entries.append(
             CatalogEntry(
@@ -66,12 +81,16 @@ def build_model_catalog() -> list[CatalogEntry]:
                 source_origin=record.source_origin,
                 imported=record.imported,
                 validated=record.validated,
-                runnable=record.runnable,
+                runnable=effective_runnable,
                 source_status=download_state.status,
                 bytes_on_disk=download_state.bytes_on_disk,
                 progress_pct=download_state.progress_pct,
                 missing_core_files=download_state.missing_core_files,
                 warnings=warnings,
+                compatibility_status=(profile.chat_status if profile else "Unsupported"),
+                capability=(profile.capability if profile else "unknown"),
+                backend=(profile.backend if profile else "none"),
+                implementation_status=(profile.implementation_status if profile else "Unsupported"),
             )
         )
 

@@ -1,0 +1,56 @@
+{
+  "layers": 32,
+  "cache_mb": 8192,
+  "ready": true,
+  "elapsed": 126.58629560000554,
+  "generated": [
+    0,
+    37036
+  ],
+  "top": [
+    37036,
+    76181,
+    22305,
+    52479,
+    9771
+  ],
+  "generate_elapsed": 125.46918410000217,
+  "tail": 4.134155400010059,
+  "attention": 54.17521339998348,
+  "ffn": 48.85424210001656,
+  "attention_cache": {
+    "entries": 122,
+    "bytes": 8583380992,
+    "max_bytes": 8589934592,
+    "policy": "prefix",
+    "dequant_hot_cache_enabled": true,
+    "dequant_hot_cache_hits": 198,
+    "dequant_hot_cache_misses": 0,
+    "dequant_hot_cache_stores": 0,
+    "dequant_hot_cache_read_errors": 0,
+    "dequant_hot_cache_write_errors": 0,
+    "hits": 122,
+    "misses": 198,
+    "stores": 122,
+    "evictions": 0
+  },
+  "lm_head_full_cache": {
+    "entries": 1,
+    "bytes": 1853358080,
+    "max_bytes": 2147483648,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "fp8_pack": {
+    "enabled": true,
+    "available": true,
+    "pack_files_open": 20,
+    "mmap_bytes_resident": 0,
+    "sequential_reads": 1120,
+    "scattered_reads": 0,
+    "bytes_returned": 36648438272
+  },
+  "blockers": []
+}

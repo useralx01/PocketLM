@@ -2,10 +2,18 @@
 
 ## In Progress
 
+- Download and run the private `v0.1.0-multi-pc.1` prerelease on the first additional Windows desktop.
 - Decide whether staged streaming should auto-verify after each rotation in debug mode or only when explicitly requested
 - Decide how much of the live streaming telemetry should appear in the desktop app by default versus debug views
 
 ## Next
+
+- Download the prerelease on each target desktop, run `install-pocketlm.ps1 -StartApp`, and compare the generated installation health reports.
+- Run real model generation on each additional desktop after its local model storage is connected; installation supervision can verify software and hardware without downloading weights, but cannot claim real inference proof without them.
+- Install a chosen Gemma 3 GGUF and run a real measured chat benchmark before promoting Gemma from `Missing`/fixture-verified to locally proven.
+- Install a Kimi K2 GGUF only when storage permits; its production checkpoint is intentionally not downloaded by this storage-light task.
+- Install the official Kronos package, Kronos-small weights, and tokenizer together, then run a real CPU forecast benchmark before promoting the adapter from fixture-verified.
+- Run the existing DeepSeek CUDA proof command on a CUDA machine; this CPU-only host cannot produce a real GPU measurement.
 
 - MoE follow-up: make Qwen3 full decode report expert hit/miss telemetry in the final full slice, then attack the `~51s` warm tensor-load wall with an expert-aware packed/runtime path instead of dense-style safetensors reloads.
 - Re-scope direct paged runtime speed around first-pass tensor IO/copy reduction. Sticky residency did not improve Qwen 14B `--slice=full` at one generated token.
@@ -48,7 +56,6 @@
 - Expand realistic prompt checks after speed improves enough to make 20+ token answers practical
 - Add deeper saved profile behavior beyond mode/token defaults only after the runtime path is less fragile
 - Replace remaining placeholder actions in Load Model, Personalize, Agents, and Settings with real backend actions as each backend is ready
-- Define the first non-Qwen support target and what "supported" means for import, readiness checks, direct runtime loading, chat, personalization, and comparison
 - Expand persisted lightweight benchmark runs with measured real prompt timings and output summaries when the user explicitly starts a slower benchmark
 - Expand the first profile templates into saved profile records under each model's profile directory
 - Wire Compare to real default-vs-profile summaries once saved profile records and benchmark results exist
@@ -74,25 +81,10 @@
 - Turn the desktop status-screen spec into the first real app UI when desktop implementation starts
 - Use the risk register to guide the first real load debugging pass
 - Define the first code folder layout
-- Define the model registry schema
 - Define the profile schema
 - Define the benchmark schema
 - Rescope direct paged runtime speed around quantized execution, native fused CPU backend, GPU path, or a redesigned packed executor; cache/prefetch/zero-copy levers did not reach the target.
 - Improve Mixtral MoE expert hit rate beyond the current `21.40%` by adding compressed expert residency or a hotter expert scheduler; Qwen3 now meets the 20-token MoE cache gate, but Mixtral does not yet have comparable reuse.
-- Implement first model file validation pass
-- Implement first registry write/read flow
-- Implement import readiness detection from real model folders
-- Add a simple model status CLI for local inspection
-- Add a simple local import CLI for model folders
-- Add a dedicated source download-state command
-- Add a registry-backed model catalog command
-- Add a safe registry record removal command
-- Choose the exact first supported Qwen model variant
-- Decide the initial source format support
-- Design the model registry and storage layout
-- Add a registry-backed runtime source command
-- Add a runtime bootstrap command that can target registry entries directly
-- Attempt the first real dense-model load through the custom runtime path
 - Define the first benchmark suite
 - Choose the desktop shell approach
 - Break the runtime into concrete modules and file layout
@@ -167,3 +159,83 @@ Done: PLM-9 DeepSeek monolithic forward boundary.
 - Blocked: PLM-12 fused attention block speed gate needs BLAS-backed/batched native projection or GPU offload; the one-call C fusion is correct but slower than PyTorch/MKL on CPU.
 - Blocked: PLM-13 effective `<=2s/token` needs GPU offload or a fundamentally faster full-layer engine; CPU FP8 speculative batching improved verification but misses the full-model target.
 - PLM-14 follow-up only if Kaggle changes its API worker image: rerun `python tools\kaggle_gpu_smoke.py`; until then, use the browser Colab/Kaggle notebook for GPU validation.
+Done: PLM-13 local resident-layer pager and header-only GPU residency estimator.
+Done: PLM-13 local pager prefetch plumbing and telemetry.
+Done: PLM-13 streamed local lm_head tail for resident-pager token decisions.
+Done: PLM-13 local resident-layer KV cache carry.
+Done: PLM-13 small local resident-pager multi-token decode loop.
+Done: PLM-13 online Kaggle CUDA smoke and real DeepSeek remote resident/paged validation.
+Done: PLM-13 GPU readiness gate for CUDA + local DeepSeek catalog + local FP8 pack.
+- PLM-13 next: provide a CUDA worker with direct access to the `688 GB` local FP8 pack/source, then run the local resident-pager decode loop there.
+- PLM-13 next: validate whether local pager prefetch overlaps pack/source reads with CUDA compute on that direct-access worker.
+- DeepSeek exact CPU next: reduce the streamed `lm_head` tail, now `17.585s` of the cached 8-layer next-token row, using exact lossless caching or a native/top-k tail kernel that proves identical top-k.
+- DeepSeek exact CPU next: reduce per-layer attention/FFN compute, now `5.241s` attention and `10.019s` FFN on the cached 8-layer next-token row; storage is not the current blocker because the row has `0` scattered reads.
+- DeepSeek exact CPU hard unblock: replace the current PyTorch/Python FP8 attention and FFN path with a fundamentally faster exact matrix engine. After the full `lm_head` cache, cached 32-layer exact decode still spends `146.016s` in attention and `58.025s` in FFN with `0` scattered reads.
+- Do not spend more time on native `lm_head` top-k, MLP span cache, small attention cache, or CPU thread tuning as defaults; all were measured and rejected for the full exact target.
+- DeepSeek exact CPU only viable software unblock: a new exact attention/FFN matrix engine that is much faster than the current CPU PyTorch/native mix. The measured full 62-layer row is `386.038s`; reaching `<=10s` would require about a `38.6x` full-token speedup without dropping layers or changing precision.
+- Do not claim more storage, FP8 packing, `lm_head` caching, or Smart App Control fixes can make full DeepSeek interactive on this CPU-only machine. Those walls have been removed or measured.
+- After prefix attention cache, the remaining exact speed gap is still about `27.5x` from `275.327s` to `<=10s`. Any next attempt must replace the attention/FFN matrix engine itself, not just change cache shape.
+- PLM-17 physical migration remains blocked until an internal NVMe volume with at least `1.38 TB` free exists, or until the source/pack storage strategy is changed without violating exact FP8 constraints. Continue PLM-18+ exact-path improvements against the current pack path and keep proof artifacts explicit.
+- PLM-18 follow-up if pursuing full 61-layer residency on CPU: add a raw FP8 attention-span cache or another exact attention representation. The current dequantized attention cache cannot hold all layers inside 16 GB, so the guard correctly limits the proven resident window.
+- PLM-19 follow-up only if revisiting expert kernels: the exact AVX-512 bit-decode path is safe and default, but isolated routed-expert math is still slower than scalar native on the real layer-3 microbench; future wins need a different exact reduction strategy or a batched GEMM-style route, not AVX-512 gather.
+- PLM-20 follow-up: the original S4 proof averaged only `1.25` accepted tokens per verifier sweep; later MTP tree/rank work raised the current default to `[6,4]`. Keep future exact attempts focused on V3-MTP proposal acceptance or verifier sweep cost, not another single greedy chain.
+- PLM-21 follow-up: the integrated exact path is proven and now defaults to the `[6,4]` rank-first top-3 continuation proof. Future exact speed work must preserve model, quantization, experts, and layers.
+- MTP tree follow-up: punctuation-biased depth-2 improved the exact proof to `164.9231s/visible-token` with `2.0` accepted tokens/sweep, but has been superseded by the `60.614s/visible-token` rank-first continuation-rank3 default.
+- MTP adaptive follow-up: depth-4 `punctuation-next2` improved the exact proof to `157.8086s/visible-token`, but has been superseded by the `60.614s/visible-token` rank-first continuation-rank3 default.
+- MTP under-50 follow-up: current exact warm-prefill default is `37.4887s/visible-token` on the full 61-layer 10-visible-token proof, using `tree_depth=10`, `mtp_top_k=2048`, and `punctuation-rank-onepass-top2048`. Prompt-prefill warmup is exact and separately proven at `420.2098s`; measured generation uses the warmed exact prefill cache and commits all 10 visible tokens in one full verifier sweep.
+- MTP next frontier: below-37 work must reduce the one remaining full verifier sweep or the top-2048 MTP-tail cost while preserving the same model, quantization, experts, layers, and exact verifier commit. Do not revisit branch pruning, broad finish depth, long rank-pattern chains, top-3 continuation, continuation-rank3 pruning, root-tail skip, final-tail depth reduction, smaller top-k/width, MTP-head warmup, inference-mode wrapping, or single-branch verifier wrapping unless new proof changes their measured blockers.
+- MTP around-20 follow-up: do not revisit depth-20 widening, fixed 20-token ranks, root-tail skip, larger attention/MLP caches, direct MTP shared-head warmup, or prefill attention prefetch as defaults. The next credible route below `37.4887s/visible-token` is an exact verifier sweep speedup or a different proof prompt/long-output benchmark where V3's MTP head can honestly commit more than 10 visible tokens before the full verifier diverges.
+- MTP below-34 follow-up: current exact default is now `34.2292s/visible-token` from `state/mtp-warm-prefill-mtphead-evict-before-verify-rank-onepass-top2048-depth10-full61-tenvisible.json`. The remaining measured generation cost is mainly the one verifier loop (`282.188s`, split into `145.2421s` FFN and `114.9234s` attention) plus MTP block/proposal work (`31.7227s` block after shared-head warmup). Next credible speed work should target exact verifier attention/FFN math or exact MTP block cost, not another shared-head warmup without the eviction guard.
+- MTP regular tensor cache follow-up: broad default enablement was rejected at `42.6497s/visible-token`. Do not enable it by default; only revisit as a narrow filtered probe if a later profile shows a specific regular tensor read is dominating without added memory-pressure cost.
+- MTP row-weighted many follow-up: reduced verifier proof did not improve FFN time, so do not promote `PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY` without a new native kernel shape that handles multi-row route weights directly.
+- MTP no-MLP-span follow-up: full proof regressed to `47.7969s/visible-token`, so keep the promoted MLP span cache defaults despite the misleading reduced-layer improvement.
+- MTP attention FP32 cast-cache follow-up: reduced proof regressed to `51.2504s` verifier loop, so do not promote FP32 attention residency without a lower-memory per-layer cast reuse design.
+- MTP top-k follow-up: `mtp_top_k=1304` regressed the full proof to `39.6258s/visible-token`; keep `2048` unless a new rank strategy changes the required candidate window.
+- MTP MoE worker follow-up: worker parallelism regressed the reduced MTP verifier, so keep expert workers opt-in only.
+- MTP attention matmul-core follow-up: full proof accepted only `6/10` candidates, so do not promote alternate attention accumulation orders unless they preserve the full 10-token verifier acceptance.
+- MTP native many-MLP follow-up: disabling the native many-MLP path regressed reduced proof timing, so keep it enabled.
+- MTP under-20 follow-up: current default is still `34.2292s/visible-token`; latest rejected exact probes are logged in `ERRORS.md` (blind depth-20 long prompt, one-worker pack preload, q/kv attention role cache, small role-cache overrun, and AVX-512 kill switch). Do not claim `20s cleared` without a ready full proof below `20s/visible-token`.
+- MTP verifier-cost follow-up: the remaining plausible route is a new exact verifier engine or a proven longer MTP branch with high acceptance before running a full sweep. Cache reshaping and simple worker/role toggles have not cleared the gate.
+- MTP AVX-512 full-MLP follow-up: do not promote `PCKETLM_ENABLE_NATIVE_FP8_MLP_AVX512_FULL`; it is bit-exact but slower on the reduced proof. Future verifier-engine work needs a different exact reduction strategy, not the current AVX-512 lane-product kernel.
+- MTP row-weighted native-batch follow-up: do not promote `PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY`; the new single-call row route kernel only shaved the reduced proof to `32.9885s/visible-token` and the full proof overran the under-20 gate before writing a ready JSON.
+- MTP attention-side follow-up: do not promote narrow `kv_b` FP32 casts, q/kv role cache combined with row-weighted MoE, native FP8 attention-linear, or causal-mask caching. All were measured and rejected on reduced proofs; the mask cache was reverted.
+- MTP branch/cache follow-up: do not pursue repeated-sky/counting long branches from the top-k64 reduced probes, do not disable native full-MLP, and do not re-run q/kv role-cache cap/policy variants as defaults without a new mechanism. None points at a below-20 proof.
+- MTP SDPA follow-up: do not re-add the SDPA attention-core branch without a different exact layout; the direct fused SDPA attempt regressed reduced timing and was removed.
+- MTP native batch-reuse follow-up: keep `PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE` opt-in. The reduced verifier-only row-weighted slice improved, but the full 61-layer proof did not emit a ready JSON before the stop gate. Future below-20 work needs a full-sweep verifier engine that reduces attention/FFN together, not only batch-reusing routed rows.
+- MTP u16 projection follow-up: do not enable native u16 or Torch BF16 projection modes for the exact verifier; both changed the reduced verifier token stream and were slower.
+- MTP long-rank follow-up: do not run blind long-rank proof launches as defaults. Build an incremental branch diagnostic that writes every draft step, selected rank, candidate token, and elapsed time before any full verifier sweep. Only spend a full 61-layer proof when the branch artifact shows a realistic acceptance path and a projected phase-clear window.
+- MTP thread-count follow-up: do not lower the exact verifier to `PCKETLM_FP8_CPU_THREADS=4`; the reduced proof regressed versus the current default.
+- MTP packed-span follow-up: do not enable `PCKETLM_ENABLE_FP8_PACK_MMAP_SPANS` for the exact MTP default; the reduced proof regressed.
+- MTP router-cache follow-up: do not enable router-only `PCKETLM_FP8_REGULAR_TENSOR_CACHE_FILTER=mlp.gate.weight,mlp.gate.e_score_correction_bias` as a default; reduced timing improved, but the full exact proof regressed to `38.206s/visible-token`.
+- MTP verifier telemetry follow-up: future below-20 attempts must cut full-path attention plus FFN together. The latest exact split shows `105.0389s` attention and `185.2804s` FFN, with FFN further split into `59.2928s` expert preload and `81.1853s` routed expert math.
+- MTP MTP-layer cache follow-up: do not add `model.layers.61.mlp.experts` to the MLP span cache filter; the reduced proof regressed.
+- MTP pack-worker follow-up: do not promote `PCKETLM_FP8_PACK_PREFETCH_WORKERS=16` from the reduced-only probe; it is not a full proof and does not project to the under-20 phase.
+- MTP MoE worker follow-up: do not promote `PCKETLM_FP8_MOE_EXPERT_WORKERS=2`; the reduced proof regressed to `34.2567s/visible-token`.
+- MTP native batch-reuse follow-up: do not promote batch reuse alone; `state/mtp-batchreuse-only-layers8-visible10.json` regressed to `38.8915s/visible-token` and confirms this knob is not the under-20 path.
+- MTP AVX-512 full-MLP follow-up: the LUT-gather variant was exact but still slower than scalar on the reduced proof (`35.1863s/visible-token`) and was reverted; keep `PCKETLM_ENABLE_NATIVE_FP8_MLP_AVX512_FULL` opt-in.
+- MTP q/kv plus pack-worker follow-up: do not combine q/kv attention role caching with worker `16`; the reduced proof regressed to `32.5517s/visible-token` versus q/kv-only.
+- MTP pack-worker follow-up: do not promote worker `32`; it regressed to `34.925s/visible-token` reduced.
+- MTP long-rank follow-up: do not run a full long-rank proof from the reduced window probe; it accepted only one reduced token and regressed to `36.4668s/visible-token`.
+- MTP pack-worker follow-up: do not promote worker `16` without a ready full proof; the full launch for `state/mtp-packworkers16-full61-tenvisible.json` produced no JSON after 15 minutes.
+- MTP native thread follow-up: do not set `PCKETLM_NATIVE_THREADS=4`; the reduced proof regressed to `36.6971s/visible-token`.
+- MTP norm-cache follow-up: do not enable norm-only regular caching; `state/mtp-normcache-layers8-visible10.json` regressed to `36.1806s/visible-token`.
+- MTP terminal-trim follow-up: do not enable `PCKETLM_ENABLE_FP8_MTP_TERMINAL_VERIFIER_TRIM` as a default; the full exact proof regressed to `41.4318s/visible-token` even though the trim was exact and anti-cheat passed.
+- MTP hot-cache mmap follow-up: keep `PCKETLM_ENABLE_FP8_HOT_CACHE_MMAP` opt-in only. It improved the reduced proof but the full proof overran without writing JSON, so it is not a below-20 route.
+- MTP cache-pressure follow-up: do not disable the FP8 hot cache as a speed route; the reduced no-hot-cache launch produced no JSON before the stop. Future cache work should add bounded pruning/telemetry, not blanket disablement.
+- MTP attention dequant mmap follow-up: do not set `PCKETLM_DISABLE_FP8_DEQUANT_HOT_CACHE_MMAP=1`; the reduced copy-read probe regressed to `49.8599s/visible-token`.
+- MTP thread-count follow-up: do not set `PCKETLM_FP8_CPU_THREADS=8`; it regressed reduced exact timing to `55.6239s/visible-token`, consistent with the rejected thread-4 and thread-14 rows.
+- MTP inference-mode follow-up: do not wrap the exact MTP default in `torch.inference_mode()`; the correctly scoped reduced artifact regressed to `41.2255s/visible-token` versus the fresh `33.9547s` baseline.
+- MTP root-miss follow-up: do not continue building long MTP branches after the root draft misses the exact verifier token; the forced-root continuation artifact regressed to `89.2289s/visible-token`.
+- MTP one-pass top-k follow-up: do not enable `PCKETLM_ENABLE_FP8_MTP_ONEPASS_WINDOWED_TOPK` by default; the safe reduced artifact regressed to `36.6361s/visible-token`.
+- MTP preload/MoE combo follow-up: do not combine worker-16 preloading with row-weighted MoE as a default; the reduced combo regressed to `36.32s/visible-token`.
+- MTP attention-cache pin follow-up: do not pin `model.layers.61.self_attn` by default; the full proof regressed to `38.2928s/visible-token` after evicting verifier prefix attention entries.
+- MTP attention-cache size follow-up: do not raise the exact attention cache to `4608 MB` with the MTP layer pin; the full proof regressed to `53.9244s/visible-token`.
+- MTP MoE overlap follow-up: do not enable `PCKETLM_ENABLE_FP8_MOE_OVERLAP_SHARED_PRELOAD`; reduced timing regressed to `49.319s/visible-token` from contention.
+- MTP verifier-scope MoE follow-up: do not promote verifier-only batchreuse+rowweighted, rowweighted-only, or active-pair pairweighted MoE. The first two full proofs hit memory pressure without ready JSONs, and the active-pair reduced branch did not beat rowweighted. Future below-20 work needs a broader exact verifier engine that reduces attention plus FFN without adding full-proof memory pressure.
+- MTP below-20 follow-up: do not promote low-cache batchreuse+rowweighted, batchreuse+active-pair, trimshape9+batchreuse+rowweighted, verifier attention matmul-core, or `OMP_NUM_THREADS=4`. Each has a reduced artifact in `state/` and none projects to a full under-20 proof.
+- MTP cache-filter follow-up: do not promote routed-all or shared-only MLP span cache filters. Warmed reduced proofs looked faster, but full exact proofs either regressed or failed to hold on default rerun (`36.5052s`, `36.1748s`, and `35.4807s`); the current default remains `34.2292s/visible-token`.
+- MTP row-weighted chunk follow-up: do not promote `PCKETLM_FP8_MOE_ROW_WEIGHTED_MANY_CHUNK` or spend a full proof on chunked verifier-only batchreuse+rowweighted. Chunk8/chunk32 preserved reduced anti-cheat but regressed the clean verifier branch to about `42s`, losing the only useful unchunked signal.
+- MTP long-output follow-up: do not reuse the canonical sky depth-20 branch for a phase proof. Find a different real prompt only after an incremental diagnostic proves the full DeepSeek verifier actually has a long visible continuation and V3's own MTP ranks can propose it within the exact top-k budget.
+- MTP below-20 follow-up: do not pursue long-acceptance-only as the next phase route on the current verifier engine. Full length-40 verifier scaling is still `32.2436s/candidate` before MTP proposal cost, so below-20 now requires reducing exact verifier attention/FFN/router math itself.
+- MTP attention follow-up: do not promote the native FP8 attention sequence projection path. `state/mtp-attn-native-linear-seq-layers8-visible10.json` changed verifier tokens and was slower; future attention work must preserve the materialized exact accumulation semantics or prove identical verifier ids first.
+- DeepSeek GPU follow-up: run `python tools\deepseek_gpu_ready.py --model-id deepseek-v3 --run --json` on a CUDA machine and record the measured `run.elapsed_seconds / generated_token_count`; local host cannot produce this final CUDA speed because `torch.cuda.is_available()` is false.

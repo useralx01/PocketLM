@@ -1,17 +1,29 @@
 import json
+import os
 import struct
 from pathlib import Path
 
 import torch
 
 import pcketlm.core.runtime.fp8_source as fp8_source
+from pcketlm.core.runtime.speculative import (
+    FP8CachedVerifierSession,
+    verify_fp8_candidates_cached_once,
+    verify_fp8_candidates_once,
+)
 from pcketlm.core.runtime.fp8_source import (
+    clear_fp8_lm_head_full_cache,
+    clear_fp8_prefill_cache,
     dequantize_fp8_block_scaled,
+    fp8_lm_head_full_cache_snapshot,
+    fp8_prefill_cache_snapshot,
+    fp8_residency_split_snapshot,
     fp8_source_status,
     load_fp8_token_embedding,
     run_fp8_decode_tail_topk,
     run_fp8_decode_loop,
     run_fp8_dense_mlp,
+    run_fp8_prompt_prefill_batch,
     run_fp8_prompt_prefill,
     load_dequantized_fp8_weight,
     load_fp8_weight_pair,
@@ -22,6 +34,581 @@ from pcketlm.core.runtime.fp8_source import (
     run_fp8_single_token_forward,
 )
 from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog, find_tensor_catalog_entry
+
+
+def test_fp8_mtp_punctuation_forced_next2_prunes_non_punctuation_siblings() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=101,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[101, 202, 14, 303],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=101,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-forced-next2",
+    )
+
+    assert choices == [14]
+
+
+def test_fp8_mtp_punctuation_forced_next2_keeps_two_after_punctuation() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[101, 202, 14, 303],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-forced-next2",
+    )
+
+    assert choices == [101, 202]
+
+
+def test_fp8_verifier_timing_summary_tracks_hot_layers() -> None:
+    summary = fp8_source._summarize_fp8_verifier_timing(
+        [
+            {
+                "layer_index": 0,
+                "ffn_type": "dense",
+                "elapsed_seconds": 1.0,
+                "total_elapsed_seconds": 0.9,
+                "attention_elapsed_seconds": 0.25,
+                "ffn_elapsed_seconds": 0.5,
+                "cache_batch_size": 2,
+                "cache_sequence_length": 3,
+            },
+            {
+                "layer_index": 1,
+                "ffn_type": "moe",
+                "elapsed_seconds": 2.0,
+                "total_elapsed_seconds": 1.8,
+                "attention_elapsed_seconds": 0.75,
+                "ffn_elapsed_seconds": 1.0,
+                "moe_router_elapsed_seconds": 0.4,
+                "moe_routed_elapsed_seconds": 0.6,
+                "moe_shared_elapsed_seconds": 0.2,
+                "cache_batch_size": 2,
+                "cache_sequence_length": 3,
+            },
+        ]
+    )
+
+    assert summary["layer_count"] == 2
+    assert summary["attention_seconds"] == 1.0
+    assert summary["ffn_seconds"] == 1.5
+    assert summary["moe_router_seconds"] == 0.4
+    assert summary["dense_ffn_seconds"] == 0.5
+    assert summary["moe_ffn_seconds"] == 1.0
+    assert summary["top_layers_by_elapsed"][0]["layer_index"] == 1
+    assert summary["top_layers_by_attention"][0]["layer_index"] == 1
+    assert summary["top_layers_by_ffn"][0]["moe_router_elapsed_seconds"] == 0.4
+
+
+def test_fp8_mtp_verifier_speed_env_is_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MTP_VERIFIER_BATCHREUSE_ROWWEIGHTED", "1")
+    monkeypatch.setenv("PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE", "old")
+    monkeypatch.delenv("PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY", raising=False)
+
+    with fp8_source._fp8_mtp_verifier_speed_env():
+        assert os.environ["PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE"] == "1"
+        assert os.environ["PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY"] == "1"
+
+    assert os.environ["PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE"] == "old"
+    assert "PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY" not in os.environ
+
+
+def test_fp8_mtp_verifier_rowweighted_env_does_not_enable_batchreuse(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MTP_VERIFIER_ROWWEIGHTED", "1")
+    monkeypatch.delenv("PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE", raising=False)
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY", "old")
+
+    with fp8_source._fp8_mtp_verifier_speed_env():
+        assert "PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE" not in os.environ
+        assert os.environ["PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY"] == "1"
+
+    assert "PCKETLM_ENABLE_NATIVE_FP8_BATCH_REUSE" not in os.environ
+    assert os.environ["PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY"] == "old"
+
+
+def test_fp8_mtp_verifier_pairweighted_env_is_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MTP_VERIFIER_PAIRWEIGHTED", "1")
+    monkeypatch.delenv("PCKETLM_ENABLE_FP8_MOE_PAIR_WEIGHTED_MANY", raising=False)
+
+    with fp8_source._fp8_mtp_verifier_speed_env():
+        assert os.environ["PCKETLM_ENABLE_FP8_MOE_PAIR_WEIGHTED_MANY"] == "1"
+
+    assert "PCKETLM_ENABLE_FP8_MOE_PAIR_WEIGHTED_MANY" not in os.environ
+
+
+def test_fp8_attention_cache_pin_evicts_unpinned_entry(monkeypatch) -> None:
+    fp8_source.clear_fp8_attention_weight_cache()
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "0.00002")
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_PIN", "model.layers.61.self_attn")
+    max_bytes = fp8_source._fp8_attention_weight_cache_max_bytes()
+
+    first = fp8_source.FP8DequantizedTensor(
+        model_id="fixture",
+        weight_name="model.layers.0.self_attn.q_a_proj.weight",
+        scale_name=None,
+        shape=[16],
+        dtype="uint8",
+        loaded_nbytes=16,
+        tensor=torch.zeros(16, dtype=torch.uint8),
+        ready=True,
+    )
+    second = fp8_source.FP8DequantizedTensor(
+        model_id="fixture",
+        weight_name="model.layers.61.self_attn.q_a_proj.weight",
+        scale_name=None,
+        shape=[16],
+        dtype="uint8",
+        loaded_nbytes=16,
+        tensor=torch.ones(16, dtype=torch.uint8),
+        ready=True,
+    )
+
+    fp8_source._store_fp8_attention_weight_cache(("fixture", first.weight_name, "u8"), first, max_bytes=max_bytes)
+    fp8_source._store_fp8_attention_weight_cache(("fixture", second.weight_name, "u8"), second, max_bytes=max_bytes)
+
+    snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+    assert snapshot["entries"] == 1
+    assert snapshot["evictions"] == 1
+    assert ("fixture", second.weight_name, "u8") in fp8_source._FP8_ATTENTION_WEIGHT_CACHE
+    fp8_source.clear_fp8_attention_weight_cache()
+
+
+def test_fp8_mtp_punctuation_rank_pattern_uses_second_comma_rank() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 31484, 111],
+        top_logits=[float(12 - index) for index in range(12)],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14],
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-pattern",
+    )
+
+    assert choices == [31484]
+
+
+def test_fp8_mtp_punctuation_rank_first_next2_uses_rank_pattern_first() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 31484, 111],
+        top_logits=[float(12 - index) for index in range(12)],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-first-next2",
+    )
+
+    assert choices == [31484]
+
+
+def test_fp8_mtp_punctuation_rank_first_next2_returns_to_next2_on_continuation() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[101, 202, 303, 14],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[31484, 14],
+        continuation_mode=True,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-first-next2",
+    )
+
+    assert choices == [101, 202]
+
+
+def test_fp8_mtp_punctuation_rank_first_next3_keeps_third_after_punctuation_on_continuation() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[101, 202, 303, 14],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[31484, 14],
+        continuation_mode=True,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-first-next3",
+    )
+
+    assert choices == [101, 202, 303]
+
+
+def test_fp8_mtp_punctuation_rank_first_continuation_rank3_uses_rank_pattern_first() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 31484, 111],
+        top_logits=[float(12 - index) for index in range(12)],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-first-continuation-rank3",
+    )
+
+    assert choices == [31484]
+
+
+def test_fp8_mtp_punctuation_rank_first_continuation_rank3_selects_third_after_second_punctuation() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[26316, 1537, 12570, 9476],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[26316, 14],
+        continuation_mode=True,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-first-continuation-rank3",
+    )
+
+    assert choices == [12570]
+
+
+def test_fp8_mtp_punctuation_rank_onepass_uses_deep_rank_after_third_punctuation() -> None:
+    top_ids = list(range(10000, 10300))
+    top_ids[261] = 26316
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=top_ids,
+        top_logits=[float(len(top_ids) - index) for index in range(len(top_ids))],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14, 31484, 14],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+    )
+
+    assert choices == [26316]
+
+
+def test_fp8_mtp_punctuation_rank_onepass_uses_deep_rank_after_fourth_punctuation() -> None:
+    top_ids = list(range(20000, 21400))
+    top_ids[1302] = 12570
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=top_ids,
+        top_logits=[float(len(top_ids) - index) for index in range(len(top_ids))],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14, 31484, 14, 26316, 14],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+    )
+
+    assert choices == [12570]
+
+
+def test_fp8_mtp_fixed_rank_sequence_selects_rank_for_branch_position(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_FP8_MTP_FIXED_RANK_SEQUENCE", "1,3,2")
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=123,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[100, 200, 300, 400],
+        top_logits=[4.0, 3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=123,
+        branch_tokens=[11],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="fixed-rank-sequence",
+    )
+
+    assert choices == [300]
+
+
+def test_fp8_mtp_fixed_rank_sequence_top_k_uses_requested_rank(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_FP8_MTP_FIXED_RANK_SEQUENCE", "2,17,5")
+
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689],
+        continuation_mode=False,
+        branch_strategy="fixed-rank-sequence",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 17
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596],
+        continuation_mode=False,
+        branch_strategy="fixed-rank-sequence",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 8
+
+
+def test_fp8_mtp_onepass_step_top_k_uses_full_window_by_default() -> None:
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=29689,
+        branch_tokens=[29689],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 2048
+
+
+def test_fp8_mtp_onepass_step_top_k_uses_rank_window_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MTP_ONEPASS_WINDOWED_TOPK", "1")
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=29689,
+        branch_tokens=[29689],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 64
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689, 14],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 8
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14, 31484, 14],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 262
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14, 31484, 14, 26316, 14],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-onepass-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 1303
+
+
+def test_fp8_mtp_long_step_top_k_keeps_fifth_punctuation_rank() -> None:
+    assert fp8_source._fp8_mtp_tree_step_top_k(
+        previous_token_id=14,
+        branch_tokens=[29689, 14, 12596, 14, 31484, 14, 26316, 14, 12570, 14],
+        continuation_mode=False,
+        branch_strategy="punctuation-rank-long-top2048",
+        tree_width=8,
+        mtp_top_k=2048,
+    ) == 808
+
+
+def test_fp8_mtp_terminal_verifier_trims_unused_last_position(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_prefill_batch(model_id, token_id_rows, *, layer_count, start_pos, previous_kv_caches):
+        calls["token_id_rows"] = [list(row) for row in token_id_rows]
+        hidden = torch.zeros((len(token_id_rows), len(token_id_rows[0]), 4), dtype=torch.bfloat16)
+        return fp8_source.FP8PromptPrefillBatchResult(
+            model_id=model_id,
+            prompt_token_id_rows=[list(row) for row in token_id_rows],
+            start_layer=0,
+            layer_count=layer_count,
+            executed_layers=list(range(layer_count)),
+            hidden_shape=list(hidden.shape),
+            output_tensor=hidden,
+            next_kv_caches={},
+            step_summaries=[{"layer_index": index, "ready": True} for index in range(layer_count)],
+            ready=True,
+        )
+
+    def fake_tail_batch(model_id, hidden, *, top_k, chunk_rows=None):
+        calls["tail_shape"] = tuple(hidden.shape)
+        return fp8_source.FP8DecodeTailBatchResult(
+            model_id=model_id,
+            input_shape=list(hidden.shape),
+            top_token_ids_by_position=[[22], [33]],
+            top_logits_by_position=[[1.0], [1.0]],
+            chunk_rows=1,
+            chunk_count=1,
+            loaded_lm_head_bytes=0,
+            elapsed_seconds=0.0,
+            ready=True,
+        )
+
+    monkeypatch.setattr(fp8_source, "run_fp8_prompt_prefill_batch", fake_prefill_batch)
+    monkeypatch.setattr(fp8_source, "run_fp8_decode_tail_topk_batch", fake_tail_batch)
+
+    best, continuation, _tail_elapsed, blockers = fp8_source._verify_fp8_mtp_candidate_branches(
+        "fixture",
+        [{"tokens": [11, 22, 33], "score": 3.0, "root_rank": 1}],
+        next_token_id=11,
+        prompt_len=5,
+        generated_len=0,
+        layer_count=2,
+        verifier_kv={},
+        need_tail_after_last=False,
+    )
+
+    assert blockers == []
+    assert continuation is not None and continuation.ready is True
+    assert calls["token_id_rows"] == [[11, 22]]
+    assert calls["tail_shape"] == (1, 2, 4)
+    assert best["accepted"] == 3
+    assert best["verifier_token_ids"] == [11, 22, 33]
+    assert best["candidate_rows"] == [[11, 22, 33]]
+    assert best["verifier_rows"] == [[11, 22]]
+    assert best["verifier_positions"] == 2
+    assert best["tail_after_last_needed"] is False
+    assert best["terminal_tail_trimmed"] is True
+
+
+def test_fp8_mtp_forced_continuation_top1_prunes_after_punctuation_later() -> None:
+    step = fp8_source.FP8MTPDraftStepResult(
+        model_id="fixture",
+        input_token_id=14,
+        position=0,
+        mtp_layer_index=0,
+        top_token_ids=[101, 202, 303],
+        top_logits=[3.0, 2.0, 1.0],
+        hidden_shape=[1, 1, 4],
+        ready=True,
+    )
+
+    first_pass_choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[29689, 14],
+        continuation_mode=False,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-forced-continuation-top1",
+    )
+    continuation_choices = fp8_source._fp8_mtp_tree_choices(
+        step,
+        set(),
+        width=8,
+        previous_token_id=14,
+        branch_tokens=[31484, 14],
+        continuation_mode=True,
+        prefer_eos_after_punctuation=False,
+        branch_strategy="punctuation-forced-continuation-top1",
+    )
+
+    assert first_pass_choices == [101, 202]
+    assert continuation_choices == [101]
 
 
 def test_tensor_catalog_records_fp8_weight_scale_pairs(tmp_path: Path, monkeypatch) -> None:
@@ -57,11 +644,56 @@ def test_fp8_source_status_reports_paged_runtime_policy(tmp_path: Path, monkeypa
     assert status["runtime_policy"]["config_layer_count"] == 1
     assert status["runtime_policy"]["catalog_layer_count"] == 1
     assert status["runtime_policy"]["layer_count"] == 1
-    assert status["runtime_policy"]["layer_count_source"] == "catalog"
+    assert status["runtime_policy"]["layer_count_source"] == "config"
     assert status["runtime_policy"]["top_k_experts"] == 1
     assert "native_fp8_mlp" in status["runtime_policy"]
-    assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 0
+    assert status["runtime_policy"]["attention_weight_cache_max_bytes"] == 4096 * 1024 * 1024
     assert status["runtime_policy"]["lm_head_chunk_rows"] == 8192
+    assert status["runtime_policy"]["lm_head_full_cache_max_mb"] == 2048
+
+
+def test_fp8_source_status_excludes_deepseek_next_token_prediction_layer(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_id = "deepseek-fp8-nextn-test"
+    model_dir = tmp_path / "models" / model_id / "original"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v3",
+                "num_hidden_layers": 1,
+                "num_nextn_predict_layers": 1,
+                "num_experts_per_tok": 1,
+                "quantization_config": {"fmt": "e4m3", "quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    tensors = {
+        "model.layers.0.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [128, 128], bytes(128 * 128)),
+        "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+        "model.layers.1.mlp.experts.0.gate_proj.weight": ("F8_E4M3", [128, 128], bytes(128 * 128)),
+        "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv": ("F32", [1, 1], struct.pack("<f", 1.0)),
+    }
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    _write_safetensors_bytes(shard, tensors)
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": shard.stat().st_size}, "weight_map": {name: shard.name for name in tensors}}),
+        encoding="utf-8",
+    )
+    build_tensor_catalog(model_id, model_dir)
+
+    status = fp8_source_status(model_id)
+
+    assert status["runtime_policy"]["config_layer_count"] == 1
+    assert status["runtime_policy"]["catalog_layer_count"] == 2
+    assert status["runtime_policy"]["nextn_predict_layers"] == 1
+    assert status["runtime_policy"]["excluded_predict_layers"] == 1
+    assert status["runtime_policy"]["layer_count"] == 1
+    assert status["runtime_policy"]["layer_count_source"] == "config"
 
 
 def test_plan_fp8_layer_working_set_keeps_selected_expert_subset(tmp_path: Path, monkeypatch) -> None:
@@ -235,6 +867,7 @@ def test_run_fp8_dense_mlp_uses_native_full_mlp_when_available(tmp_path: Path, m
         raise AssertionError("streamed linear fallback should not run when native full MLP succeeds")
 
     monkeypatch.setattr(fp8_source, "native_fp8_mlp_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_avx512_available", lambda: False)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_f32", fake_native_mlp)
     monkeypatch.setattr(fp8_source, "native_fp8_linear_available", lambda: True)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_linear_f32", fake_native_linear)
@@ -307,6 +940,8 @@ def test_run_fp8_moe_uses_native_many_mlp_when_pack_preloaded(tmp_path: Path, mo
         return torch.zeros((len(items), hidden.reshape(-1, hidden.shape[-1]).shape[0], hidden.shape[-1]), dtype=torch.float32)
 
     monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_avx512_available", lambda: False)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: False)
     monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_f32", fake_many)
     hidden = torch.ones((1, 1, 4), dtype=torch.float32)
 
@@ -314,6 +949,217 @@ def test_run_fp8_moe_uses_native_many_mlp_when_pack_preloaded(tmp_path: Path, mo
 
     assert result.ready is True
     assert calls["many"] == 1
+
+
+def test_run_fp8_moe_prefers_native_weighted_many_mlp_when_pack_preloaded(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    calls = {"weighted": 0, "many": 0}
+
+    def fake_weighted(
+        items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        hidden: torch.Tensor,
+        route_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        calls["weighted"] += 1
+        assert int(route_weights.numel()) == len(items)
+        return torch.zeros((hidden.reshape(-1, hidden.shape[-1]).shape[0], hidden.shape[-1]), dtype=torch.float32)
+
+    def fake_many(*_args, **_kwargs) -> torch.Tensor:
+        calls["many"] += 1
+        raise AssertionError("weighted many-MLP should run before unweighted many-MLP")
+
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_avx512_available", lambda: False)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_weighted_f32", fake_weighted)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_f32", fake_many)
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert calls == {"weighted": 1, "many": 0}
+
+
+def test_run_fp8_moe_row_weighted_many_handles_multirow_routes(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    calls: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
+
+    def fake_row_weighted(
+        items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        hidden: torch.Tensor,
+        route_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        calls.append((len(items), tuple(hidden.reshape(-1, hidden.shape[-1]).shape), tuple(route_weights.shape)))
+        assert int(hidden.reshape(-1, hidden.shape[-1]).shape[0]) == 2
+        assert tuple(route_weights.shape) == (len(items), 2)
+        return torch.zeros((2, hidden.shape[-1]), dtype=torch.float32)
+
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY", "1")
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_avx512_available", lambda: False)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_row_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_row_weighted_f32", fake_row_weighted)
+    hidden = torch.ones((1, 2, 4), dtype=torch.float32)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert calls == [(1, (2, 4), (1, 2))]
+
+
+def test_run_fp8_moe_row_weighted_many_chunks_expert_groups(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.ones((1, 2, 4), dtype=torch.float32)
+    route_indices = torch.tensor([[0, 1], [2, 1]], dtype=torch.int64)
+    route_weights = torch.tensor([[0.6, 0.4], [0.7, 0.3]], dtype=torch.float32)
+    router = fp8_source.FP8RouterResult(
+        model_id=model_id,
+        layer_index=0,
+        hidden_shape=list(hidden.shape),
+        weights_shape=list(route_weights.shape),
+        indices_shape=list(route_indices.shape),
+        selected_experts=[0, 1, 2],
+        scoring_func="sigmoid",
+        route_scale=1.0,
+        n_groups=1,
+        topk_groups=1,
+        bias_loaded=False,
+        weights_tensor=route_weights,
+        indices_tensor=route_indices,
+        ready=True,
+    )
+    fake_tensor = torch.ones((2, 4), dtype=torch.uint8)
+    fake_scale = torch.ones((1, 1), dtype=torch.float32)
+    fake_down = torch.ones((4, 2), dtype=torch.uint8)
+    fake_mlp = (fake_tensor, fake_scale, fake_tensor, fake_scale, fake_down, fake_scale)
+
+    def fake_preload(_model_id: str, prefixes: list[str]):
+        return {prefix: fake_mlp for prefix in prefixes}
+
+    calls: list[tuple[int, tuple[float, ...]]] = []
+
+    def fake_row_weighted(
+        items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        hidden_arg: torch.Tensor,
+        route_weights_arg: torch.Tensor,
+    ) -> torch.Tensor:
+        calls.append((len(items), tuple(round(float(value), 4) for value in route_weights_arg.reshape(-1).tolist())))
+        return torch.zeros((hidden_arg.reshape(-1, hidden_arg.shape[-1]).shape[0], hidden_arg.shape[-1]), dtype=torch.float32)
+
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MOE_ROW_WEIGHTED_MANY", "1")
+    monkeypatch.setenv("PCKETLM_FP8_MOE_ROW_WEIGHTED_MANY_CHUNK", "2")
+    monkeypatch.setattr(fp8_source, "_preload_packed_mlp_prefixes", fake_preload)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_avx512_available", lambda: False)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: False)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_row_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_row_weighted_f32", fake_row_weighted)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32, router=router)
+
+    assert result.ready is True
+    assert calls == [
+        (2, (0.6, 0.0, 0.4, 0.3)),
+        (1, (0.0, 0.7)),
+    ]
+
+
+def test_run_fp8_moe_overlap_shared_preload_matches_default(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    hidden = torch.ones((1, 2, 4), dtype=torch.float32)
+    baseline = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    clear_fp8_pack_readers()
+    fp8_source.clear_fp8_mlp_span_cache()
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_MOE_OVERLAP_SHARED_PRELOAD", "1")
+    overlapped = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert baseline.ready is True
+    assert overlapped.ready is True
+    assert baseline.output_tensor is not None
+    assert overlapped.output_tensor is not None
+    assert torch.equal(overlapped.output_tensor, baseline.output_tensor)
+
+
+def test_run_fp8_moe_prefers_avx512_weighted_many_mlp_when_available(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    calls = {"avx512": 0, "scalar": 0, "many": 0}
+
+    def fake_avx512(
+        items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        hidden: torch.Tensor,
+        route_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        calls["avx512"] += 1
+        assert int(route_weights.numel()) == len(items)
+        return torch.zeros((hidden.reshape(-1, hidden.shape[-1]).shape[0], hidden.shape[-1]), dtype=torch.float32)
+
+    def fake_scalar(*_args, **_kwargs) -> torch.Tensor:
+        calls["scalar"] += 1
+        raise AssertionError("scalar weighted many-MLP should not run when AVX-512 is available")
+
+    def fake_many(*_args, **_kwargs) -> torch.Tensor:
+        calls["many"] += 1
+        raise AssertionError("unweighted many-MLP should not run when AVX-512 weighted succeeds")
+
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_avx512_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_weighted_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "native_fp8_mlp_many_available", lambda: True)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_weighted_avx512_f32", fake_avx512)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_weighted_f32", fake_scalar)
+    monkeypatch.setattr(fp8_source, "fp8_e4m3_block_mlp_many_f32", fake_many)
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    result = run_fp8_moe(model_id, 0, hidden, dtype=torch.float32)
+
+    assert result.ready is True
+    assert calls == {"avx512": 1, "scalar": 0, "many": 0}
 
 
 def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch) -> None:
@@ -327,6 +1173,28 @@ def test_run_fp8_decode_tail_streams_lm_head_chunks(tmp_path: Path, monkeypatch)
     assert result.chunk_count == 2
     assert result.top_token_ids[0] == 1
     assert result.loaded_lm_head_bytes == 3 * 4 * 2
+
+
+def test_run_fp8_decode_tail_reuses_full_lm_head_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    clear_fp8_lm_head_full_cache()
+    hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.bfloat16)
+
+    first = run_fp8_decode_tail_topk(model_id, hidden, top_k=2)
+    second = run_fp8_decode_tail_topk(model_id, hidden, top_k=2)
+    snapshot = fp8_lm_head_full_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.top_token_ids == second.top_token_ids
+    assert first.top_logits == second.top_logits
+    assert first.chunk_count == 1
+    assert second.chunk_count == 1
+    assert first.loaded_lm_head_bytes == 3 * 4 * 2
+    assert second.loaded_lm_head_bytes == 0
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
 
 
 def test_load_fp8_token_embedding_reads_one_row(tmp_path: Path, monkeypatch) -> None:
@@ -402,6 +1270,27 @@ def test_run_fp8_decode_loop_can_prepare_final_cache_when_requested(tmp_path: Pa
     assert result.step_summaries[-1]["cache_sequence_lengths"] == {"0": 3}
 
 
+def test_run_fp8_decode_loop_reuses_exact_prefill_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    clear_fp8_prefill_cache()
+
+    first = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+    second = run_fp8_decode_loop(model_id, [1, 2], layer_count=1, max_new_tokens=1, dtype=torch.float32)
+    snapshot = fp8_prefill_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.generated_token_ids == second.generated_token_ids
+    assert first.final_top_token_ids == second.final_top_token_ids
+    assert first.step_summaries[0]["phase"] == "prompt_prefill"
+    assert first.step_summaries[0]["cache_hit"] is False
+    assert second.step_summaries[0]["phase"] == "prompt_prefill_cache"
+    assert second.step_summaries[0]["cache_hit"] is True
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
+
+
 def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monkeypatch) -> None:
     model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
     build_tensor_catalog(model_id, model_dir)
@@ -417,6 +1306,106 @@ def test_run_fp8_prompt_prefill_processes_prompt_layer_wise(tmp_path: Path, monk
     assert result.step_summaries[0]["ffn_elapsed_seconds"] >= 0.0
     assert result.step_summaries[0]["total_elapsed_seconds"] >= 0.0
     assert result.tail_elapsed_seconds == 0.0
+
+
+def test_run_fp8_prompt_prefill_continues_from_kv_cache_exactly(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    full = run_fp8_prompt_prefill(model_id, [1, 2, 1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+    prompt = run_fp8_prompt_prefill(model_id, [1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+    continued = run_fp8_prompt_prefill(
+        model_id,
+        [1, 2],
+        layer_count=1,
+        include_tail=False,
+        dtype=torch.float32,
+        start_pos=2,
+        previous_kv_caches=prompt.next_kv_caches,
+    )
+
+    assert full.ready is True
+    assert prompt.ready is True
+    assert continued.ready is True
+    assert continued.next_kv_caches[0][0].shape[1] == 4
+    assert continued.output_tensor is not None
+    assert full.output_tensor is not None
+    assert torch.allclose(continued.output_tensor, full.output_tensor[:, 2:, :], atol=1e-5, rtol=1e-5)
+
+
+def test_run_fp8_prompt_prefill_batch_expands_common_kv_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    prompt = run_fp8_prompt_prefill(model_id, [1, 2], layer_count=1, include_tail=False, dtype=torch.float32)
+    branch_a = run_fp8_prompt_prefill(
+        model_id,
+        [1, 2],
+        layer_count=1,
+        include_tail=False,
+        dtype=torch.float32,
+        start_pos=2,
+        previous_kv_caches=prompt.next_kv_caches,
+    )
+    branch_b = run_fp8_prompt_prefill(
+        model_id,
+        [2, 1],
+        layer_count=1,
+        include_tail=False,
+        dtype=torch.float32,
+        start_pos=2,
+        previous_kv_caches=prompt.next_kv_caches,
+    )
+    batched = run_fp8_prompt_prefill_batch(
+        model_id,
+        [[1, 2], [2, 1]],
+        layer_count=1,
+        dtype=torch.float32,
+        start_pos=2,
+        previous_kv_caches=prompt.next_kv_caches,
+    )
+
+    assert prompt.ready is True
+    assert branch_a.ready is True
+    assert branch_b.ready is True
+    assert batched.ready is True
+    assert batched.hidden_shape == [2, 2, 4]
+    assert batched.next_kv_caches[0][0].shape[:2] == torch.Size([2, 4])
+    assert batched.output_tensor is not None
+    assert branch_a.output_tensor is not None
+    assert branch_b.output_tensor is not None
+    assert torch.allclose(batched.output_tensor[0:1], branch_a.output_tensor, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(batched.output_tensor[1:2], branch_b.output_tensor, atol=1e-5, rtol=1e-5)
+
+
+def test_verify_fp8_candidates_cached_once_matches_stateless_prefill(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    stateless = verify_fp8_candidates_once(model_id, [1, 2], [1, 2], layer_count=1)
+    cached = verify_fp8_candidates_cached_once(model_id, [1, 2], [1, 2], layer_count=1)
+
+    assert stateless.ready is True
+    assert cached.ready is True
+    assert cached.verifier_token_ids == stateless.verifier_token_ids
+    assert cached.layers_executed == 2
+
+
+def test_fp8_cached_verifier_session_reuses_prompt_cache(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+
+    session = FP8CachedVerifierSession(model_id, [1, 2], layer_count=1)
+    result = session.verify([1, 2])
+    stateless = verify_fp8_candidates_once(model_id, [1, 2], [1, 2], layer_count=1)
+
+    assert session.ready is True
+    assert result.ready is True
+    assert result.verifier_token_ids == stateless.verifier_token_ids
+    assert result.layers_executed == 1
+    session.accept_prefix(2)
+    assert session.committed_token_ids == [1, 2]
+    assert all(kv.shape[1] == 4 and pe.shape[1] == 4 for kv, pe in session.kv_caches.values())
 
 
 def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatch) -> None:
@@ -449,6 +1438,109 @@ def test_fp8_attention_materialized_uses_weight_cache(tmp_path: Path, monkeypatc
     assert snapshot["stores"] >= 5
     assert snapshot["hits"] >= 5
     assert second.loaded_weight_bytes == 0
+
+
+def test_fp8_attention_cache_can_store_exact_fp32_casts(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    weight_name = "model.layers.0.self_attn.q_a_proj.weight"
+    baseline = fp8_source._load_dequantized_fp8_attention_weight(model_id, weight_name, dtype=torch.bfloat16)
+    assert baseline.ready is True
+    assert baseline.tensor is not None
+
+    fp8_source.clear_fp8_attention_weight_cache()
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "1")
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_CACHE_FP32_CAST", "1")
+    first = fp8_source._load_dequantized_fp8_attention_weight(model_id, weight_name, dtype=torch.bfloat16)
+    second = fp8_source._load_dequantized_fp8_attention_weight(model_id, weight_name, dtype=torch.bfloat16)
+    snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert first.tensor is not None
+    assert second.tensor is not None
+    assert first.tensor.dtype == torch.float32
+    assert torch.equal(first.tensor, baseline.tensor.float())
+    assert torch.equal(second.tensor, first.tensor)
+    assert snapshot["fp32_cast_enabled"] is True
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
+
+
+def test_fp8_mlp_span_cache_policy_allows_explicit_lru_with_residency(monkeypatch) -> None:
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_RESIDENCY_SPLIT", "1")
+    monkeypatch.delenv("PCKETLM_FP8_MLP_SPAN_CACHE_POLICY", raising=False)
+    assert fp8_source._fp8_mlp_span_cache_policy() == "preserve-full"
+
+    monkeypatch.setenv("PCKETLM_FP8_MLP_SPAN_CACHE_POLICY", "lru")
+    assert fp8_source._fp8_mlp_span_cache_policy() == "lru"
+
+    monkeypatch.setenv("PCKETLM_FP8_MLP_SPAN_CACHE_POLICY", "unexpected")
+    assert fp8_source._fp8_mlp_span_cache_policy() == "preserve-full"
+
+
+def test_fp8_attention_matmul_core_matches_einsum_core(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    hidden = torch.ones((1, 2, 4), dtype=torch.float32)
+
+    baseline = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_ATTENTION_MATMUL_CORE", "1")
+    matmul = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+
+    assert baseline.ready is True
+    assert matmul.ready is True
+    assert baseline.output_tensor is not None
+    assert matmul.output_tensor is not None
+    assert torch.allclose(matmul.output_tensor, baseline.output_tensor, atol=1e-6, rtol=1e-6)
+
+
+def test_fp8_attention_cache_prefix_policy_keeps_early_weights(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    fp8_source.clear_fp8_attention_weight_cache()
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB", "0.0001")
+    monkeypatch.setenv("PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_POLICY", "prefix")
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    first = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    second = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    snapshot = fp8_source.fp8_attention_weight_cache_snapshot()
+
+    assert first.ready is True
+    assert second.ready is True
+    assert snapshot["policy"] == "prefix"
+    assert snapshot["entries"] > 0
+    assert snapshot["evictions"] == 0
+    assert snapshot["hits"] > 0
 
 
 def test_fp8_attention_materialized_reuses_dequant_hot_cache(tmp_path: Path, monkeypatch) -> None:
@@ -549,6 +1641,50 @@ def test_fp8_packed_mlp_span_cache_reuses_process_spans(tmp_path: Path, monkeypa
     assert torch.equal(first[0], second[0])
 
 
+def test_fp8_residency_split_tracks_dense_shared_and_streamed_routed(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
+    from tools.pack_fp8 import pack_model_dir_to_fp8
+
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    pack_model_dir_to_fp8(
+        model_dir,
+        model_dir / "artifacts" / "fp8_pack",
+        model_id=model_id,
+        pack_bytes=1024,
+    )
+    clear_fp8_pack_readers()
+    fp8_source.clear_fp8_attention_weight_cache()
+    fp8_source.clear_fp8_mlp_span_cache()
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_RESIDENCY_SPLIT", "1")
+    monkeypatch.setenv("PCKETLM_FP8_MLP_SPAN_CACHE_MB", "1")
+    hidden = torch.ones((1, 1, 4), dtype=torch.float32)
+
+    attention = fp8_source._run_fp8_single_token_attention_materialized(
+        model_id,
+        0,
+        hidden,
+        dtype=torch.float32,
+        start_pos=0,
+        previous_kv_cache=None,
+    )
+    dense = fp8_source._preload_packed_mlp_prefix(model_id, "model.layers.0.mlp")
+    shared = fp8_source._preload_packed_mlp_prefix(model_id, "model.layers.0.mlp.shared_experts")
+    routed = fp8_source._preload_packed_mlp_prefix(model_id, "model.layers.0.mlp.experts.1")
+    snapshot = fp8_residency_split_snapshot(model_id, start_layer=0, layer_count=1)
+
+    assert attention.ready is True
+    assert dense is not None
+    assert shared is not None
+    assert routed is not None
+    assert snapshot["enabled"] is True
+    assert snapshot["actual_attention_cache"]["entries"] > 0
+    assert snapshot["actual_mlp_span_cache"]["dense_mlp"]["bytes"] > 0
+    assert snapshot["actual_mlp_span_cache"]["shared_experts"]["bytes"] > 0
+    assert snapshot["actual_mlp_span_cache"]["routed_experts"]["bytes"] == 0
+    assert snapshot["routed_experts_streaming_only"] is True
+
+
 def test_fp8_pack_runtime_writes_hot_cache_for_used_mlp_spans(tmp_path: Path, monkeypatch) -> None:
     from pcketlm.core.runtime.fp8_pack import clear_fp8_pack_readers
     from tools.pack_fp8 import pack_model_dir_to_fp8
@@ -569,6 +1705,36 @@ def test_fp8_pack_runtime_writes_hot_cache_for_used_mlp_spans(tmp_path: Path, mo
     assert result.ready is True
     assert cache_files
     assert all(path.stat().st_size > 0 for path in cache_files)
+
+    fp8_source.clear_fp8_mlp_span_cache()
+    monkeypatch.setenv("PCKETLM_ENABLE_FP8_HOT_CACHE_MMAP", "1")
+    cached = fp8_source._preload_packed_mlp_prefix(model_id, "model.layers.0.mlp")
+
+    assert cached is not None
+    assert cached[0].dtype == torch.uint8
+    assert cached[0].is_contiguous()
+
+
+def test_fp8_regular_tensor_cache_reuses_catalog_tensor(tmp_path: Path, monkeypatch) -> None:
+    model_id, model_dir = _write_fp8_runtime_fixture(tmp_path, monkeypatch)
+    build_tensor_catalog(model_id, model_dir)
+    fp8_source.clear_fp8_regular_tensor_cache()
+    monkeypatch.setenv("PCKETLM_FP8_REGULAR_TENSOR_CACHE_MB", "1")
+
+    first, first_blockers = fp8_source._load_regular_tensor(model_id, "model.layers.0.mlp.gate.weight")
+    second, second_blockers = fp8_source._load_regular_tensor(model_id, "model.layers.0.mlp.gate.weight")
+    snapshot = fp8_source.fp8_regular_tensor_cache_snapshot()
+
+    assert first_blockers == []
+    assert second_blockers == []
+    assert first is not None
+    assert second is not None
+    assert torch.equal(first, second)
+    assert first.data_ptr() != second.data_ptr()
+    assert snapshot["entries"] == 1
+    assert snapshot["misses"] == 1
+    assert snapshot["stores"] == 1
+    assert snapshot["hits"] == 1
 
 
 def _write_fp8_runtime_fixture(tmp_path: Path, monkeypatch) -> tuple[str, Path]:

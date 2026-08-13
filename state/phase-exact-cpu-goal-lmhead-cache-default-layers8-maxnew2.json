@@ -1,0 +1,62 @@
+{
+  "warm_ready": true,
+  "ready": true,
+  "elapsed": 38.96688610000274,
+  "generated": [
+    0,
+    94777
+  ],
+  "top": [
+    94777,
+    118131,
+    121027,
+    75998,
+    127275
+  ],
+  "generate_elapsed": 38.19188589999976,
+  "tail": 1.6113160999957472,
+  "attention": 22.897259600002144,
+  "ffn": 9.701143500002217,
+  "prefill_cache": {
+    "entries": 1,
+    "max_entries": 4,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "lm_head_full_cache": {
+    "entries": 1,
+    "bytes": 1853358080,
+    "max_bytes": 2147483648,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "attention_weight_cache": {
+    "entries": 0,
+    "bytes": 0,
+    "max_bytes": 0,
+    "dequant_hot_cache_enabled": true,
+    "dequant_hot_cache_hits": 80,
+    "dequant_hot_cache_misses": 0,
+    "dequant_hot_cache_stores": 0,
+    "dequant_hot_cache_read_errors": 0,
+    "dequant_hot_cache_write_errors": 0,
+    "hits": 0,
+    "misses": 0,
+    "stores": 0,
+    "evictions": 0
+  },
+  "fp8_pack": {
+    "enabled": true,
+    "available": true,
+    "pack_files_open": 4,
+    "mmap_bytes_resident": 0,
+    "sequential_reads": 220,
+    "scattered_reads": 0,
+    "bytes_returned": 9731732480
+  },
+  "blockers": []
+}

@@ -20,12 +20,19 @@ from pcketlm.app.desktop.status_screen import (
 from pcketlm.core.benchmark import run_measured_benchmark
 from pcketlm.core.profiles import profile_templates_summary
 from pcketlm.core.runtime import advance_streaming_runtime, advance_streaming_runtime_safely
-from pcketlm.core.runtime import run_fp8_decode_loop, run_prompt_decode_loop
+from pcketlm.core.runtime import (
+    run_fp8_decode_loop,
+    run_fp8_mtp_batched_generate_from_tokens,
+    run_local_deepseek_paged_decode_loop,
+    run_prompt_decode_loop,
+    warm_fp8_mtp_prompt_prefill_cache_from_tokens,
+)
 from pcketlm.app.chat_shell.runtime_fp8_cli import (
     _decode_with_catalog_tokenizer,
     _encode_with_catalog_tokenizer,
     _prepare_chat_with_catalog_tokenizer,
 )
+from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
 
 
 PALETTE = {
@@ -74,9 +81,14 @@ def _summarize_prompt_result(result) -> str:
     stop_tokens = ", ".join(str(value) for value in result.stop_token_ids) if result.stop_token_ids else "model defaults"
     stop_strings = " | ".join(result.stop_strings) if getattr(result, "stop_strings", None) else "none"
     blockers = "\n".join(f"- {blocker}" for blocker in result.blockers) if result.blockers else "- none"
+    speed = getattr(result, "generation_seconds_per_token", None)
+    if speed is None and isinstance(getattr(result, "generation_speed", None), dict):
+        speed = result.generation_speed.get("generation_seconds_per_token")
+    speed_text = f"{speed}s/token" if speed is not None else "n/a"
     return (
         f"Strategy: {result.strategy}\n"
         f"Ready: {'yes' if result.ready else 'no'}\n"
+        f"Token speed: {speed_text}\n"
         f"Min new tokens: {result.min_new_tokens}\n"
         f"Steps: {result.steps_completed} / {result.max_new_tokens}\n"
         f"Stop reason: {stop_reason}\n"
@@ -111,6 +123,8 @@ def _planned_action_message(action: str) -> str:
 def _chat_runtime_hint(max_new_tokens: int = 2, mode_label: str = "Quality (full stack)") -> str:
     """Return a plain-English expectation for the current slow local runtime."""
     layer_budget = _chat_layer_budget(mode_label)
+    if _deepseek_gpu_mode_requested(mode_label):
+        return "CUDA GPU runtime: speed depends on the local card and resident-memory budget."
     if max_new_tokens > 4:
         estimate = "several minutes"
     elif layer_budget == 8:
@@ -126,6 +140,8 @@ def _chat_runtime_hint(max_new_tokens: int = 2, mode_label: str = "Quality (full
 
 def _chat_layer_budget(mode_label: str) -> int | None:
     """Map the desktop speed/quality mode to a runtime layer budget."""
+    if _deepseek_gpu_mode_requested(mode_label):
+        return None
     if mode_label.startswith("Fast"):
         return 8
     if mode_label.startswith("Balanced"):
@@ -135,6 +151,8 @@ def _chat_layer_budget(mode_label: str) -> int | None:
 
 def _chat_mode_hint(mode_label: str) -> str:
     """Return the plain-English tradeoff for one chat mode."""
+    if _deepseek_gpu_mode_requested(mode_label):
+        return "GPU mode uses the local CUDA resident pager and keeps the DeepSeek FP8 tensors intact."
     layer_budget = _chat_layer_budget(mode_label)
     if layer_budget == 8:
         return "Fast mode is only for quick smoke tests. It is much faster, but output quality can be rough."
@@ -146,6 +164,86 @@ def _chat_mode_hint(mode_label: str) -> str:
 def _is_deepseek_fp8_model(model_id: str) -> bool:
     normalized = str(model_id or "").lower().replace("_", "-")
     return "deepseek" in normalized and "v3" in normalized
+
+
+def _truthy_runtime_flag(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _deepseek_gpu_mode_requested(mode_label: str | None) -> bool:
+    mode_key = str(mode_label or "").strip().lower()
+    if mode_key.startswith("direct "):
+        mode_key = mode_key.removeprefix("direct ").strip()
+    return (
+        mode_key.startswith(("gpu", "cuda"))
+        or (("gpu" in mode_key or "cuda" in mode_key) and "gguf" not in mode_key)
+        or _truthy_runtime_flag(os.environ.get("PCKETLM_DEEPSEEK_GPU_DEFAULT"))
+    )
+
+
+def _deepseek_gpu_diagnostic_cpu_allowed() -> bool:
+    return _truthy_runtime_flag(os.environ.get("PCKETLM_ALLOW_DEEPSEEK_GPU_CPU_DIAGNOSTIC"))
+
+
+def _deepseek_gpu_resident_budget_bytes() -> int:
+    raw = os.environ.get("PCKETLM_DEEPSEEK_GPU_RESIDENT_BUDGET_GB") or 12
+    try:
+        budget_gb = float(raw)
+    except (TypeError, ValueError):
+        budget_gb = 12.0
+    return max(1, int(max(0.25, budget_gb) * 1024**3))
+
+
+def _deepseek_gpu_layer_count(model_id: str, layer_count: int | None) -> int:
+    if layer_count is not None:
+        return max(1, int(layer_count))
+    try:
+        catalog = load_tensor_catalog(model_id)
+        return max(1, int(catalog.num_hidden_layers or catalog.layer_count or 61))
+    except Exception:
+        return 61
+
+
+def _deepseek_gpu_prefetch_window() -> int:
+    try:
+        return max(0, min(16, int(os.environ.get("PCKETLM_DEEPSEEK_GPU_PREFETCH_WINDOW") or 0)))
+    except ValueError:
+        return 0
+
+
+def _deepseek_gpu_generation_speed(result) -> dict:
+    generated_count = len(getattr(result, "generated_token_ids", []) or [])
+    elapsed_seconds = float(getattr(result, "elapsed_seconds", 0.0) or 0.0)
+    seconds_per_token = round(elapsed_seconds / generated_count, 3) if elapsed_seconds > 0 and generated_count else None
+    return {
+        "backend": "deepseek-fp8-gpu-paged",
+        "generated_tokens": generated_count,
+        "generation_seconds_per_token": seconds_per_token,
+        "generation_tokens_per_second": (
+            round(generated_count / elapsed_seconds, 3) if elapsed_seconds > 0 and generated_count else None
+        ),
+    }
+
+
+def _deepseek_gpu_paged_summary(result) -> dict:
+    if result is None:
+        return {}
+    return {
+        "cuda_available": bool(getattr(result, "cuda_available", False)),
+        "device": str(getattr(result, "device", "")),
+        "device_name": str(getattr(result, "device_name", "")),
+        "layer_count": int(getattr(result, "layer_count", 0) or 0),
+        "config_hidden_layers": int(getattr(result, "config_hidden_layers", 0) or 0),
+        "resident_budget_bytes": int(getattr(result, "resident_budget_bytes", 0) or 0),
+        "peak_resident_bytes": int(getattr(result, "peak_resident_bytes", 0) or 0),
+        "pager_loads": int(getattr(result, "pager_loads", 0) or 0),
+        "pager_evictions": int(getattr(result, "pager_evictions", 0) or 0),
+        "pager_cache_hits": int(getattr(result, "pager_cache_hits", 0) or 0),
+        "pager_cache_misses": int(getattr(result, "pager_cache_misses", 0) or 0),
+        "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0) or 0.0),
+        "tail_elapsed_seconds": float(getattr(result, "tail_elapsed_seconds", 0.0) or 0.0),
+        "blockers": list(getattr(result, "blockers", []) or []),
+    }
 
 
 def _run_desktop_chat_generation(
@@ -161,6 +259,7 @@ def _run_desktop_chat_generation(
     apply_chat_format: bool,
     stop_token_ids: list[int] | None,
     stop_strings: list[str] | None,
+    runtime_mode: str | None = None,
 ):
     if not _is_deepseek_fp8_model(model_id):
         return run_prompt_decode_loop(
@@ -187,35 +286,110 @@ def _run_desktop_chat_generation(
         prepared_prompt = prompt
         token_ids, blockers = _encode_with_catalog_tokenizer(model_id, prompt)
     result = None
+    mtp_result = None
+    mtp_warmup_result = None
+    gpu_result = None
+    strategy = "deepseek-fp8-pack"
     if not blockers:
-        result = run_fp8_decode_loop(
-            model_id,
-            token_ids[-16:],
-            layer_count=layer_count,
-            max_new_tokens=max_new_tokens,
-        )
-        blockers = list(result.blockers)
-    generated_ids = [] if result is None else list(result.generated_token_ids)
-    generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
-    blockers.extend(decode_blockers)
-    ready = bool(result is not None and result.ready and not blockers)
+        if _deepseek_gpu_mode_requested(runtime_mode):
+            strategy = "deepseek-fp8-gpu-paged"
+            allow_cpu_diagnostic = _deepseek_gpu_diagnostic_cpu_allowed()
+            gpu_result = run_local_deepseek_paged_decode_loop(
+                model_id,
+                token_ids[-16:],
+                start_layer=0,
+                layer_count=_deepseek_gpu_layer_count(model_id, layer_count),
+                max_new_tokens=max_new_tokens,
+                resident_budget_bytes=_deepseek_gpu_resident_budget_bytes(),
+                prefetch_window=_deepseek_gpu_prefetch_window(),
+                device="cpu" if allow_cpu_diagnostic else "cuda",
+                require_cuda=not allow_cpu_diagnostic,
+            )
+            blockers = list(getattr(gpu_result, "blockers", []) or [])
+        elif layer_count is None:
+            strategy = "deepseek-fp8-mtp-batched-exact"
+            mtp_warmup_result = warm_fp8_mtp_prompt_prefill_cache_from_tokens(
+                model_id,
+                token_ids[-16:],
+                prompt_text=prepared_prompt,
+                layer_count=layer_count,
+            )
+            blockers = list(mtp_warmup_result.get("blockers") or [])
+        if not blockers and strategy == "deepseek-fp8-mtp-batched-exact":
+            mtp_result = run_fp8_mtp_batched_generate_from_tokens(
+                model_id,
+                token_ids[-16:],
+                prompt_text=prepared_prompt,
+                max_visible_tokens=max_new_tokens,
+                k=8,
+                layer_count=layer_count,
+                max_passes=max(20, int(max_new_tokens) * 2),
+                prefer_eos_after_punctuation=True,
+            )
+            blockers = list(mtp_result.get("blockers") or [])
+            if mtp_warmup_result is not None:
+                mtp_result["warmup_proof"] = dict(mtp_warmup_result)
+        elif not blockers and strategy != "deepseek-fp8-gpu-paged":
+            result = run_fp8_decode_loop(
+                model_id,
+                token_ids[-16:],
+                layer_count=layer_count,
+                max_new_tokens=max_new_tokens,
+            )
+            blockers = list(result.blockers)
+    if gpu_result is not None:
+        generated_ids = list(getattr(gpu_result, "generated_token_ids", []) or [])
+        generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+        blockers.extend(decode_blockers)
+        ready = bool(getattr(gpu_result, "passed", False) and not blockers)
+        generation_speed = _deepseek_gpu_generation_speed(gpu_result)
+        generation_seconds_per_token = generation_speed.get("generation_seconds_per_token")
+        steps_completed = int(getattr(gpu_result, "positions_completed", 0) or 0)
+        cache_sequence_lengths = {
+            str(key): int(value) for key, value in dict(getattr(gpu_result, "cache_sequence_lengths", {}) or {}).items()
+        }
+    elif mtp_result is not None:
+        generated_ids = list(mtp_result.get("generated_token_ids") or [])
+        generated_text = str(mtp_result.get("generated_text") or "")
+        ready = bool(mtp_result.get("ready") and not blockers)
+        generation_seconds_per_token = mtp_result.get("seconds_per_visible_token")
+        generation_speed = {
+            "backend": "deepseek-fp8-mtp-batched-exact",
+            "generated_tokens": len(mtp_result.get("visible_token_ids") or generated_ids),
+            "generation_seconds_per_token": generation_seconds_per_token,
+        }
+        steps_completed = int(mtp_result.get("accepted_token_count") or len(generated_ids))
+        cache_sequence_lengths = {}
+    else:
+        generated_ids = [] if result is None else list(result.generated_token_ids)
+        generated_text, decode_blockers = _decode_with_catalog_tokenizer(model_id, generated_ids)
+        blockers.extend(decode_blockers)
+        ready = bool(result is not None and result.ready and not blockers)
+        generation_seconds_per_token = None
+        generation_speed = {}
+        steps_completed = 0 if result is None else int(result.positions_completed)
+        cache_sequence_lengths = {}
+        if result is not None:
+            cache_sequence_lengths = {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()}
     return SimpleNamespace(
         ready=ready,
-        strategy="deepseek-fp8-pack",
+        strategy=strategy,
         min_new_tokens=min_new_tokens,
-        steps_completed=0 if result is None else int(result.positions_completed),
+        steps_completed=steps_completed,
         max_new_tokens=max_new_tokens,
         stop_reason="deepseek-fp8-complete" if ready else "deepseek-fp8-blocked",
         stop_token_ids=stop_token_ids or [],
         stop_strings=stop_strings or [],
         prompt_token_ids=token_ids,
         generated_token_ids=generated_ids,
-        cache_sequence_lengths={}
-        if result is None
-        else {str(key): int(value[0].shape[1]) for key, value in result.next_kv_caches.items()},
+        cache_sequence_lengths=cache_sequence_lengths,
         blockers=blockers,
         generated_text=generated_text,
         full_text=f"{prepared_prompt}\n{generated_text}",
+        generation_seconds_per_token=generation_seconds_per_token,
+        generation_speed=generation_speed,
+        mtp_batched_exact=mtp_result or {},
+        gpu_paged=_deepseek_gpu_paged_summary(gpu_result),
     )
 
 
@@ -432,7 +606,7 @@ class PcketLmStatusApp:
             textvariable=self.chat_mode_var,
             state="readonly",
             width=28,
-            values=("Quality (full stack)", "Balanced (32 layers)", "Fast (8 layers)"),
+            values=("Quality (full stack)", "GPU (CUDA paged)", "Balanced (32 layers)", "Fast (8 layers)"),
         )
         self.chat_mode_picker.pack(side="left", padx=(10, 0))
         self.chat_mode_picker.bind("<<ComboboxSelected>>", self.on_chat_mode_selected)
@@ -861,6 +1035,7 @@ class PcketLmStatusApp:
                     apply_chat_format=apply_chat_format,
                     stop_token_ids=stop_token_ids or None,
                     stop_strings=stop_strings or None,
+                    runtime_mode=self.chat_mode_var.get(),
                 )
             except Exception as exc:  # pragma: no cover - UI guard
                 self.root.after(0, lambda: self._finish_prompt_error(exc))

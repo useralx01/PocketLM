@@ -78,6 +78,61 @@ static inline float dot_u16_u16(const uint16_t* left, const uint16_t* right, int
     return acc;
 }
 
+static inline float dot_f32_u16(const float* left, const uint16_t* right, int64_t count, int dtype_code) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    int64_t index = 0;
+    for (; index + 32 <= count; index += 32) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(left + index), load_u16_as_ps(right + index, dtype_code), acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(left + index + 8), load_u16_as_ps(right + index + 8, dtype_code), acc1);
+        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(left + index + 16), load_u16_as_ps(right + index + 16, dtype_code), acc2);
+        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(left + index + 24), load_u16_as_ps(right + index + 24, dtype_code), acc3);
+    }
+    for (; index + 8 <= count; index += 8) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(left + index), load_u16_as_ps(right + index, dtype_code), acc0);
+    }
+    float acc = horizontal_sum_ps(_mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3)));
+    for (; index < count; ++index) {
+        acc += left[index] * read_u16(right[index], dtype_code);
+    }
+    return acc;
+}
+
+extern "C" __declspec(dllexport) int native_u16_weight_linear_f32(
+    const float* hidden,
+    const uint16_t* weight,
+    float* out,
+    int64_t batch,
+    int64_t rows,
+    int64_t cols,
+    int dtype_code
+) {
+    if (hidden == nullptr || weight == nullptr || out == nullptr) {
+        return 1;
+    }
+    if (batch <= 0 || rows <= 0 || cols <= 0 || (dtype_code != 0 && dtype_code != 1)) {
+        return 2;
+    }
+    #ifdef _OPENMP
+    const char* requested_threads = std::getenv("PCKETLM_NATIVE_THREADS");
+    if (requested_threads != nullptr) {
+        const int parsed = std::atoi(requested_threads);
+        if (parsed > 0) {
+            omp_set_num_threads(parsed);
+        }
+    }
+    #endif
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t row = 0; row < rows; ++row) {
+            out[b * rows + row] = dot_f32_u16(hidden + b * cols, weight + row * cols, cols, dtype_code);
+        }
+    }
+    return 0;
+}
+
 static void insert_topk(float value, int64_t token_id, float* top_logits, int64_t* top_ids, int64_t top_k) {
     int64_t slot = -1;
     float worst = INFINITY;

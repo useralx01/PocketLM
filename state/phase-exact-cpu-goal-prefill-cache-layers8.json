@@ -1,0 +1,428 @@
+[
+  {
+    "label": "cold_exact",
+    "elapsed_seconds": 87.08475719999842,
+    "ready": true,
+    "generated_token_ids": [
+      0
+    ],
+    "final_top_token_ids": [
+      0,
+      20917,
+      4178,
+      94986,
+      43873
+    ],
+    "prefill_cache": {
+      "entries": 1,
+      "max_entries": 4,
+      "hits": 0,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "fp8_pack": {
+      "enabled": true,
+      "available": true,
+      "pack_files_open": 4,
+      "mmap_bytes_resident": 0,
+      "sequential_reads": 272,
+      "scattered_reads": 0,
+      "bytes_returned": 6541418496
+    },
+    "step_summaries": [
+      {
+        "position": 0,
+        "phase": "prompt_prefill",
+        "token_ids": [
+          0,
+          1
+        ],
+        "ready": true,
+        "executed_layers": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "tail_top_token_ids": [
+          0,
+          20917,
+          4178,
+          94986,
+          43873
+        ],
+        "layer_summaries": [
+          {
+            "layer_index": 0,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "dense",
+            "selected_experts": [],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.837569399998756,
+            "ffn_elapsed_seconds": 7.506915999998455,
+            "moe_routed_elapsed_seconds": 0.0,
+            "moe_shared_elapsed_seconds": 0.0,
+            "total_elapsed_seconds": 10.935720599998604,
+            "elapsed_seconds": 10.935757599996577,
+            "blockers": []
+          },
+          {
+            "layer_index": 1,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "dense",
+            "selected_experts": [],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.7770491000046604,
+            "ffn_elapsed_seconds": 7.559339599996747,
+            "moe_routed_elapsed_seconds": 0.0,
+            "moe_shared_elapsed_seconds": 0.0,
+            "total_elapsed_seconds": 10.990215899997565,
+            "elapsed_seconds": 10.9902574000007,
+            "blockers": []
+          },
+          {
+            "layer_index": 2,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "dense",
+            "selected_experts": [],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 3.0387011999991955,
+            "ffn_elapsed_seconds": 7.166761200001929,
+            "moe_routed_elapsed_seconds": 0.0,
+            "moe_shared_elapsed_seconds": 0.0,
+            "total_elapsed_seconds": 10.872371800003748,
+            "elapsed_seconds": 10.872400700005528,
+            "blockers": []
+          },
+          {
+            "layer_index": 3,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "moe",
+            "selected_experts": [
+              18,
+              29,
+              34,
+              43,
+              174,
+              175,
+              213,
+              226,
+              235,
+              254,
+              255
+            ],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.9190874000050826,
+            "ffn_elapsed_seconds": 1.8677415999991354,
+            "moe_routed_elapsed_seconds": 0.10636800000065705,
+            "moe_shared_elapsed_seconds": 0.13501869999890914,
+            "total_elapsed_seconds": 5.283848899998702,
+            "elapsed_seconds": 5.283874900000228,
+            "blockers": []
+          },
+          {
+            "layer_index": 4,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "moe",
+            "selected_experts": [
+              100,
+              118,
+              123,
+              132,
+              148,
+              159,
+              164,
+              170,
+              171,
+              173,
+              175,
+              186,
+              188,
+              229,
+              239,
+              244
+            ],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.893352999999479,
+            "ffn_elapsed_seconds": 2.199597000006179,
+            "moe_routed_elapsed_seconds": 0.11793519999628188,
+            "moe_shared_elapsed_seconds": 0.14395779999904335,
+            "total_elapsed_seconds": 5.652775999995356,
+            "elapsed_seconds": 5.653095499998017,
+            "blockers": []
+          },
+          {
+            "layer_index": 5,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "moe",
+            "selected_experts": [
+              22,
+              102,
+              116,
+              133,
+              141,
+              142,
+              166,
+              167,
+              184,
+              188,
+              190,
+              209,
+              220,
+              221,
+              241,
+              252
+            ],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.8814999000023818,
+            "ffn_elapsed_seconds": 2.197511200000008,
+            "moe_routed_elapsed_seconds": 0.11952590000146301,
+            "moe_shared_elapsed_seconds": 0.14146859999891603,
+            "total_elapsed_seconds": 5.5542905000038445,
+            "elapsed_seconds": 5.554318299997249,
+            "blockers": []
+          },
+          {
+            "layer_index": 6,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "moe",
+            "selected_experts": [
+              7,
+              14,
+              36,
+              45,
+              75,
+              76,
+              77,
+              78,
+              96,
+              121,
+              138,
+              163,
+              179,
+              186,
+              201,
+              218
+            ],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.9691193000035128,
+            "ffn_elapsed_seconds": 2.174048800006858,
+            "moe_routed_elapsed_seconds": 0.1450914999950328,
+            "moe_shared_elapsed_seconds": 0.14317369999480434,
+            "total_elapsed_seconds": 5.618080599997484,
+            "elapsed_seconds": 5.618106100002478,
+            "blockers": []
+          },
+          {
+            "layer_index": 7,
+            "ready": true,
+            "output_shape": [
+              1,
+              2,
+              7168
+            ],
+            "ffn_type": "moe",
+            "selected_experts": [
+              11,
+              13,
+              32,
+              62,
+              96,
+              127,
+              130,
+              156,
+              176,
+              177,
+              190,
+              226,
+              239,
+              247,
+              252
+            ],
+            "cache_sequence_length": 2,
+            "attention_elapsed_seconds": 2.935708400000294,
+            "ffn_elapsed_seconds": 2.138834500001394,
+            "moe_routed_elapsed_seconds": 0.11702579999837326,
+            "moe_shared_elapsed_seconds": 0.1438196999952197,
+            "total_elapsed_seconds": 5.656987599999411,
+            "elapsed_seconds": 5.657015099997807,
+            "blockers": []
+          }
+        ],
+        "tail_elapsed_seconds": 20.039204799999425,
+        "cache_sequence_lengths": {
+          "0": 2,
+          "1": 2,
+          "2": 2,
+          "3": 2,
+          "4": 2,
+          "5": 2,
+          "6": 2,
+          "7": 2
+        },
+        "elapsed_seconds": 85.76970179999626,
+        "cache_hit": false,
+        "blockers": []
+      },
+      {
+        "position": 2,
+        "phase": "generate_final_token",
+        "token_id": 0,
+        "ready": true,
+        "executed_layers": [],
+        "tail_top_token_ids": [],
+        "cache_sequence_lengths": {
+          "0": 2,
+          "1": 2,
+          "2": 2,
+          "3": 2,
+          "4": 2,
+          "5": 2,
+          "6": 2,
+          "7": 2
+        },
+        "elapsed_seconds": 0.0,
+        "skipped_final_cache_forward": true,
+        "blockers": []
+      }
+    ],
+    "blockers": []
+  },
+  {
+    "label": "cached_exact",
+    "elapsed_seconds": 0.9431220999977086,
+    "ready": true,
+    "generated_token_ids": [
+      0
+    ],
+    "final_top_token_ids": [
+      0,
+      20917,
+      4178,
+      94986,
+      43873
+    ],
+    "prefill_cache": {
+      "entries": 1,
+      "max_entries": 4,
+      "hits": 1,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "fp8_pack": {
+      "enabled": true,
+      "available": true,
+      "pack_files_open": 4,
+      "mmap_bytes_resident": 0,
+      "sequential_reads": 272,
+      "scattered_reads": 0,
+      "bytes_returned": 6541418496
+    },
+    "step_summaries": [
+      {
+        "position": 0,
+        "phase": "prompt_prefill_cache",
+        "token_ids": [
+          0,
+          1
+        ],
+        "ready": true,
+        "executed_layers": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "tail_top_token_ids": [
+          0,
+          20917,
+          4178,
+          94986,
+          43873
+        ],
+        "layer_summaries": [],
+        "tail_elapsed_seconds": 0.0,
+        "cache_sequence_lengths": {
+          "0": 2,
+          "1": 2,
+          "2": 2,
+          "3": 2,
+          "4": 2,
+          "5": 2,
+          "6": 2,
+          "7": 2
+        },
+        "elapsed_seconds": 0.0,
+        "cache_hit": true,
+        "blockers": []
+      },
+      {
+        "position": 2,
+        "phase": "generate_final_token",
+        "token_id": 0,
+        "ready": true,
+        "executed_layers": [],
+        "tail_top_token_ids": [],
+        "cache_sequence_lengths": {
+          "0": 2,
+          "1": 2,
+          "2": 2,
+          "3": 2,
+          "4": 2,
+          "5": 2,
+          "6": 2,
+          "7": 2
+        },
+        "elapsed_seconds": 0.0,
+        "skipped_final_cache_forward": true,
+        "blockers": []
+      }
+    ],
+    "blockers": []
+  }
+]

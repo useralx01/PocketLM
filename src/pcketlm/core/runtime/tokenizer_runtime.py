@@ -88,7 +88,8 @@ def _tokenizer_from_path(tokenizer_path: str) -> Tokenizer:
 
 def load_local_tokenizer(model_id: str) -> TokenizerLoadResult:
     """Load the local tokenizer.json for the given model id."""
-    tokenizer_path = original_model_root(model_id) / "tokenizer.json"
+    model_root = _model_metadata_root(model_id)
+    tokenizer_path = model_root / "tokenizer.json"
     blockers: list[str] = []
     if not tokenizer_path.exists():
         blockers.append(f"Missing tokenizer file at {tokenizer_path}.")
@@ -132,8 +133,9 @@ def _load_json_if_present(path: Path) -> dict:
 
 def load_generation_settings(model_id: str) -> GenerationSettings:
     """Load basic generation defaults from the local generation config."""
-    generation_path = original_model_root(model_id) / "generation_config.json"
-    config_path = original_model_root(model_id) / "config.json"
+    model_root = _model_metadata_root(model_id)
+    generation_path = model_root / "generation_config.json"
+    config_path = model_root / "config.json"
     payload = _load_json_if_present(generation_path)
     if not payload:
         payload = _load_json_if_present(config_path)
@@ -175,7 +177,7 @@ def prepare_prompt_text(
             ready=False,
         )
 
-    tokenizer_config_path = original_model_root(model_id) / "tokenizer_config.json"
+    tokenizer_config_path = _model_metadata_root(model_id) / "tokenizer_config.json"
     tokenizer_config = _load_json_if_present(tokenizer_config_path)
     prepared_prompt = prompt
 
@@ -192,6 +194,10 @@ def prepare_prompt_text(
             f"<|im_start|>user\n{prompt}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
+    elif apply_chat_format and _is_deepseek_chat_template(tokenizer_config):
+        bos_text = _added_token_content(tokenizer_config.get("bos_token")) or "<｜begin▁of▁sentence｜>"
+        system_text = "" if system_prompt is None else str(system_prompt)
+        prepared_prompt = f"{bos_text}{system_text}<｜User｜>{prompt}<｜Assistant｜>"
 
     token_ids, blockers = encode_prompt_text(model_id, prepared_prompt)
     return PreparedPromptResult(
@@ -202,6 +208,20 @@ def prepare_prompt_text(
         blockers=blockers,
         ready=not blockers,
     )
+
+
+def _is_deepseek_chat_template(tokenizer_config: dict) -> bool:
+    chat_template = str(tokenizer_config.get("chat_template") or "")
+    return "<｜User｜>" in chat_template and "<｜Assistant｜>" in chat_template
+
+
+def _added_token_content(value: object) -> str | None:
+    if isinstance(value, dict):
+        content = value.get("content")
+        return None if content is None else str(content)
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def encode_prompt_text(model_id: str, prompt: str) -> tuple[list[int], list[str]]:
@@ -233,3 +253,18 @@ def decode_token_ids_to_text(model_id: str, token_ids: list[int]) -> tuple[str, 
     except Exception as exc:  # pragma: no cover - defensive path
         return "", [f"Tokenizer decode failed: {exc}."]
     return text, []
+
+
+def _model_metadata_root(model_id: str) -> Path:
+    root = original_model_root(model_id)
+    if (root / "tokenizer.json").exists() or (root / "config.json").exists():
+        return root
+    try:
+        from pcketlm.core.runtime.tensor_catalog import load_tensor_catalog
+
+        catalog_root = load_tensor_catalog(model_id).model_dir
+        if (catalog_root / "tokenizer.json").exists() or (catalog_root / "config.json").exists():
+            return catalog_root
+    except Exception:
+        pass
+    return root

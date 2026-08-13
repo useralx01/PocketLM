@@ -1,0 +1,85 @@
+{
+  "model_id": "deepseek-v3",
+  "prompt": "Say hello in one short sentence.",
+  "max_new_tokens": 4,
+  "k": 4,
+  "layer_count": 61,
+  "ready": true,
+  "prepared_ready": true,
+  "prepared_blockers": [],
+  "passes": [
+    {
+      "pass_index": 1,
+      "batch_k": 4,
+      "next_token_id": 19923,
+      "accepted_this_pass": 1,
+      "corrected_token_id": 3,
+      "verifier_head": [
+        19923,
+        3,
+        3,
+        19923,
+        19923
+      ],
+      "verify_wall_seconds": 365.4024,
+      "verify_elapsed_seconds": 365.4023,
+      "layers_executed": 61,
+      "expected_layers_executed": 61,
+      "ready": true,
+      "blockers": []
+    },
+    {
+      "pass_index": 2,
+      "batch_k": 2,
+      "next_token_id": 3,
+      "accepted_this_pass": 1,
+      "corrected_token_id": 1,
+      "verifier_head": [
+        3,
+        1,
+        201
+      ],
+      "verify_wall_seconds": 364.868,
+      "verify_elapsed_seconds": 364.8678,
+      "layers_executed": 61,
+      "expected_layers_executed": 61,
+      "ready": true,
+      "blockers": []
+    }
+  ],
+  "session_blockers": [],
+  "prefill_elapsed_seconds": 440.2781,
+  "session_layers_executed": 61,
+  "session_expected_layers_executed": 61,
+  "generated_token_ids": [
+    19923,
+    3,
+    1
+  ],
+  "visible_token_ids": [
+    19923,
+    3
+  ],
+  "generated_text": "Hello!",
+  "raw_generated_text": "Hello!<\uff5cend\u2581of\u2581sentence\uff5c>",
+  "stopped_by_eos": true,
+  "text_quality": {
+    "non_whitespace_chars": 6,
+    "unique_token_count": 2,
+    "is_nonblank": true,
+    "min_non_whitespace_chars": 8,
+    "min_unique_token_count": 3,
+    "is_complete_short_answer": true,
+    "is_useful_text": true
+  },
+  "generated_tokens": 3,
+  "accepted_token_count": 2,
+  "corrected_token_count": 2,
+  "elapsed_seconds": 1171.8449,
+  "seconds_per_visible_token": 585.9225,
+  "verify_seconds_per_accepted_token": 365.135,
+  "layers_executed": 183,
+  "expected_layers_executed": 183,
+  "anti_cheat_passed": true,
+  "blockers": []
+}

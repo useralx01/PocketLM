@@ -1,4 +1,39 @@
-# pcketlm
+# PocketLM
+
+PocketLM is a Windows-first local AI runtime and control center. Model weights are never included in this repository.
+
+## Test On Another Desktop
+
+1. Open the private GitHub repository and download the latest prerelease ZIP.
+2. Extract it to a local folder.
+3. Open PowerShell in that folder and run:
+
+```powershell
+.\install-pocketlm.ps1 -StartApp
+```
+
+The installer creates an isolated environment under `%LOCALAPPDATA%\PocketLM\venvs`, installs PocketLM, and writes a sanitized proof to `state\supervisor\install-proof.json`. Keeping the environment there avoids Windows path-length failures even when the ZIP is extracted into a deep folder. Python 3.12 or newer is required. To launch it again later, run `start-pocketlm.ps1`.
+
+PocketLM can install without model weights. The Settings screen distinguishes a healthy installation with no model (`partial`) from a machine with a runnable model (`ready`). Add models separately on each desktop or connect the storage that already contains them.
+
+## Installation Supervisor
+
+Every copy exposes local-only health endpoints while the app is running:
+
+- `GET http://127.0.0.1:8765/api/supervisor/health` returns the current sanitized report.
+- `POST http://127.0.0.1:8765/api/supervisor/check` runs the check and saves a proof artifact.
+
+The report uses a random installation ID and does not contain usernames, hostnames, IP addresses, local paths, prompts, or model contents. It is never uploaded automatically. GitHub Actions runs the same installer and contract checks on a clean Windows machine for every push and pull request.
+
+## Development
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e . pytest
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+## Project Notes
 
 This is the Mission Control tracking category for the `pcketlm` project.
 

@@ -1,0 +1,68 @@
+{
+  "prompt": "Say hello in one short sentence.",
+  "prompt_token_count": 10,
+  "last_prompt_token": 128804,
+  "prepared_ready": true,
+  "prepared_blockers": [],
+  "prefill_ready": true,
+  "prefill_wall_seconds": 462.0833585000073,
+  "prefill_top_ids": [
+    19923,
+    4,
+    23166,
+    28826,
+    428
+  ],
+  "prefill_top_logits": [
+    50.067718505859375,
+    47.13124084472656,
+    45.04225158691406,
+    42.8776741027832,
+    41.8590202331543
+  ],
+  "mtp_wall_seconds": 29.658217200019863,
+  "mtp": {
+    "model_id": "deepseek-v3",
+    "input_token_id": 128804,
+    "position": 9,
+    "mtp_layer_index": 61,
+    "top_token_ids": [
+      19923,
+      23166,
+      4,
+      28826,
+      428,
+      33310,
+      45948,
+      666,
+      17259,
+      12
+    ],
+    "top_logits": [
+      44.59070587158203,
+      40.10652160644531,
+      37.969451904296875,
+      37.266197204589844,
+      35.55504608154297,
+      34.934791564941406,
+      34.553958892822266,
+      32.43174743652344,
+      31.940250396728516,
+      31.84580421447754
+    ],
+    "hidden_shape": [
+      1,
+      1,
+      7168
+    ],
+    "cache_sequence_length": 1,
+    "embedding_elapsed_seconds": 0.029450900008669123,
+    "projection_elapsed_seconds": 0.12864180002361536,
+    "block_elapsed_seconds": 8.01749880000716,
+    "tail_elapsed_seconds": 18.830336300015915,
+    "elapsed_seconds": 29.65812229999574,
+    "blockers": [],
+    "ready": true
+  },
+  "mtp_contains_prefill_top1": true
+}

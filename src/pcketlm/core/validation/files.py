@@ -3,7 +3,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pcketlm.core.model_import.inspect import inspect_qwen_source
+from pcketlm.core.model_import.inspect import inspect_model_source
+from pcketlm.core.model_families import normalize_family_key
 
 
 REQUIRED_QWEN_FILES = (
@@ -29,13 +30,35 @@ def find_missing_required_files(model_dir: Path) -> list[str]:
 
 def validate_qwen_source(model_dir: Path) -> ValidationResult:
     """Validate a Qwen source directory for the first import pass."""
-    inspection = inspect_qwen_source(model_dir)
+    return validate_model_source(model_dir, family="qwen")
+
+
+def validate_model_source(model_dir: Path, *, family: str | None = None) -> ValidationResult:
+    """Validate local source structure without loading model weights."""
+    inspection = inspect_model_source(model_dir)
+    family_key = normalize_family_key(family)
     warnings: list[str] = []
 
-    missing_files = find_missing_required_files(model_dir)
+    if inspection.format_name == "gguf":
+        return ValidationResult(result="ok")
+
+    missing_files: list[str] = []
+    if not (model_dir / "config.json").exists():
+        missing_files.append("config.json")
+    has_weights = inspection.present_shards > 0
+    if not has_weights:
+        missing_files.append("model.safetensors.index.json")
+
+    if family_key != "kronos":
+        has_tokenizer = any(
+            (model_dir / name).exists()
+            for name in ("tokenizer.json", "tokenizer.model", "spiece.model")
+        )
+        if not has_tokenizer:
+            missing_files.append("tokenizer.json")
 
     has_vocab_pair = (model_dir / "vocab.json").exists() and (model_dir / "merges.txt").exists()
-    if not has_vocab_pair:
+    if family_key in {"qwen", "qwen-moe"} and not has_vocab_pair:
         warnings.append("Tokenizer pair files are incomplete or missing.")
 
     if inspection.index_present and inspection.present_shards < inspection.expected_shards:
@@ -50,5 +73,5 @@ def validate_qwen_source(model_dir: Path) -> ValidationResult:
             warnings=warnings,
         )
 
-    result = "ok" if inspection.present_shards == inspection.expected_shards else "partial"
+    result = "ok" if has_weights and inspection.present_shards == inspection.expected_shards else "partial"
     return ValidationResult(result=result, missing_files=[], warnings=warnings)

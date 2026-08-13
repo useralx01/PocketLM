@@ -7,13 +7,19 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <div id="launch-sequence" class="launch-sequence" aria-live="polite">
+    <div class="launch-mark">P</div>
+    <div class="launch-name">Pocket LLM</div>
+    <div class="launch-welcome">Welcome, Issa</div>
+    <div id="launch-status" class="launch-status">Starting local control</div>
+  </div>
   <div id="app">
     <aside class="sidebar">
       <div class="brand">
         <div class="logo">P</div>
         <div>
           <div class="brand-name">Pocket LLM</div>
-          <div class="brand-sub">Local AI control</div>
+          <div class="brand-sub">Issa / Local control</div>
         </div>
       </div>
       <nav class="nav">
@@ -39,10 +45,11 @@
         <header class="topbar">
           <div>
             <h1>Chat</h1>
-            <p id="chat-subtitle">GGUF is the fast Qwen 14B chat path.</p>
-            <p id="speed-target-note" class="muted">Speed target: 2-4 seconds per token.</p>
+            <p id="chat-subtitle">GGUF uses the installed model's native chat template.</p>
+            <p id="speed-target-note" class="muted">Reading measured runtime evidence.</p>
           </div>
           <div class="top-actions">
+            <span class="operator-chip">Issa / Local</span>
             <span id="model-pill" class="pill">Qwen</span>
             <button id="chat-load-gguf" class="secondary compact" type="button">Load fast model</button>
             <div class="segmented" id="mode-picker">
@@ -58,9 +65,9 @@
         <div class="chat-shell">
           <div id="chat-history" class="chat-history">
             <div class="empty-state">
-              <div class="logo large">P</div>
+              <img class="empty-icon" src="/icons/message-square.svg" alt="">
               <h2>What can I help with?</h2>
-              <p>Running locally through Pocket LLM. GGUF is default for usable Qwen 14B speed.</p>
+              <p>Running locally through Pocket LLM. GGUF is the default when a compatible artifact is installed.</p>
               <div class="prompt-grid">
                 <button data-prompt="Say hello in one short sentence.">Quick hello</button>
                 <button data-prompt="Explain what Pocket LLM can do in plain English.">Explain Pocket LLM</button>
@@ -94,7 +101,7 @@
           <article class="panel"><h2>Downloads</h2><div id="download-meter-card" class="stack"></div></article>
           <article class="panel"><h2>Active Runtime</h2><div id="load-runtime-card" class="stack"></div></article>
           <article class="panel"><h2>GGUF Server</h2><div id="gguf-server-card" class="stack"></div></article>
-          <article class="panel"><h2>Support Plan</h2><div id="support-plan" class="stack"></div></article>
+          <article class="panel support-panel"><h2>Compatibility</h2><div class="status-legend"><span>Proven</span><span>Experimental</span><span>Missing</span><span>Unsupported</span></div><div id="support-plan" class="stack"></div></article>
         </div>
       </section>
 
@@ -172,6 +179,17 @@
           </article>
           <article class="panel"><h2>Runtime Settings</h2><div id="settings-runtime-grid" class="runtime-grid"></div></article>
           <article class="panel"><h2>Backend Options</h2><div id="backend-report" class="stack"></div></article>
+          <article class="panel">
+            <div class="item-title">
+              <h2>Installation Health</h2>
+              <span id="supervisor-status" class="status-chip status-missing">Checking</span>
+            </div>
+            <p id="supervisor-summary" class="muted" aria-live="polite">Checking this desktop...</p>
+            <div id="supervisor-grid" class="runtime-grid supervisor-grid"></div>
+            <div class="button-row">
+              <button id="supervisor-check" type="button" class="secondary compact">Run check</button>
+            </div>
+          </article>
           <article class="panel"><h2>Storage</h2><p id="settings-storage" class="muted">Loading...</p></article>
           <article class="panel"><h2>Account</h2><p class="muted">Subscription and custom profile limits will live here later.</p></article>
         </div>

@@ -1,0 +1,350 @@
+{
+  "warm_ready": true,
+  "warm_elapsed_seconds": 64.3202134000021,
+  "cached_two_token_ready": true,
+  "cached_two_token_elapsed_seconds": 24.08123599999817,
+  "generated_token_ids": [
+    0,
+    94777
+  ],
+  "final_top_token_ids": [
+    94777,
+    118131,
+    121027,
+    75998,
+    127275
+  ],
+  "prefill_cache": {
+    "entries": 1,
+    "max_entries": 4,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "lm_head_full_cache": {
+    "entries": 1,
+    "bytes": 1853358080,
+    "max_bytes": 2147483648,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "step_summaries": [
+    {
+      "position": 0,
+      "phase": "prompt_prefill_cache",
+      "token_ids": [
+        0,
+        1
+      ],
+      "ready": true,
+      "executed_layers": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "tail_top_token_ids": [
+        0,
+        20917,
+        4178,
+        94986,
+        44754
+      ],
+      "layer_summaries": [],
+      "tail_elapsed_seconds": 0.0,
+      "cache_sequence_lengths": {
+        "0": 2,
+        "1": 2,
+        "2": 2,
+        "3": 2,
+        "4": 2,
+        "5": 2,
+        "6": 2,
+        "7": 2
+      },
+      "elapsed_seconds": 0.0,
+      "cache_hit": true,
+      "blockers": []
+    },
+    {
+      "position": 2,
+      "phase": "generate",
+      "token_id": 0,
+      "ready": true,
+      "executed_layers": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "tail_top_token_ids": [
+        94777,
+        118131,
+        121027,
+        75998,
+        127275
+      ],
+      "layer_summaries": [
+        {
+          "layer_index": 0,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "dense",
+          "selected_experts": [],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.903217200000654,
+          "ffn_elapsed_seconds": 0.6458075000045937,
+          "moe_routed_elapsed_seconds": 0.0,
+          "moe_shared_elapsed_seconds": 0.0,
+          "total_elapsed_seconds": 1.9457698000042,
+          "blockers": []
+        },
+        {
+          "layer_index": 1,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "dense",
+          "selected_experts": [],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.9441134000007878,
+          "ffn_elapsed_seconds": 0.679584600002272,
+          "moe_routed_elapsed_seconds": 0.0,
+          "moe_shared_elapsed_seconds": 0.0,
+          "total_elapsed_seconds": 2.021479199996975,
+          "blockers": []
+        },
+        {
+          "layer_index": 2,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "dense",
+          "selected_experts": [],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 1.0233091999980388,
+          "ffn_elapsed_seconds": 0.6999504000050365,
+          "moe_routed_elapsed_seconds": 0.0,
+          "moe_shared_elapsed_seconds": 0.0,
+          "total_elapsed_seconds": 2.199441000004299,
+          "blockers": []
+        },
+        {
+          "layer_index": 3,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "moe",
+          "selected_experts": [
+            15,
+            25,
+            64,
+            88,
+            163,
+            204,
+            206,
+            213
+          ],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.7152029999997467,
+          "ffn_elapsed_seconds": 1.687466499999573,
+          "moe_routed_elapsed_seconds": 0.06592320000345353,
+          "moe_shared_elapsed_seconds": 0.12338090000412194,
+          "total_elapsed_seconds": 2.8157802000059746,
+          "blockers": []
+        },
+        {
+          "layer_index": 4,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "moe",
+          "selected_experts": [
+            100,
+            107,
+            128,
+            144,
+            159,
+            179,
+            186,
+            212
+          ],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.6888716999965254,
+          "ffn_elapsed_seconds": 1.6477639000004274,
+          "moe_routed_elapsed_seconds": 0.060006500003510155,
+          "moe_shared_elapsed_seconds": 0.1468784999960917,
+          "total_elapsed_seconds": 2.8612368000030983,
+          "blockers": []
+        },
+        {
+          "layer_index": 5,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "moe",
+          "selected_experts": [
+            32,
+            82,
+            93,
+            98,
+            122,
+            165,
+            173,
+            178
+          ],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.8441648000007262,
+          "ffn_elapsed_seconds": 1.601674899997306,
+          "moe_routed_elapsed_seconds": 0.059316999999282416,
+          "moe_shared_elapsed_seconds": 0.1389465000029304,
+          "total_elapsed_seconds": 2.94008240000403,
+          "blockers": []
+        },
+        {
+          "layer_index": 6,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "moe",
+          "selected_experts": [
+            34,
+            70,
+            79,
+            81,
+            93,
+            126,
+            150,
+            157
+          ],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 0.8142377999974997,
+          "ffn_elapsed_seconds": 1.5806777000034344,
+          "moe_routed_elapsed_seconds": 0.062491299999237526,
+          "moe_shared_elapsed_seconds": 0.1460272000040277,
+          "total_elapsed_seconds": 3.008380400002352,
+          "blockers": []
+        },
+        {
+          "layer_index": 7,
+          "ready": true,
+          "output_shape": [
+            1,
+            1,
+            7168
+          ],
+          "ffn_type": "moe",
+          "selected_experts": [
+            29,
+            49,
+            62,
+            107,
+            134,
+            139,
+            148,
+            149
+          ],
+          "cache_sequence_length": 3,
+          "attention_elapsed_seconds": 1.0603209999972023,
+          "ffn_elapsed_seconds": 1.5916252999959397,
+          "moe_routed_elapsed_seconds": 0.060800100000051316,
+          "moe_shared_elapsed_seconds": 0.13811749999877065,
+          "total_elapsed_seconds": 3.154606199997943,
+          "blockers": []
+        }
+      ],
+      "tail_elapsed_seconds": 1.960787199997867,
+      "cache_sequence_lengths": {
+        "0": 3,
+        "1": 3,
+        "2": 3,
+        "3": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "7": 3
+      },
+      "elapsed_seconds": 23.311056300000928,
+      "blockers": []
+    },
+    {
+      "position": 3,
+      "phase": "generate_final_token",
+      "token_id": 94777,
+      "ready": true,
+      "executed_layers": [],
+      "tail_top_token_ids": [],
+      "cache_sequence_lengths": {
+        "0": 3,
+        "1": 3,
+        "2": 3,
+        "3": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "7": 3
+      },
+      "elapsed_seconds": 0.0,
+      "skipped_final_cache_forward": true,
+      "blockers": []
+    }
+  ],
+  "attention_weight_cache": {
+    "entries": 40,
+    "bytes": 2993684480,
+    "max_bytes": 4294967296,
+    "dequant_hot_cache_enabled": true,
+    "dequant_hot_cache_hits": 40,
+    "dequant_hot_cache_misses": 0,
+    "dequant_hot_cache_stores": 0,
+    "dequant_hot_cache_read_errors": 0,
+    "dequant_hot_cache_write_errors": 0,
+    "hits": 40,
+    "misses": 40,
+    "stores": 40,
+    "evictions": 0
+  },
+  "fp8_pack": {
+    "enabled": true,
+    "available": true,
+    "pack_files_open": 4,
+    "mmap_bytes_resident": 0,
+    "sequential_reads": 220,
+    "scattered_reads": 0,
+    "bytes_returned": 9731732480
+  },
+  "blockers": []
+}

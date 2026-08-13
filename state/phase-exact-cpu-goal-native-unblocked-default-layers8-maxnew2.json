@@ -1,0 +1,65 @@
+{
+  "warm_ready": true,
+  "warm_elapsed": 50.12464679999539,
+  "ready": true,
+  "elapsed": 27.852774299994053,
+  "generated": [
+    0,
+    94777
+  ],
+  "top": [
+    94777,
+    118131,
+    121027,
+    75998,
+    127275
+  ],
+  "generate_elapsed": 27.22711739999795,
+  "tail": 1.0301585999986855,
+  "attention": 17.320633300019836,
+  "ffn": 6.930149399988295,
+  "routed": 0.2802005000048666,
+  "shared": 0.3907502999936696,
+  "prefill_cache": {
+    "entries": 1,
+    "max_entries": 4,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "lm_head_full_cache": {
+    "entries": 1,
+    "bytes": 1853358080,
+    "max_bytes": 2147483648,
+    "hits": 1,
+    "misses": 1,
+    "stores": 1,
+    "evictions": 0
+  },
+  "attention_weight_cache": {
+    "entries": 0,
+    "bytes": 0,
+    "max_bytes": 0,
+    "dequant_hot_cache_enabled": true,
+    "dequant_hot_cache_hits": 80,
+    "dequant_hot_cache_misses": 0,
+    "dequant_hot_cache_stores": 0,
+    "dequant_hot_cache_read_errors": 0,
+    "dequant_hot_cache_write_errors": 0,
+    "hits": 0,
+    "misses": 0,
+    "stores": 0,
+    "evictions": 0
+  },
+  "fp8_pack": {
+    "enabled": true,
+    "available": true,
+    "pack_files_open": 4,
+    "mmap_bytes_resident": 0,
+    "sequential_reads": 220,
+    "scattered_reads": 0,
+    "bytes_returned": 9731732480
+  },
+  "blockers": []
+}

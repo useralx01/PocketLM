@@ -1,0 +1,134 @@
+[
+  {
+    "layers": 16,
+    "warm_ready": true,
+    "warm_elapsed": 79.33665200000542,
+    "ready": true,
+    "elapsed": 66.50251079999725,
+    "generated": [
+      0,
+      28191
+    ],
+    "top": [
+      28191,
+      96887,
+      37036,
+      118131,
+      71878
+    ],
+    "generate_elapsed": 65.8201212999993,
+    "tail": 1.2274347000056878,
+    "attention": 40.881052400000044,
+    "ffn": 17.63535929999489,
+    "routed": 0.588328800011368,
+    "shared": 1.1162874000074225,
+    "prefill_cache": {
+      "entries": 1,
+      "max_entries": 4,
+      "hits": 1,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "lm_head_full_cache": {
+      "entries": 1,
+      "bytes": 1853358080,
+      "max_bytes": 2147483648,
+      "hits": 1,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "attention_weight_cache": {
+      "entries": 0,
+      "bytes": 0,
+      "max_bytes": 0,
+      "dequant_hot_cache_enabled": true,
+      "dequant_hot_cache_hits": 160,
+      "dequant_hot_cache_misses": 0,
+      "dequant_hot_cache_stores": 0,
+      "dequant_hot_cache_read_errors": 0,
+      "dequant_hot_cache_write_errors": 0,
+      "hits": 0,
+      "misses": 0,
+      "stores": 0,
+      "evictions": 0
+    },
+    "fp8_pack": {
+      "enabled": true,
+      "available": true,
+      "pack_files_open": 10,
+      "mmap_bytes_resident": 0,
+      "sequential_reads": 527,
+      "scattered_reads": 0,
+      "bytes_returned": 18865487872
+    },
+    "blockers": []
+  },
+  {
+    "layers": 32,
+    "warm_ready": true,
+    "warm_elapsed": 167.55232020000403,
+    "ready": true,
+    "elapsed": 143.48606210000435,
+    "generated": [
+      0,
+      37036
+    ],
+    "top": [
+      37036,
+      76181,
+      22305,
+      52479,
+      9771
+    ],
+    "generate_elapsed": 142.80730449999828,
+    "tail": 1.049718699992809,
+    "attention": 89.82391389997792,
+    "ffn": 38.616075899983116,
+    "routed": 1.2435413999701268,
+    "shared": 2.6129526999866357,
+    "prefill_cache": {
+      "entries": 1,
+      "max_entries": 4,
+      "hits": 1,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "lm_head_full_cache": {
+      "entries": 1,
+      "bytes": 1853358080,
+      "max_bytes": 2147483648,
+      "hits": 1,
+      "misses": 1,
+      "stores": 1,
+      "evictions": 0
+    },
+    "attention_weight_cache": {
+      "entries": 0,
+      "bytes": 0,
+      "max_bytes": 0,
+      "dequant_hot_cache_enabled": true,
+      "dequant_hot_cache_hits": 320,
+      "dequant_hot_cache_misses": 0,
+      "dequant_hot_cache_stores": 0,
+      "dequant_hot_cache_read_errors": 0,
+      "dequant_hot_cache_write_errors": 0,
+      "hits": 0,
+      "misses": 0,
+      "stores": 0,
+      "evictions": 0
+    },
+    "fp8_pack": {
+      "enabled": true,
+      "available": true,
+      "pack_files_open": 20,
+      "mmap_bytes_resident": 0,
+      "sequential_reads": 1647,
+      "scattered_reads": 0,
+      "bytes_returned": 55513926144
+    },
+    "blockers": []
+  }
+]

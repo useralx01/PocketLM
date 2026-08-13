@@ -56,6 +56,15 @@ def test_chat_layer_count_maps_web_modes() -> None:
     assert _chat_layer_count("unknown") is None
 
 
+def test_kronos_chat_is_rejected_as_wrong_capability() -> None:
+    payload = _run_chat_payload({"model_id": "kronos-small", "mode": "GGUF", "prompt": "forecast BTC"})
+
+    assert payload["ready"] is False
+    assert payload["stop_reason"] == "unsupported-capability"
+    assert payload["strategy"] == "capability-guard"
+    assert "forecast" in payload["blockers"][0]
+
+
 def test_chat_layer_count_for_experimental_direct_uses_full_stack(monkeypatch) -> None:
     monkeypatch.setattr(
         web_main,
@@ -1113,48 +1122,109 @@ def test_run_chat_payload_gguf_requires_loaded_server_before_chat(monkeypatch) -
     assert "Load the GGUF fast model" in payload["blockers"][0]
 
 
-def test_run_chat_payload_routes_deepseek_to_fp8_decode_loop(monkeypatch) -> None:
+def test_run_chat_payload_routes_deepseek_quality_to_exact_mtp_default(monkeypatch) -> None:
     from pcketlm.app import web
 
     captured = {}
 
-    def fake_run_fp8_decode_loop(model_id, token_ids, *, layer_count, max_new_tokens):
+    def fake_run_fp8_mtp_batched_generate_from_tokens(
+        model_id,
+        token_ids,
+        *,
+        prompt_text,
+        max_visible_tokens,
+        k,
+        layer_count,
+        max_passes,
+        prefer_eos_after_punctuation,
+    ):
         captured.update(
             {
                 "model_id": model_id,
                 "token_ids": list(token_ids),
+                "prompt_text": prompt_text,
                 "layer_count": layer_count,
-                "max_new_tokens": max_new_tokens,
+                "max_visible_tokens": max_visible_tokens,
+                "k": k,
+                "max_passes": max_passes,
+                "prefer_eos_after_punctuation": prefer_eos_after_punctuation,
             }
         )
-        return SimpleNamespace(
-            ready=True,
-            blockers=[],
-            generated_token_ids=[42],
-            positions_completed=3,
-            next_kv_caches={},
-            attention_weight_cache={"dequant_hot_cache_hits": 5},
-            mlp_span_cache={"max_bytes": 0},
-            fp8_pack={"available": True, "scattered_reads": 0},
-            step_summaries=[
+        return {
+            "ready": True,
+            "blockers": [],
+            "generated_token_ids": [42],
+            "visible_token_ids": [42],
+            "generated_text": "answer",
+            "accepted_token_count": 1,
+            "elapsed_seconds": 12.345,
+            "seconds_per_visible_token": 12.345,
+            "layer_count": 61,
+            "verifier_weight_sweeps": 1,
+            "tokens_accepted_per_sweep": [1],
+            "candidate_tokens_per_sweep": [8],
+            "verified_candidate_count": 8,
+            "average_tokens_accepted_per_sweep": 1.0,
+            "layers_executed": 122,
+            "expected_layers_executed": 122,
+            "anti_cheat_passed": True,
+            "one_weight_sweep_per_pass": True,
+            "verifier_contract": {"draft_model": "deepseek_v3_mtp_head"},
+            "attention_weight_cache": {"dequant_hot_cache_hits": 5},
+            "mlp_span_cache": {"max_bytes": 0},
+            "regular_tensor_cache": {"hits": 9, "entries": 3},
+            "lm_head_full_cache": {"entries": 2},
+            "residency_split": {"guard_status": "ok"},
+            "fp8_pack": {"available": True, "scattered_reads": 0},
+            "passes": [
                 {
-                    "layer_summaries": [
-                        {
-                            "layer_index": 0,
-                            "attention_elapsed_seconds": 2.0,
-                            "ffn_elapsed_seconds": 1.0,
-                            "total_elapsed_seconds": 3.0,
-                        }
-                    ]
+                    "verifier_timing": {
+                        "layer_count": 61,
+                        "attention_seconds": 10.0,
+                        "ffn_seconds": 20.0,
+                        "moe_router_seconds": 2.0,
+                        "moe_routed_seconds": 3.0,
+                        "moe_shared_seconds": 4.0,
+                        "layer_total_seconds": 31.0,
+                    },
+                    "mtp_shared_head_cache_eviction": {
+                        "enabled": True,
+                        "tensor_name": "model.layers.61.shared_head.head.weight",
+                        "removed_entries": 1,
+                    },
                 }
             ],
-        )
+        }
+
+    def fake_warm_fp8_mtp_prompt_prefill_cache_from_tokens(model_id, token_ids, *, prompt_text, layer_count):
+        captured["warmup"] = {
+            "model_id": model_id,
+            "token_ids": list(token_ids),
+            "prompt_text": prompt_text,
+            "layer_count": layer_count,
+        }
+        return {
+            "ready": True,
+            "blockers": [],
+            "layers_executed": 61,
+            "expected_layers_executed": 61,
+            "anti_cheat_passed": True,
+            "mtp_shared_head_warmup": {
+                "enabled": True,
+                "ready": True,
+                "head_name": "model.layers.61.shared_head.head.weight",
+            },
+        }
 
     monkeypatch.setattr(web.main, "_memory_guard_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(web.main, "_formatted_chat_prompt", lambda *args, **kwargs: ("prepared", 1, True))
     monkeypatch.setattr(web.main, "_encode_with_catalog_tokenizer", lambda model_id, text: ([1, 2, 3], []))
-    monkeypatch.setattr(web.main, "_decode_with_catalog_tokenizer", lambda model_id, ids: ("answer", []))
-    monkeypatch.setattr(web.main, "run_fp8_decode_loop", fake_run_fp8_decode_loop)
+    monkeypatch.setattr(
+        web.main,
+        "warm_fp8_mtp_prompt_prefill_cache_from_tokens",
+        fake_warm_fp8_mtp_prompt_prefill_cache_from_tokens,
+    )
+    monkeypatch.setattr(web.main, "run_fp8_mtp_batched_generate_from_tokens", fake_run_fp8_mtp_batched_generate_from_tokens)
     monkeypatch.setattr(web.main, "_speed_status_payload", lambda model_id: {})
     monkeypatch.setattr(web.main, "_model_guardrails", lambda model_id, max_new_tokens=None: {"ready": True})
 
@@ -1168,11 +1238,110 @@ def test_run_chat_payload_routes_deepseek_to_fp8_decode_loop(monkeypatch) -> Non
     )
 
     assert payload["ready"] is True
-    assert payload["strategy"] == "deepseek-fp8-pack"
+    assert payload["strategy"] == "deepseek-fp8-mtp-batched-exact"
     assert payload["generated_text"] == "answer"
     assert payload["fp8_runtime"]["fp8_pack"]["scattered_reads"] == 0
-    assert payload["fp8_runtime"]["timing_summary"]["attention_seconds"] == 2.0
-    assert captured == {"model_id": "deepseek-v3", "token_ids": [1, 2, 3], "layer_count": None, "max_new_tokens": 1}
+    assert payload["generation_speed"]["generation_seconds_per_token"] == 12.345
+    assert payload["timings"]["fp8_attention"] == 10.0
+    assert payload["timings"]["fp8_ffn"] == 20.0
+    assert payload["timings"]["fp8_router"] == 2.0
+    assert payload["fp8_runtime"]["regular_tensor_cache"]["hits"] == 9
+    assert payload["fp8_runtime"]["mtp_batched_exact"]["anti_cheat_passed"] is True
+    assert payload["fp8_runtime"]["mtp_batched_exact"]["warmup_proof"]["anti_cheat_passed"] is True
+    assert payload["fp8_runtime"]["mtp_batched_exact"]["mtp_shared_head_warmup"]["ready"] is True
+    assert payload["fp8_runtime"]["mtp_batched_exact"]["mtp_shared_head_cache_eviction"]["removed_entries"] == 1
+    assert payload["fp8_runtime"]["mtp_batched_exact"]["verifier_timing"]["layer_count"] == 61
+    assert captured["warmup"] == {
+        "model_id": "deepseek-v3",
+        "token_ids": [1, 2, 3],
+        "prompt_text": "prepared",
+        "layer_count": None,
+    }
+    captured.pop("warmup")
+    assert captured == {
+        "model_id": "deepseek-v3",
+        "token_ids": [1, 2, 3],
+        "prompt_text": "prepared",
+        "layer_count": None,
+        "max_visible_tokens": 1,
+        "k": 8,
+        "max_passes": 20,
+        "prefer_eos_after_punctuation": True,
+    }
+
+
+def test_run_chat_payload_can_route_deepseek_to_gpu_paged_backend(monkeypatch) -> None:
+    from pcketlm.app import web
+
+    captured = {}
+
+    def fake_run_local_deepseek_paged_decode_loop(model_id, token_ids, **kwargs):
+        captured.update({"model_id": model_id, "token_ids": list(token_ids), **kwargs})
+        return SimpleNamespace(
+            passed=True,
+            cuda_available=True,
+            device="cuda",
+            device_name="Fake RTX",
+            torch_version="test",
+            prompt_token_ids=list(token_ids),
+            generated_token_ids=[42],
+            start_layer=0,
+            layer_count=61,
+            config_hidden_layers=61,
+            positions_completed=4,
+            final_top_token_ids=[42, 7],
+            final_top_logits=[3.0, 1.0],
+            cache_sequence_lengths={0: 4},
+            step_summaries=[{"position": 0, "phase": "prompt"}],
+            resident_budget_bytes=12 * 1024**3,
+            peak_resident_bytes=3 * 1024**3,
+            final_resident_bytes=2 * 1024**3,
+            pager_loads=61,
+            pager_evictions=2,
+            pager_cache_hits=1,
+            pager_cache_misses=61,
+            pager_prefetch_submitted=0,
+            pager_prefetch_completed=0,
+            tail_elapsed_seconds=0.5,
+            elapsed_seconds=2.5,
+            blockers=[],
+            note="fake gpu pass",
+        )
+
+    def fail_mtp(*args, **kwargs):
+        raise AssertionError("GPU mode should not call the CPU MTP route")
+
+    monkeypatch.setattr(web.main, "_memory_guard_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web.main, "_formatted_chat_prompt", lambda *args, **kwargs: ("prepared", 1, True))
+    monkeypatch.setattr(web.main, "_encode_with_catalog_tokenizer", lambda model_id, text: ([1, 2, 3], []))
+    monkeypatch.setattr(web.main, "_decode_with_catalog_tokenizer", lambda model_id, ids: ("gpu answer", []))
+    monkeypatch.setattr(web.main, "run_local_deepseek_paged_decode_loop", fake_run_local_deepseek_paged_decode_loop)
+    monkeypatch.setattr(web.main, "run_fp8_mtp_batched_generate_from_tokens", fail_mtp)
+    monkeypatch.setattr(web.main, "_speed_status_payload", lambda model_id: {})
+    monkeypatch.setattr(web.main, "_model_guardrails", lambda model_id, max_new_tokens=None: {"ready": True})
+
+    payload = _run_chat_payload(
+        {
+            "model_id": "deepseek-v3",
+            "prompt": "hello",
+            "mode": "GPU (CUDA paged)",
+            "runtime_backend": "gpu",
+            "max_new_tokens": 1,
+        }
+    )
+
+    assert payload["ready"] is True
+    assert payload["strategy"] == "deepseek-fp8-gpu-paged"
+    assert payload["generated_text"] == "gpu answer"
+    assert payload["generation_speed"]["generation_seconds_per_token"] == 2.5
+    assert payload["fp8_runtime"]["gpu_paged"]["device_name"] == "Fake RTX"
+    assert payload["fp8_runtime"]["gpu_paged"]["pager_loads"] == 61
+    assert payload["timings"]["fp8_layer_total"] == 2.0
+    assert captured["model_id"] == "deepseek-v3"
+    assert captured["token_ids"] == [1, 2, 3]
+    assert captured["device"] == "cuda"
+    assert captured["require_cuda"] is True
+    assert captured["layer_count"] == 61
 
 
 def test_run_chat_payload_blocks_before_generation_when_free_ram_is_too_low(monkeypatch) -> None:

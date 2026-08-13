@@ -1638,3 +1638,95 @@ Decision: do not keep tuning this dequant kernel in isolation. The next phase sh
 - Generate the Kaggle kernel as a private notebook by default after the script worker started with CPU Torch even while Kaggle reported `NvidiaTeslaT4`. Manual browser verification proved Kaggle notebooks can see CUDA on this account, so the autonomous runner should use the same execution shape.
 - Keep CUDA Torch repair in the generated Kaggle code, but treat repair failure as evidence and continue to emit the smoke JSON instead of crashing before the result markers.
 - Probe multiple Python interpreters inside the generated Kaggle notebook and run the smoke payload under the first CUDA-capable one. This covers Kaggle images where the notebook launcher uses `/usr/bin/python3` with CPU Torch while CUDA Torch may live under `/opt/conda/bin/python`.
+
+## PLM-13 Real DeepSeek GPU Validation
+- Use HuggingFace HTTP range reads for the cloud real-weight gate instead of trying to clone or store the full DeepSeek V3 source in Kaggle. The validator reads safetensors headers plus only the tensor ranges required for a bounded layer.
+- Keep the first real GPU gate to one routed layer (`layer=3`) because it proves actual FP8 DeepSeek attention, router, selected experts, and shared expert math on CUDA without exceeding free notebook disk.
+- Keep local CPU behavior unchanged by making CUDA opt-in through `PCKETLM_ENABLE_CUDA_FP8=1` or `PCKETLM_FP8_DEVICE=cuda`. CPU native C paths are not called with CUDA tensors.
+- Treat the remote-layer validator as an iteration gate, not the PLM-13 done gate. Done still requires coherent full/effective DeepSeek decode at `<=2s/token`.
+- Separate cold remote-range timing from resident GPU timing. Cold HTTP range + per-call dequant proves availability and correctness, but the target architecture must keep the active layer weights resident or paged into GPU memory before decode.
+- Use FP16 compute for the Kaggle T4 path. T4 is fast at FP16 but not BF16; BF16 remains useful as a quality/reference dtype on hardware that supports it well.
+- Cache selected expert gate/up/down stacks after the resident layer chooses experts. Re-stacking those tensors every token would turn a good CUDA matmul path back into a memory-copy benchmark.
+- Measure multi-layer residency before building a full scheduler. The 3-layer Kaggle row uses `5.64 GB` resident weight memory and still projects under `2s/token`, so the next product path is an active-window/paged GPU residency engine rather than trying to keep all DeepSeek layers resident at once.
+- Implement the first paging proof as a validation-time resident layer pager, not as default product routing. It keeps the active layer protected, evicts least-recently-used resident layers after each layer forward, and reports cold load/dequant time separately from the earlier resident benchmark rows.
+- Keep prefetch optional and default it to `0` for free Kaggle T4 validation. A one-layer prefetch can improve overlap later, but the first gate should prove load/evict correctness without increasing transient VRAM pressure.
+
+## PLM-15 Watchdog
+- Replace interval-based PLM-13 resume automation with a continuous watchdog loop. The loop checks PLM-13 in Linear, exits on Done/Canceled/blocked, otherwise launches `codex exec` with the PLM-13 resume prompt and immediately loops again after Codex exits.
+- Use a lock file and PID file under `state\auto_resume` so a second watchdog process exits instead of launching a parallel resume loop.
+- Use a stop file plus stop script as the single-command operator stop: `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\isale\Documents\pcketlm\tools\stop_auto_resume_plm13_watchdog.ps1"`.
+- Try `schtasks /Create /TN PocketLM-PLM13-Watchdog /SC ONLOGON /TR <watchdog command> /F` first. On this machine Windows returns `Access is denied`, so install a Startup-folder command instead at `C:\Users\isale\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PocketLM-PLM13-Watchdog.cmd`.
+
+## PLM-13 Local GPU Residency
+- Move the next DeepSeek speed work from remote HTTP-range validation into a local resident-layer pager that reads the existing local FP8 source or FP8 pack through the tensor catalog.
+- Keep the local pager bounded and opt-in through diagnostics for now. It is product-shaped, but it must not become the default chat route until full/effective decode timing proves the resident-window path on a real CUDA worker.
+- Estimate resident GPU memory from headers before payload loads. For DeepSeek V3 layer 3 with 8 selected experts, the real catalog reports about `587.31 MB` source bytes and `1.17 GB` dequantized resident bytes; a `12 GB` budget fits about `11` dequantized active layers by this estimate.
+- Use the resident Kaggle multi-layer measurement `0.0289216s/layer` as a labeled projection only. It is valid evidence for the hot resident math shape, not a claim that local product decode is already `<=2s/token`.
+- Add prefetch as an explicit diagnostic option, not a default assumption. The first correctness gate is resident-window semantics; the speed gate then checks whether background layer loads overlap with CUDA compute on the real worker.
+- Stream the local `lm_head` tail in row chunks for resident-pager validation. This keeps the token-decision proof bounded in memory and avoids treating a hidden-state-only layer probe as a complete decode.
+- Carry MLA KV cache through the local resident layer API before attempting multi-token decode timing. A fast no-cache loop would be misleading because it would ignore previous context.
+- Use float32 for local CPU diagnostics and fp16 for CUDA diagnostics in the resident-pager validator. CPU float16 can hit PyTorch dtype support edges that are unrelated to the GPU path being built.
+- Use embedded-code Kaggle notebooks for real DeepSeek GPU validation instead of cloning the private GitHub repo. Kaggle has CUDA in notebook mode, but it cannot clone the private repo without credentials, and embedding the remote-range validator avoids sending GitHub secrets to Kaggle.
+- Treat Kaggle remote-range runs as GPU math and paging evidence, not final product completion. They prove real DeepSeek FP8 layers and resident/paged behavior on Tesla T4, but they do not prove the local 688 GB FP8 pack can be read fast on that worker.
+- Add a standalone GPU readiness gate instead of hiding hardware checks inside validation scripts. `tools\deepseek_gpu_ready.py` is the operator-facing answer: catalog ready + FP8 pack ready + CUDA ready means run the local pager; missing CUDA is a clean hardware blocker, not a code blocker.
+- Treat Kaggle's official DeepSeek V3 model source as a validation input, not the final runtime storage answer. It mounts the full FP8 artifact and builds the catalog correctly, but measured one-layer local pager timing is still dominated by input/tail reads and projects orders of magnitude above `<=2s/token`.
+
+## PLM-13 Exact CPU Local Speed
+- Use exact in-process prompt prefill reuse for repeated local DeepSeek sessions with identical model/source/pack/prompt/window/tail/dtype. This is a valid lossless session acceleration because the cached object is cloned KV state plus top-k evidence from the exact prior prefill, not a guessed answer or skipped layer.
+- Keep FP8 prefill cache bounded by `PCKETLM_FP8_PREFILL_CACHE_ENTRIES`, default `4`, and allow `0` to disable it for equivalence/debug runs.
+- Default DeepSeek dense FP8 MLP to the existing native full-MLP path up to `512 MB`, because real dense layer measurements show the old `192 MB` cap forced a much slower exact fallback.
+- Default streamed FP8 `lm_head` chunks to `65536` rows. It is memory-heavier but exact, and the direct tail benchmark showed the best local timing among tested chunk sizes while preserving top-k.
+- Treat the current CPU blocker as measured compute bandwidth, not storage: the latest cached 8-layer next-token row has `0` scattered reads and still spends `17.585s` in tail, `10.019s` in FFN, and `5.241s` in attention.
+- Add an exact full `lm_head` cache for DeepSeek FP8 tail by default, capped at `2048 MB`. This spends about `1.85 GB` RAM to avoid re-reading and re-streaming the full vocabulary head every visible token. It preserves the full-quality path because it caches the original BF16 matrix.
+- Do not default the 4 GB attention dequant cache for full DeepSeek. It can help very small 8-layer windows, but the 32-layer scaling proof shows `0` hits and heavy evictions, so it is a memory-heavy small-window trick rather than a full-model solution.
+- Reject native `lm_head` top-k, MLP span cache, and CPU thread-count tuning as default speed paths for this goal. Each preserved output, but none moved the exact full-model direction enough in real rows.
+- Preserve exact streamed `lm_head` tail semantics at `8192` row chunks even when the full `lm_head` matrix is cached in RAM. Wider chunks and whole-matrix top-k are faster, but they can reorder a close 5th token and therefore are not acceptable for the strict exact path.
+- Treat `PCKETLM_FP8_ATTENTION_WEIGHT_CACHE_MB=4096` as an explicit bounded-window diagnostic, not a product default. It cuts the 8-layer row to `14.534s`, but full 62-layer DeepSeek needs far more resident attention weight memory than this laptop can safely provide.
+- Stop pursuing exact CPU disk/cache tweaks as the main DeepSeek unblock. The full 62-layer proof has `0` scattered reads and tail `1.327s`; the remaining wall is attention `186.970s` and FFN `167.654s`.
+- Default the FP8 attention cache to `4096 MB` with `prefix` policy after the full 62-layer exact row improved from `386.038s` to `275.327s`. This is still not enough for the target, but it is a real exact win and better than the old no-RAM-cache default.
+- Do not raise the default to `8192 MB` on this laptop. It adds RAM pressure and did not improve the measured 32-layer total despite more attention hits.
+- Default dequantized FP8 attention hot-cache hits to `torch.from_file` mmap tensors. The full 62-layer top-k stayed `[223, 260, 343, 14, 295]`, and generated-token wall improved to `245.935s`.
+- Default packed MLP span reads to mmap-backed buffers. The old copy path remains behind `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1` for debugging.
+- Keep native flash MLA opt-in only. It is exact enough for smaller rows but changed the close full-model 5th top-k token in the strict proof, so it is not acceptable as the main exact path.
+- Keep the attention RAM cache at `4096 MB`; `6144 MB` was tested and rejected because total generated-token wall regressed on the 32-layer row.
+## Phase Exact CPU Goal / Cached Verifier Decisions
+
+- Exact candidate batching is allowed only as verification: DeepSeek FP8 still computes the logits/top-1 that decide accepted tokens. Candidate tokens are not trusted unless the verifier matches them.
+- Cached FP8 verifier continues from prompt KV instead of re-running prompt+candidate from scratch. This keeps quality exact and removes duplicate prompt work.
+- Cached attention now supports multi-token continuation by masking future candidate positions while allowing all previous KV positions.
+- Native `fp8_mlp_many` remains valid for one token, but is disabled for batched hidden rows because it computes every selected expert against the full batch. Batched MoE now uses per-expert routed rows.
+- `PCKETLM_FP8_CPU_THREADS` and `PCKETLM_FP8_BATCH_CPU_THREADS` are opt-in only. Forced 4-thread execution helped small probes but hurt deeper/full runs.
+- `PCKETLM_FP8_MLP_SPAN_CACHE_MIN_LAYER` and `PCKETLM_FP8_MLP_SPAN_CACHE_POLICY=preserve-full` exist for experiments, but are not recommended by default because the 4 GB cache hit path was slower under real memory pressure.
+- Packed expert MLP spans now default to sequential native copy rather than mmap memoryviews. On the external SSD, lazy mmap page faults were slower for routed expert batches. `PCKETLM_ENABLE_FP8_PACK_MMAP_SPANS=1` restores the old mmap span path for experiments; `PCKETLM_DISABLE_FP8_PACK_MMAP_SPANS=1` still forces copy.
+- Exact FP8 live generation uses DeepSeek's own verified `next_token_id` as the first candidate in every chunk. This guarantees at least one exact accepted token per pass and prevents a draft model from replacing DeepSeek's first decision.
+- A short draft is allowed in the FP8 live loop if it produced any tokens; the verifier pads behind DeepSeek's forced first token. This avoids aborting when small local drafts emit fewer tokens than requested.
+- D-drive DeepSeek sources are first-class metadata roots for tokenizer/config loading via tensor catalog fallback.
+- Add `repeat-next` as a labeled exact verifier mode, not a quality shortcut. It is allowed because DeepSeek's own current `next_token_id` is only used as a candidate proposal; the full FP8 verifier still decides every accepted token and records full layer anti-cheat counts.
+- Defer FP8 live-loop correction commits into the next candidate chunk. This removes an extra one-token full verifier call after mismatches while preserving exactness, because the correction token is not considered committed until the following chunk verifies it as the next DeepSeek token.
+- Keep `tools\bench_fp8_repeat_next.py` as the real long-run CPU proof harness because it saves progress after each pass. Long DeepSeek runs must not depend on one final JSON write after 20-30 minutes of compute.
+- Apply DeepSeek's own chat wrapper when `tokenizer_config.json` exposes `<｜User｜>` and `<｜Assistant｜>`. Raw prompts are no longer acceptable evidence for DeepSeek chat quality.
+- Do not count whitespace-only or near-blank repeat-next generations as meeting the useful local DeepSeek goal, even if they are exact and under `10s/token`. Speed proof and useful-answer proof are now separate gates.
+## PLM-13 Exact CPU Useful Answer Decisions
+
+- For DeepSeek V3 normal chat, trust `config.json` `num_hidden_layers=61` over the catalog's physical `62` layer indices. The extra physical layer is accounted for by `num_nextn_predict_layers=1` and must not be run as part of ordinary assistant generation.
+- Stop FP8 decode/benchmark generation at configured EOS tokens and decode only visible tokens before EOS for user-facing text. Raw token traces stay in JSON evidence for debugging.
+- A short EOS-ended answer such as `Hello!!` is allowed to pass the useful-text gate even if it is shorter than the long-answer default thresholds; speed target evaluation remains separate.
+
+## PLM-13 Exact CPU Native Matrix Decisions
+
+- Keep weighted native FP8 many-MLP enabled behind the existing native FP8 switches. It is lossless against the previous route-combine path and removes Python per-expert combine overhead, but it is only a small win (`1.181x` on one routed MoE layer).
+- Enable FP8 native lm_head top-k by default and allow `PCKETLM_DISABLE_NATIVE_LM_HEAD_TOPK=1` to turn it off. It preserves top-k on the real DeepSeek probes and helps the cached lm_head path avoid Torch float matmul.
+- Do not enable `PCKETLM_ENABLE_FUSED_DS_ATTENTION` by default. The real 8-layer probe preserved top token ids but was slower than the current Torch materialized attention path.
+- Keep `PCKETLM_ENABLE_NATIVE_FP8_ATTENTION_LINEAR` opt-in only. The first real probe preserved top token ids but made attention slower, so it is evidence rather than the production path.
+- Keep exact full lm_head prefetch enabled by default for FP8 single-token forward. It is lossless and hides most of the final 1.85 GB head read behind layer compute.
+- Keep attention prefetch opt-in only. On the real full 61-layer row it competed with memory/disk and made total wall time worse despite reducing measured attention wait.
+- Do not use DeepSeek V3's MTP layer as an acceptance source yet. The current local implementation's MTP top candidates did not match normal exact next-token outputs on the probe, so it fails the exactness goal.
+- Keep the native BF16/FP16 `u16_weight_linear_f32` attention projection path opt-in through `PCKETLM_ENABLE_NATIVE_U16_WEIGHT_LINEAR=1`. On real DeepSeek it was slower than MKL-backed Torch and introduced small logit drift, so it is a diagnostic kernel, not the exact default.
+- Keep the FP8 hot cache enabled. Turning it off made the 16-layer exact row much worse, confirming the current path is already relying on disk-backed dequant reuse correctly.
+- Do not raise the default attention RAM cache above `4096 MB` on this laptop. `8192 MB` helps a bounded 16-layer second token, but it consumes about `6 GB` before full-model scale and risks pushing the 16 GB machine into paging.
+- Do not change `PCKETLM_FP8_PACK_PREFETCH_WORKERS` default from `8` based on the shallow 16-layer win at `2` workers. The 32-layer validation reversed the result, so worker count remains an opt-in tuning knob.
+- Use DeepSeek's MTP layer only as an exact-verifier draft source. It can propose the correct first chat token and sometimes a useful prefix, but verifier acceptance is still too low to solve local CPU speed by itself.
+- Keep `PCKETLM_ENABLE_TORCH_U16_WEIGHT_LINEAR` opt-in. BF16/FP16 CPU projection math is faster in shallow attention probes, but it changes logits and can reorder close top-k positions, so the strict path continues to use FP32 Torch/MKL projections.
+- Count a verifier correction token only once in long-run evidence. A correction is visible immediately for progress, but when the next pass verifies that same token it only commits KV state; it must not append another copy to the generated-token list.
+- Allow the MTP draft benchmark to prefer EOS after punctuation only as a proposal heuristic. This is not a quality shortcut because the full DeepSeek FP8 verifier still has to return the same EOS token before it is accepted.
+- Keep MTP generation as a proof/diagnostic path, not the default local CPU answer. The 10-visible-token run was exact, but MTP accepted about one useful token per full verifier pass, so it cannot turn this laptop's CPU path into `<=10s/token`.

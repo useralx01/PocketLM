@@ -84,3 +84,16 @@ def test_native_lm_head_topk_matches_torch_for_fp16_and_bf16() -> None:
         expected_logits, expected_offsets = torch.topk(expected, k=5)
         assert torch.equal(native_ids, expected_offsets.to(torch.int64) + 100)
         assert torch.allclose(native_logits, expected_logits, atol=1e-4, rtol=1e-4)
+
+
+def test_native_u16_weight_linear_matches_torch_for_fp16_and_bf16() -> None:
+    from pcketlm.native import u16_weight_linear_f32
+
+    torch.manual_seed(987)
+    for dtype in (torch.float16, torch.bfloat16):
+        hidden = (torch.randn((2, 3, 32), dtype=torch.float32) * 0.2)
+        weight = (torch.randn((41, 32), dtype=torch.float32) * 0.2).to(dtype)
+        native = u16_weight_linear_f32(hidden, weight)
+        expected = torch.nn.functional.linear(hidden.float(), weight.float())
+        assert native.shape == expected.shape
+        assert torch.allclose(native, expected, atol=1e-4, rtol=1e-4)

@@ -1,0 +1,501 @@
+{
+  "model_id": "deepseek-v3",
+  "token_id": 100,
+  "start_layer": 0,
+  "layer_count": 16,
+  "executed_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "hidden_shape": [
+    1,
+    1,
+    7168
+  ],
+  "embedding": {
+    "model_id": "deepseek-v3",
+    "token_id": 100,
+    "output_shape": [
+      1,
+      1,
+      7168
+    ],
+    "loaded_bytes": 14336,
+    "output_materialized": true,
+    "blockers": [],
+    "ready": true
+  },
+  "tail": {
+    "model_id": "deepseek-v3",
+    "input_shape": [
+      1,
+      1,
+      7168
+    ],
+    "top_token_ids": [
+      88931,
+      113722,
+      102838,
+      90881,
+      98014
+    ],
+    "top_logits": [
+      7.205172061920166,
+      7.163194179534912,
+      6.9534196853637695,
+      6.875451564788818,
+      6.8730926513671875
+    ],
+    "chunk_rows": 8192,
+    "chunk_count": 16,
+    "loaded_lm_head_bytes": 0,
+    "blockers": [],
+    "ready": true
+  },
+  "step_summaries": [
+    {
+      "layer_index": 0,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "dense",
+      "selected_experts": [],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.723286200023722,
+      "ffn_elapsed_seconds": 0.6698141999950167,
+      "moe_routed_elapsed_seconds": 0.0,
+      "moe_shared_elapsed_seconds": 0.0,
+      "total_elapsed_seconds": 18.37859170002048,
+      "blockers": []
+    },
+    {
+      "layer_index": 1,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "dense",
+      "selected_experts": [],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.8803727000195067,
+      "ffn_elapsed_seconds": 0.6823214000032749,
+      "moe_routed_elapsed_seconds": 0.0,
+      "moe_shared_elapsed_seconds": 0.0,
+      "total_elapsed_seconds": 4.103547599981539,
+      "blockers": []
+    },
+    {
+      "layer_index": 2,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "dense",
+      "selected_experts": [],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.72907210001722,
+      "ffn_elapsed_seconds": 0.7823886000260245,
+      "moe_routed_elapsed_seconds": 0.0,
+      "moe_shared_elapsed_seconds": 0.0,
+      "total_elapsed_seconds": 3.8593810999882407,
+      "blockers": []
+    },
+    {
+      "layer_index": 3,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        23,
+        147,
+        164,
+        168,
+        176,
+        179,
+        208,
+        211
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.79213630000595,
+      "ffn_elapsed_seconds": 1.4630253999785054,
+      "moe_routed_elapsed_seconds": 0.036025699984747916,
+      "moe_shared_elapsed_seconds": 0.08666979998815805,
+      "total_elapsed_seconds": 4.737615299993195,
+      "blockers": []
+    },
+    {
+      "layer_index": 4,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        11,
+        115,
+        117,
+        137,
+        150,
+        158,
+        195,
+        219
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.7317194000061136,
+      "ffn_elapsed_seconds": 1.3865845999971498,
+      "moe_routed_elapsed_seconds": 0.03641000000061467,
+      "moe_shared_elapsed_seconds": 0.08265669998945668,
+      "total_elapsed_seconds": 4.518170299998019,
+      "blockers": []
+    },
+    {
+      "layer_index": 5,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        57,
+        82,
+        93,
+        140,
+        235,
+        237,
+        247,
+        252
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.8414566999999806,
+      "ffn_elapsed_seconds": 1.336444400018081,
+      "moe_routed_elapsed_seconds": 0.04589140001917258,
+      "moe_shared_elapsed_seconds": 0.09404070000164211,
+      "total_elapsed_seconds": 4.669377100013662,
+      "blockers": []
+    },
+    {
+      "layer_index": 6,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        69,
+        75,
+        78,
+        136,
+        172,
+        177,
+        190,
+        196
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.67974970000796,
+      "ffn_elapsed_seconds": 1.4399565000203438,
+      "moe_routed_elapsed_seconds": 0.03508299999521114,
+      "moe_shared_elapsed_seconds": 0.08075140000437386,
+      "total_elapsed_seconds": 4.72865720000118,
+      "blockers": []
+    },
+    {
+      "layer_index": 7,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        10,
+        134,
+        137,
+        152,
+        153,
+        218,
+        226,
+        236
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.6328224999888334,
+      "ffn_elapsed_seconds": 1.317684499983443,
+      "moe_routed_elapsed_seconds": 0.03841529999044724,
+      "moe_shared_elapsed_seconds": 0.07536210000398569,
+      "total_elapsed_seconds": 4.325357599998824,
+      "blockers": []
+    },
+    {
+      "layer_index": 8,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        38,
+        39,
+        143,
+        150,
+        195,
+        211,
+        232,
+        240
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.5500450000108685,
+      "ffn_elapsed_seconds": 1.31404699999257,
+      "moe_routed_elapsed_seconds": 0.03563060000305995,
+      "moe_shared_elapsed_seconds": 0.08042539999587461,
+      "total_elapsed_seconds": 4.253448099974776,
+      "blockers": []
+    },
+    {
+      "layer_index": 9,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        35,
+        53,
+        57,
+        96,
+        98,
+        139,
+        149,
+        210
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.6843647000205237,
+      "ffn_elapsed_seconds": 1.2806726999988314,
+      "moe_routed_elapsed_seconds": 0.035256800008937716,
+      "moe_shared_elapsed_seconds": 0.08710579999024048,
+      "total_elapsed_seconds": 4.402854500018293,
+      "blockers": []
+    },
+    {
+      "layer_index": 10,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        10,
+        17,
+        84,
+        92,
+        129,
+        134,
+        149,
+        212
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.99314389997744,
+      "ffn_elapsed_seconds": 1.3027637000195682,
+      "moe_routed_elapsed_seconds": 0.03739169999607839,
+      "moe_shared_elapsed_seconds": 0.0921047999872826,
+      "total_elapsed_seconds": 4.745667800016236,
+      "blockers": []
+    },
+    {
+      "layer_index": 11,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        4,
+        31,
+        84,
+        117,
+        123,
+        193,
+        198,
+        202
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.649622199998703,
+      "ffn_elapsed_seconds": 1.241655300022103,
+      "moe_routed_elapsed_seconds": 0.035741300001973286,
+      "moe_shared_elapsed_seconds": 0.08600119999027811,
+      "total_elapsed_seconds": 4.248222700000042,
+      "blockers": []
+    },
+    {
+      "layer_index": 12,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        49,
+        98,
+        99,
+        114,
+        123,
+        172,
+        190,
+        237
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.701984999992419,
+      "ffn_elapsed_seconds": 1.2728919000073802,
+      "moe_routed_elapsed_seconds": 0.03591279999818653,
+      "moe_shared_elapsed_seconds": 0.07975910001550801,
+      "total_elapsed_seconds": 4.578647199989064,
+      "blockers": []
+    },
+    {
+      "layer_index": 13,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        64,
+        78,
+        85,
+        109,
+        121,
+        141,
+        199,
+        210
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.8250278999912553,
+      "ffn_elapsed_seconds": 1.3188727000087965,
+      "moe_routed_elapsed_seconds": 0.035225800005719066,
+      "moe_shared_elapsed_seconds": 0.08342429998447187,
+      "total_elapsed_seconds": 4.534283399989363,
+      "blockers": []
+    },
+    {
+      "layer_index": 14,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        34,
+        81,
+        83,
+        98,
+        120,
+        198,
+        202,
+        217
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.612999299977673,
+      "ffn_elapsed_seconds": 1.2123095999995712,
+      "moe_routed_elapsed_seconds": 0.03465320001123473,
+      "moe_shared_elapsed_seconds": 0.08901120000518858,
+      "total_elapsed_seconds": 4.277978800004348,
+      "blockers": []
+    },
+    {
+      "layer_index": 15,
+      "ready": true,
+      "output_shape": [
+        1,
+        1,
+        7168
+      ],
+      "ffn_type": "moe",
+      "selected_experts": [
+        63,
+        75,
+        81,
+        173,
+        176,
+        183,
+        228,
+        235
+      ],
+      "cache_sequence_length": 1,
+      "attention_elapsed_seconds": 2.8552674999809824,
+      "ffn_elapsed_seconds": 1.1672658000024967,
+      "moe_routed_elapsed_seconds": 0.0351688000082504,
+      "moe_shared_elapsed_seconds": 0.09092290000990033,
+      "total_elapsed_seconds": 4.548251799977152,
+      "blockers": []
+    }
+  ],
+  "tail_elapsed_seconds": 0.5984244999999646,
+  "output_materialized": true,
+  "cache_sequence_lengths": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1,
+    "10": 1,
+    "11": 1,
+    "12": 1,
+    "13": 1,
+    "14": 1,
+    "15": 1
+  },
+  "blockers": [],
+  "ready": true,
+  "wall_seconds": 88.16201599998749,
+  "attention_sum_seconds": 43.88307110001915,
+  "ffn_sum_seconds": 19.188698300073156
+}

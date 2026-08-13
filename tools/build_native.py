@@ -47,10 +47,11 @@ def build_cpp(source: Path, *, force: bool = False) -> Path:
         include_flags = f' /I"{openblas_include}"'
         link_flags = f' /link "{openblas_lib}"'
         post_copy = f'copy /Y "{openblas_dll}" "{NATIVE_DIR / "libopenblas.dll"}" >nul\n'
+    arch_flag = "/arch:AVX512" if source.name == "fp8_linear_avx512.cpp" else "/arch:AVX2"
     batch = (
         "@echo off\n"
         f'call "{vcvars}" >nul\n'
-        f'cl.exe /nologo /O2 /EHsc /std:c++17 /arch:AVX2 /openmp{include_flags} /LD "{source}" /Fe:"{dll}"{link_flags}\n'
+        f'cl.exe /nologo /O2 /EHsc /std:c++17 {arch_flag} /openmp{include_flags} /LD "{source}" /Fe:"{dll}"{link_flags}\n'
         f"{post_copy}"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".cmd", delete=False, encoding="utf-8") as handle:

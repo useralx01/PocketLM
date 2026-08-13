@@ -1,0 +1,18 @@
+{
+  "prompt": "Say hello in one short sentence.",
+  "hf_rendered": "<｜begin▁of▁sentence｜><｜User｜>Say hello in one short sentence.<｜Assistant｜>",
+  "pcketlm_rendered": "<｜begin▁of▁sentence｜><｜User｜>Say hello in one short sentence.<｜Assistant｜>",
+  "match": true,
+  "token_ids": [
+    0,
+    128803,
+    63006,
+    44388,
+    295,
+    834,
+    3107,
+    10175,
+    16,
+    128804
+  ]
+}
