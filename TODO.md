@@ -2,7 +2,7 @@
 
 ## In Progress
 
-- Publish the verified `multi-pc-supervisor` commit as a downloadable private GitHub prerelease.
+- Download and run the private `v0.1.0-multi-pc.1` prerelease on the first additional Windows desktop.
 - Decide whether staged streaming should auto-verify after each rotation in debug mode or only when explicitly requested
 - Decide how much of the live streaming telemetry should appear in the desktop app by default versus debug views
 
