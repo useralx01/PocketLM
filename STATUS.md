@@ -18,6 +18,8 @@ Product direction:
 - Model support is capability-based: Qwen is proven locally; Mixtral is experimental; Kimi K2 and Gemma 3 have fixture-verified GGUF chat contracts; Kronos has a fixture-verified CPU forecast adapter and is explicitly unsupported for chat.
 
 Current summary:
+- The portable build is published to the private GitHub branch `multi-pc-supervisor` with draft PR #1; GitHub's independent Windows runner completed installation, contract tests, and proof upload successfully.
+- Local clean-bootstrap proof passed from a deliberately long extraction path with no models: status `partial`, zero runnable models, local-only reporting, and no outbound telemetry.
 - PocketLM now has a privacy-preserving installation supervisor with a stable random installation ID, sanitized hardware/runtime/model readiness, local API endpoints, CLI proof export, and a Settings screen health view.
 - A one-command Windows setup and launcher now support testing the source build on another desktop without bundling any model weights.
 - GitHub Actions now installs the project on a clean Windows runner, executes the portable contract suite, and uploads the installation proof artifact.

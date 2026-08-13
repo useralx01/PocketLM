@@ -1,5 +1,6 @@
 # Done
 
+- Published the multi-PC build to private GitHub draft PR #1 and verified a clean GitHub-hosted Windows install, focused contract test run, and uploaded proof artifact.
 - Added the local-only multi-PC installation supervisor, sanitized proof schema, stable anonymous installation ID, CLI, API, and Settings screen.
 - Added a Windows installer/launcher and clean-runner GitHub Actions workflow without bundling model weights or enabling outbound telemetry.
 - Created a dedicated `pcketlm` tracking category in Mission Control

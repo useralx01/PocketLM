@@ -2,12 +2,13 @@
 
 ## In Progress
 
-- Publish the multi-PC supervisor build to the private GitHub repository and verify its Windows CI run and downloadable prerelease.
+- Publish the verified `multi-pc-supervisor` commit as a downloadable private GitHub prerelease.
 - Decide whether staged streaming should auto-verify after each rotation in debug mode or only when explicitly requested
 - Decide how much of the live streaming telemetry should appear in the desktop app by default versus debug views
 
 ## Next
 
+- Download the prerelease on each target desktop, run `install-pocketlm.ps1 -StartApp`, and compare the generated installation health reports.
 - Run real model generation on each additional desktop after its local model storage is connected; installation supervision can verify software and hardware without downloading weights, but cannot claim real inference proof without them.
 - Install a chosen Gemma 3 GGUF and run a real measured chat benchmark before promoting Gemma from `Missing`/fixture-verified to locally proven.
 - Install a Kimi K2 GGUF only when storage permits; its production checkpoint is intentionally not downloaded by this storage-light task.
