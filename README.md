@@ -1,31 +1,98 @@
 # PocketLM
 
-PocketLM is a Windows-first local AI runtime and control center. Model weights are never included in this repository.
+**A from-scratch LLM inference runtime that runs DeepSeek-V3 (671B parameters) on a consumer Windows laptop, CPU-only.**
 
-## Test On Another Desktop
+Not a wrapper around Ollama, LM Studio, or llama.cpp for the core path — PocketLM
+implements its own FP8 kernels, MoE dispatch, weight paging, and speculative decoding,
+then proves at runtime that it isn't cheating to get its numbers.
 
-1. Open the private GitHub repository and download the latest prerelease ZIP.
-2. Extract it to a local folder.
-3. Open PowerShell in that folder and run:
+![PocketLM desktop](docs/images/desktop.png)
+
+## Headline result
+
+| | |
+|---|---|
+| Model | DeepSeek-V3, FP8, 61 transformer layers |
+| Hardware | Consumer Windows laptop, **CPU-only**, no GPU, no cloud |
+| Prompt | `Write exactly ten short words about the sky.` |
+| Output | `Blue, vast, endless, clouds, stars,` |
+| Speed | **34.23 s / visible token** — down from 569.11 (**16.6×**) |
+| Layers executed | 122 / 122 verified |
+| Tests | 560 passed, 2 skipped |
+
+Full measured history, component wins, and rejected experiments: **[BENCHMARKS.md](BENCHMARKS.md)**
+
+> **Scope check:** 34 s/token is not a usable chatbot, and this project does not claim
+> to be one. The result is that a 671B-parameter model executes *at all* on hardware
+> that cannot hold it in RAM, and that it got 16.6× faster through measured,
+> individually-proven optimizations. This is a systems and inference-optimization
+> project, not a chat product.
+
+## How it works
+
+A 671B FP8 model is ~1.3 TB on disk. The machine has a fraction of that in RAM, so
+nothing can be resident. PocketLM addresses that in four layers:
+
+**1. Staged weight streaming.** A persisted tensor catalog and execution plan divide
+the model into units scheduled across a *hot* window and a *warm* prefetch window.
+Units rotate warm→hot, refill from an overflow head, and residency survives restarts.
+Write-time checksums verify the cache on demand.
+
+**2. Native FP8 kernels.** 14 hand-written C++ translation units — FP8 linear, an
+AVX-512 FP8 MoE path, MoE dispatch with route-weight combination in C, an attention
+bridge, KV cache, and packed GEMV. Every native path has a kill switch and a Python
+fallback, so the native contribution is measurable: disabling them takes a full
+62-layer pass from `307.894s` to `800.553s`.
+
+**3. Caching.** Exact repeated-prefix reuse (87.085 s → 0.943 s on an 8-layer first
+visible token), a full `lm_head` cache (17.585 s → 1.611 s on the cached tail), and a
+4096 MB FP8 attention cache under a prefix policy.
+
+**4. MTP speculative decoding.** DeepSeek-V3's own multi-token-prediction head proposes
+candidate continuations; the full 61-layer model verifies them in batched sweeps and
+remains the only committer. A depth-10 one-pass tree with top-2048 selection now
+accepts all 10 visible tokens in a **single** verifier sweep.
+
+### Anti-cheat verification
+
+Speed claims for a 671B model on a laptop are trivially fakeable — skip layers, quietly
+drop to Q4, swap in a smaller model, or offload to a GPU. So the runtime instruments
+itself and refuses to record a proof unless the work actually happened:
+
+- `layers_executed` must equal `expected_layers_executed` (122/122 on the headline run)
+- warm-up runs a separate, independently recorded `61/61` layer proof
+- each artifact records `model_id`, quantization, expert routing, and `strategy`
+- the verifier contract enforces one weight sweep per pass
+- any blocker populates a `blockers` array and invalidates the proof
+
+A change is only promoted to default when `anti_cheat_passed` is true and `blockers` is
+empty. [BENCHMARKS.md](BENCHMARKS.md) also lists the optimizations that were built,
+measured, and **rejected** for being slower.
+
+## Beyond DeepSeek
+
+PocketLM is also a general local-model control center: import and validation for
+Hugging Face, single-safetensor, PyTorch, and GGUF sources; a capability-based
+compatibility matrix; Qwen (proven), Mixtral (experimental), Kimi K2 and Gemma 3
+(fixture-verified GGUF chat contracts), and a CPU Kronos forecast adapter.
+
+## Install
+
+Requires Python 3.12+ on Windows. **Model weights are never included** and must be
+supplied locally.
 
 ```powershell
 .\install-pocketlm.ps1 -StartApp
 ```
 
-The installer creates an isolated environment under `%LOCALAPPDATA%\PocketLM\venvs`, installs PocketLM, and writes a sanitized proof to `state\supervisor\install-proof.json`. Keeping the environment there avoids Windows path-length failures even when the ZIP is extracted into a deep folder. Python 3.12 or newer is required. To launch it again later, run `start-pocketlm.ps1`.
+The installer creates an isolated environment under `%LOCALAPPDATA%\PocketLM\venvs`
+(avoiding Windows path-length failures on deep extraction paths) and writes a sanitized
+proof to `state\supervisor\install-proof.json`. Relaunch later with `start-pocketlm.ps1`.
 
-PocketLM can install without model weights. The Settings screen distinguishes a healthy installation with no model (`partial`) from a machine with a runnable model (`ready`). Add models separately on each desktop or connect the storage that already contains them.
+PocketLM installs fine with no models. Settings distinguishes a healthy install with no
+weights (`partial`) from one with a runnable model (`ready`).
 
-## Installation Supervisor
-
-Every copy exposes local-only health endpoints while the app is running:
-
-- `GET http://127.0.0.1:8765/api/supervisor/health` returns the current sanitized report.
-- `POST http://127.0.0.1:8765/api/supervisor/check` runs the check and saves a proof artifact.
-
-The report uses a random installation ID and does not contain usernames, hostnames, IP addresses, local paths, prompts, or model contents. It is never uploaded automatically. GitHub Actions runs the same installer and contract checks on a clean Windows machine for every push and pull request.
-
-## Development
+### Development
 
 ```powershell
 py -3.12 -m venv .venv
@@ -33,69 +100,34 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Project Notes
+Native kernels build via `python tools/build_native.py --force`, which requires a local
+OpenBLAS and copies `libopenblas.dll` next to the built DLLs.
 
-This is the Mission Control tracking category for the `pcketlm` project.
+## Installation supervisor
 
-Use this folder as the single place to track:
+While running, every copy exposes local-only health endpoints:
 
-- what we are building
-- what is in progress
-- what is blocked
-- what is done
-- what broke
-- what decisions we made
+- `GET http://127.0.0.1:8765/api/supervisor/health` — current sanitized report
+- `POST http://127.0.0.1:8765/api/supervisor/check` — run the check, save a proof artifact
 
-Working communication rule:
+Reports use a random installation ID and contain **no** usernames, hostnames, IP
+addresses, local paths, prompts, or model contents. Nothing is uploaded automatically.
+GitHub Actions runs the same installer and contract checks on a clean Windows runner for
+every push.
 
-- when a decision point comes up, present 3 clear options
-- recommend one option explicitly
-- explain why it is recommended
-- include pros, cons, and likely failure risk for all options
-- keep these tracker files updated whenever the project changes
+## Project layout
 
-Bug handling rule:
+| Path | Contents |
+|---|---|
+| `src/pcketlm/core/runtime/` | streaming, FP8 paths, layer bridge, MTP |
+| `src/pcketlm/native/` | C++ kernels (FP8, AVX-512 MoE, attention, KV cache) |
+| `tools/` | benchmark and proof-generation scripts |
+| `state/` | committed JSON proof artifacts |
+| `tests/` | 79 test files |
 
-- if something is clearly bugged, debug it immediately
-- do not turn obvious bug-fix work into a 3-option decision
-- treat debugging as the default action until the broken behavior is understood
+Engineering history lives in [`DECISIONS.md`](DECISIONS.md), [`DONE.md`](DONE.md),
+[`ERRORS.md`](ERRORS.md), and [`LOG.md`](LOG.md).
 
-Main files:
+## License
 
-- [BLUEPRINT.md](C:/Users/isale/Documents/pcketlm/BLUEPRINT.md)
-- [DESKTOP_STATUS_SCREEN.md](C:/Users/isale/Documents/pcketlm/DESKTOP_STATUS_SCREEN.md)
-- [RISK_REGISTER.md](C:/Users/isale/Documents/pcketlm/RISK_REGISTER.md)
-- [STATUS.md](C:/Users/isale/Documents/pcketlm/STATUS.md)
-- [TODO.md](C:/Users/isale/Documents/pcketlm/TODO.md)
-- [DONE.md](C:/Users/isale/Documents/pcketlm/DONE.md)
-- [ERRORS.md](C:/Users/isale/Documents/pcketlm/ERRORS.md)
-- [DECISIONS.md](C:/Users/isale/Documents/pcketlm/DECISIONS.md)
-- [LOG.md](C:/Users/isale/Documents/pcketlm/LOG.md)
-
-Current implementation snapshot:
-
-- desktop test UI exists and launches from the desktop shortcut
-- official `Qwen2.5-14B-Instruct` source is downloaded locally
-- plain full CPU load is still blocked by RAM on this machine
-- staged streaming now includes planning, materialization, verification, rotation, residency tracking, control decisions, and both live `Advance Stream` and `Safe Advance` actions in the desktop app
-- a persisted tensor catalog now exists so the runtime can reason about real tensors and layers instead of only raw streamed byte segments
-- a persisted tensor execution plan now exists so the runtime can reason about grouped execution units instead of only individual tensors
-- the runtime can now load one real tensor or one small grouped execution unit from the original shards on demand
-- the runtime can now also verify loaded tensors and larger grouped execution units against persisted metadata before we attempt real execution math
-- the runtime can now execute a first real CPU-only layer-0 bridge for Qwen using synthetic single-token input and on-demand tensor loading
-- the runtime can now also chain that bridge across multiple real layers, with a live two-layer Qwen pass already working
-- the runtime can now enter that bridge from a real token id through a low-memory embedding-row lookup, and a live token-id-to-layer-stack path is working too
-- the runtime can now continue from that hidden state through final norm and a streamed `lm_head` pass, so a live token-id-to-logits path is working too
-- the runtime can now also run a first repeated greedy decode loop on top of that path, and it now carries a small recent-token history summary even though it is still not true KV/cache-aware decoding
-- the runtime now also supports a pluggable next-token policy layer, a reusable comparative decode benchmark with regression-style summaries, a first real K/V-carrying loop with RoPE applied on the live key path through an explicit stop-aware decode-state object, and a first real text-prompt entry path with instruct-style prompt wrapping, local generation defaults, and basic prompt/session controls
-- the runtime now also has a real GGUF/llama.cpp backend path for Queen/Qwen, using a local merged Qwen2.5-14B-Instruct Q4_K_M GGUF artifact and a standalone llama.cpp runtime
-- the web app now has a `GGUF` mode that can talk to a persistent local `llama-server`, giving fast short responses after the model is already loaded
-- the Load Model screen can now load and unload the GGUF server so the user can free the RAM used by the power-user backend
-- the desktop test UI now also includes a real prompt test panel with prompt input, system prompt override, raw-prompt mode, max-new-tokens control, custom stop-token parsing, and generated output/details wired to the live runtime
-- prompt generation now defaults to a more conservative runtime profile by keeping prompt runs greedy unless sampling is explicitly requested and by choosing a model-aware automatic layer budget when no prompt layer count is forced
-- the automatic prompt layer budget is now deeper for short prompt sessions, so the real Qwen prompt path can use 8 carried layers by default instead of staying artificially shallow
-- prompt prefill now uses a real multi-token causal path in the layer bridge instead of stepping token-by-token, so prompt sessions hand a more faithful cached state into generation and run faster
-- the automatic short-prompt fidelity budget is now raised again, and the live real-Qwen prompt path can use 12 carried layers by default on this machine
-- the automatic short-prompt fidelity budget is now raised again to a more serious default, and the live real-Qwen prompt path can use 24 carried layers by default for short prompt sessions
-- the automatic short-prompt fidelity budget now uses the full carried stack by default for short prompt sessions, and the current live real-Qwen baseline can produce `Hello! How can` on the short `hello world` test
-- the runtime now also supports stronger generation-session controls including `top_p`, `min_new_tokens`, and prompt stop strings, and the desktop app now includes a simple chat-style test surface with persistent local turn history
+[MIT](LICENSE)
