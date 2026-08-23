@@ -54,3 +54,8 @@ src/pcketlm/native/*.lib
 *.exp
 *.lib
 !vendor/**/*.lib
+
+# keep published benchmark proof artifacts cited in BENCHMARKS.md
+!state/phase-*.json
+!state/plm-*.json
+!state/mtp-*.json
