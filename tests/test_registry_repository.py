@@ -50,8 +50,40 @@ def test_load_model_registry_relocates_stale_project_paths(tmp_path: Path, monke
     assert records["qwen-test"].original_path == new_original
 
     payload = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert payload["models"][0]["source_path"] == str(new_original)
-    assert payload["models"][0]["original_path"] == str(new_original)
+    assert payload["models"][0]["source_path"] == "models\\qwen-test\\original"
+    assert payload["models"][0]["original_path"] == "models\\qwen-test\\original"
+
+
+def test_load_model_registry_resolves_portable_relative_paths(tmp_path: Path, monkeypatch) -> None:
+    from pcketlm.core import storage
+
+    monkeypatch.setattr(storage.paths, "project_root", lambda: tmp_path)
+    model_file = tmp_path / "models" / "portable" / "original" / "model.gguf"
+    model_file.parent.mkdir(parents=True)
+    model_file.touch()
+    registry_dir = tmp_path / "state" / "registry"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "models.json").write_text(
+        json.dumps({"models": [{
+            "model_id": "portable",
+            "label": "Portable",
+            "family": "synthetic",
+            "model_type": "dense",
+            "source_path": "models/portable/original",
+            "original_path": "models/portable/original",
+            "format_name": "gguf",
+            "imported": True,
+            "validated": True,
+            "runnable": True,
+            "artifact_paths": ["models/portable/original/model.gguf"],
+        }]}),
+        encoding="utf-8",
+    )
+
+    record = load_model_registry()["portable"]
+
+    assert record.source_path == model_file.parent
+    assert record.artifact_paths == [model_file]
 
 
 def test_registry_lists_qwen_14b_32b_and_moe_entries(tmp_path: Path, monkeypatch) -> None:

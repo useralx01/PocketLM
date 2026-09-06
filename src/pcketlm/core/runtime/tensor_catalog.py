@@ -341,6 +341,11 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
         if partner is not None:
             scale_partners[tensor_name] = partner
 
+    # Preserve the old first-match behavior even if several scales name a weight.
+    weight_scales: dict[str, str] = {}
+    for scale_name, partner_name in scale_partners.items():
+        weight_scales.setdefault(partner_name, scale_name)
+
     for shard_path in source.shard_paths:
         header = _read_safetensors_header(shard_path)
         shard_name = shard_path.name
@@ -370,10 +375,7 @@ def build_tensor_catalog(model_id: str, model_dir: Path) -> TensorCatalog:
                 tensor_role = "scale_companion"
                 weight_partner = scale_partners[tensor_name]
             else:
-                for scale_name, partner_name in scale_partners.items():
-                    if partner_name == tensor_name:
-                        scale_for_weight = scale_name
-                        break
+                scale_for_weight = weight_scales.get(tensor_name)
             tensor_role_counts[tensor_role] = tensor_role_counts.get(tensor_role, 0) + 1
             data_nbytes = int(offsets[1]) - int(offsets[0])
             if is_fp8_dtype(dtype) and tensor_role == "weight":
@@ -447,6 +449,21 @@ def load_tensor_catalog(model_id: str) -> TensorCatalog:
     payload = _load_tensor_catalog_payload(str(catalog_path), mtime_ns)
     payload["catalog_path"] = str(catalog_path)
     return TensorCatalog.from_dict(payload)
+
+
+def load_tensor_catalog_metadata(model_id: str) -> TensorCatalog:
+    """Read fresh metadata without rebuilding every tensor entry.
+
+    The returned object's tensors list is intentionally empty. Call the full
+    loader or indexed lookup whenever actual tensor entries are needed.
+    """
+    catalog_path = tensor_catalog_path(model_id)
+    if not catalog_path.exists():
+        return load_tensor_catalog(model_id)
+    payload = _load_tensor_catalog_payload(str(catalog_path), catalog_path.stat().st_mtime_ns)
+    metadata = {key: value for key, value in payload.items() if key != "tensors"}
+    metadata["catalog_path"] = str(catalog_path)
+    return TensorCatalog.from_dict(metadata)
 
 
 def load_tensor_entry_index(model_id: str) -> dict[str, TensorCatalogEntry]:

@@ -1123,10 +1123,14 @@ def _chat_request_runtime_defaults(payload: dict) -> tuple[str, str, Any | None,
     profile = get_saved_profile(model_id, str(payload.get("profile_id") or ""))
     profile_settings = {} if profile is None else dict(profile.settings)
     mode = str(payload.get("mode") or profile_settings.get("runtime_mode") or (profile.runtime_mode if profile else "Quality"))
-    token_maximum = 64 if _is_gguf_mode(mode) else 16
+    is_gguf = _is_gguf_mode(mode)
+    token_maximum = 32768 if is_gguf else 16
+    # Native tensor smoke-test budgets must not become GGUF chat budgets.
+    # Thinking and the final answer both consume this explicit total limit.
+    default_tokens = int(profile_settings.get("gguf_max_new_tokens") or 4096) if is_gguf else int(profile_settings.get("default_max_new_tokens") or 4)
     max_new_tokens = _clamp_int(
         payload.get("max_new_tokens"),
-        default=int(profile_settings.get("default_max_new_tokens") or 4),
+        default=default_tokens,
         minimum=1,
         maximum=token_maximum,
     )
@@ -1828,7 +1832,7 @@ def _run_chat_payload(payload: dict, should_cancel=None) -> dict:
             model_id,
             effective_prompt,
             max_tokens=max_new_tokens,
-            n_ctx=2048,
+            n_ctx=_clamp_int(payload.get("context_size"), default=65536, minimum=2048, maximum=262144),
             n_threads=runtime_torch_thread_count(),
             stop_strings=list(payload.get("stop_strings") or ["<|im_end|>", "<|im_start|>"]),
             chat_messages=_gguf_chat_messages(payload, prompt, system_prompt),

@@ -6,7 +6,46 @@ import json
 from pathlib import Path
 
 from pcketlm.core.registry.models import ModelRecord
-from pcketlm.core.storage.paths import ensure_base_directories, original_model_root, registry_file
+from pcketlm.core.storage import paths as storage_paths
+from pcketlm.core.storage.paths import (
+    ensure_base_directories,
+    original_model_root,
+    registry_file,
+)
+
+
+def _resolve_registry_path(value: object) -> Path:
+    """Resolve portable registry paths against this PocketLM checkout."""
+    path = Path(str(value or ""))
+    return path if path.is_absolute() else storage_paths.project_root() / path
+
+
+def _portable_registry_path(path: Path) -> str:
+    """Persist in-tree paths relative to the checkout, external paths intact."""
+    try:
+        return str(path.resolve().relative_to(storage_paths.project_root().resolve()))
+    except (OSError, ValueError):
+        return str(path)
+
+
+def _record_from_payload(item: dict) -> ModelRecord:
+    normalized = dict(item)
+    normalized["source_path"] = str(_resolve_registry_path(item.get("source_path")))
+    normalized["original_path"] = str(_resolve_registry_path(item.get("original_path")))
+    normalized["artifact_paths"] = [
+        str(_resolve_registry_path(value)) for value in item.get("artifact_paths", [])
+    ]
+    return ModelRecord.from_dict(normalized)
+
+
+def _record_to_payload(record: ModelRecord) -> dict:
+    payload = record.to_dict()
+    payload["source_path"] = _portable_registry_path(record.source_path)
+    payload["original_path"] = _portable_registry_path(record.original_path)
+    payload["artifact_paths"] = [
+        _portable_registry_path(path) for path in record.artifact_paths
+    ]
+    return payload
 
 
 def _relocate_record_if_needed(record: ModelRecord) -> tuple[ModelRecord, bool]:
@@ -50,7 +89,7 @@ def load_model_registry() -> dict[str, ModelRecord]:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     records = {
-        item["model_id"]: ModelRecord.from_dict(item)
+        item["model_id"]: _record_from_payload(item)
         for item in payload.get("models", [])
     }
     changed = False
@@ -68,7 +107,7 @@ def save_model_registry(records: dict[str, ModelRecord]) -> None:
     """Persist the model registry to disk."""
     ensure_base_directories()
     payload = {
-        "models": [record.to_dict() for record in sorted(records.values(), key=lambda item: item.model_id)]
+        "models": [_record_to_payload(record) for record in sorted(records.values(), key=lambda item: item.model_id)]
     }
     registry_file().write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

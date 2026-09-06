@@ -1,6 +1,8 @@
 # Benchmarks
 
-Every number here comes from a JSON proof artifact committed under [`state/`](state/).
+Every number here was recorded from a JSON proof artifact produced by the benchmark
+tools. Raw generated proof files are intentionally excluded from the clean public
+source snapshot because they can contain machine-specific metadata.
 Nothing is estimated. Each artifact records the model, layer count, generated text,
 timing, and anti-cheat counters for that run.
 
@@ -24,7 +26,7 @@ original FP8 format from local disk.
 | Layers executed | 122 / 122 expected |
 | Anti-cheat | passed |
 
-Proof: [`state/mtp-warm-prefill-mtphead-evict-before-verify-rank-onepass-top2048-depth10-full61-tenvisible.json`](state/mtp-warm-prefill-mtphead-evict-before-verify-rank-onepass-top2048-depth10-full61-tenvisible.json)
+Proof artifact name: `mtp-warm-prefill-mtphead-evict-before-verify-rank-onepass-top2048-depth10-full61-tenvisible.json` (generated locally; not committed).
 
 ## The optimization path
 

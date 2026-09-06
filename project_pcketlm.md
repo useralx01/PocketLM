@@ -90,7 +90,7 @@ Next actions:
 
 ## Useful Commands
 
-From `C:\Users\isale\Documents\pcketlm`:
+From `%USERPROFILE%\Documents\pcketlm`:
 
 ```powershell
 git status --short

@@ -2,6 +2,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+
+pytestmark = pytest.mark.skip(reason="tensor fixtures intentionally omitted from public source snapshot")
 
 
 def _fixture_root(name: str) -> Path:

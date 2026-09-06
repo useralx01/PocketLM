@@ -90,7 +90,17 @@ class FP8PackReader:
             handle.close()
 
     def telemetry(self) -> dict:
-        return dict(self._stats)
+        # Mapped virtual bytes are not resident physical RAM. Reopening a pack
+        # must not accumulate its full size as if that memory were still live.
+        mapped_bytes = sum(len(mapped) for mapped in self._mmaps.values())
+        return {
+            **self._stats,
+            "pack_files_open": len(self._files),
+            "pack_files_accessed": len(self._native_files_seen | set(self._mmaps)),
+            "mmap_bytes_mapped": mapped_bytes,
+            "mmap_bytes_resident": None if mapped_bytes else 0,
+            "mmap_residency_measured": False,
+        }
 
     def get_tensor(self, name: str) -> PackedTensorView:
         entry = self._entry(name)

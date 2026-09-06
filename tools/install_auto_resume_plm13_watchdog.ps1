@@ -1,7 +1,7 @@
 param(
     [string]$TaskName = "PocketLM-PLM13-Watchdog",
     [string]$OldTaskName = "PocketLM-PLM13-AutoResume",
-    [string]$RepoRoot = "C:\Users\isale\Documents\pcketlm",
+    [string]$RepoRoot = (Split-Path $PSScriptRoot -Parent),
     [switch]$StartNow
 )
 

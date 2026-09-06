@@ -64,6 +64,7 @@ function setScreen(screen) {
 }
 
 function setMode(mode) {
+  const previousMode = state.mode;
   state.mode = mode;
   $$("#mode-picker button").forEach((button) => button.classList.toggle("selected", button.dataset.mode === mode));
   const hints = {
@@ -76,7 +77,8 @@ function setMode(mode) {
   };
   const tokenInput = $("#max-new-tokens");
   if (tokenInput) {
-    tokenInput.max = mode === "GGUF" ? 64 : 16;
+    tokenInput.max = mode === "GGUF" ? 32768 : 16;
+    if (mode === "GGUF" && previousMode !== "GGUF") tokenInput.value = 4096;
     if (mode === "Direct Quick") tokenInput.value = 1;
     if (mode === "Direct Agent") tokenInput.value = Math.min(Number(tokenInput.value || 2), 2);
     if (Number(tokenInput.value || 4) > Number(tokenInput.max)) tokenInput.value = tokenInput.max;
@@ -749,7 +751,7 @@ async function sendPrompt(event) {
   const prompt = input.value.trim();
   if (!prompt) return;
   const modelId = state.status?.active_model?.model_id || "qwen2.5-14b-instruct";
-  const maxNewTokens = Number($("#max-new-tokens").value || 4);
+  const maxNewTokens = Number($("#max-new-tokens").value || (state.mode === "GGUF" ? 4096 : 4));
   const historyPayload = chatHistoryPayload();
   const requestPayload = {
     model_id: modelId,
@@ -963,7 +965,7 @@ async function boot() {
     const profile = (state.status?.profiles || []).find((item) => item.profile_id === state.activeProfileId);
     if (!profile) return;
     if (profile.runtime_mode) setMode(profile.runtime_mode);
-    const defaultTokens = profile.settings?.default_max_new_tokens;
+    const defaultTokens = state.mode === "GGUF" ? (profile.settings?.gguf_max_new_tokens || 4096) : profile.settings?.default_max_new_tokens;
     if (defaultTokens) $("#max-new-tokens").value = defaultTokens;
   });
   setChatControlsRunning(false);

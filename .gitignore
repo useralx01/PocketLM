@@ -28,9 +28,7 @@ dist/
 Thumbs.db
 
 # generated runtime state — keep out of source
-state/*
-!state/registry/
-!state/registry/models.json
+state/
 state/gguf-smoke-*.txt
 state/runtime-settings.json
 state/llama-server.json
@@ -55,7 +53,11 @@ src/pcketlm/native/*.lib
 *.lib
 !vendor/**/*.lib
 
-# keep published benchmark proof artifacts cited in BENCHMARKS.md
-!state/phase-*.json
-!state/plm-*.json
-!state/mtp-*.json
+# compiled binaries and model/tensor artifacts are built or supplied locally
+*.dll
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.npy
+tests/fixtures/

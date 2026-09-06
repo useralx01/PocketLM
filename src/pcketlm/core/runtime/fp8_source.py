@@ -85,6 +85,7 @@ from pcketlm.core.runtime.tensor_catalog import (
     find_tensor_catalog_entry,
     is_fp8_dtype,
     load_tensor_catalog,
+    load_tensor_catalog_metadata,
     load_tensor_entry_index,
 )
 
@@ -4817,7 +4818,7 @@ def _preload_packed_mlp_prefixes(
     model_id: str,
     prefixes: list[str],
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-    if not prefixes or not reader_for_model_dir(load_tensor_catalog(model_id).model_dir):
+    if not prefixes or not reader_for_model_dir(load_tensor_catalog_metadata(model_id).model_dir):
         return {}
     workers = min(len(prefixes), _fp8_pack_prefetch_workers())
     if workers <= 1:
@@ -5140,7 +5141,7 @@ def _mask_deepseek_route_groups(
 
 
 def _load_deepseek_route_config(model_id: str) -> dict:
-    catalog = load_tensor_catalog(model_id)
+    catalog = load_tensor_catalog_metadata(model_id)
     config_path = catalog.model_dir / "config.json"
     payload = {}
     if config_path.exists():
@@ -5155,7 +5156,7 @@ def _load_deepseek_route_config(model_id: str) -> dict:
 
 
 def _load_deepseek_config(model_id: str) -> dict:
-    catalog = load_tensor_catalog(model_id)
+    catalog = load_tensor_catalog_metadata(model_id)
     config_path = catalog.model_dir / "config.json"
     payload = {}
     if config_path.exists():

@@ -92,6 +92,17 @@ proof to `state\supervisor\install-proof.json`. Relaunch later with `start-pocke
 PocketLM installs fine with no models. Settings distinguishes a healthy install with no
 weights (`partial`) from one with a runnable model (`ready`).
 
+### Runtime expectations
+
+- GGUF models supported by `llama.cpp` are the practical choice for interactive local
+  chat and the path used by the Hermes integration.
+- PocketLM's native FP8 DeepSeek-V3 671B runtime is experimental research code. It has
+  completed correctness and anti-cheat proof runs, but CPU-only generation from weights
+  stored on an external drive is extremely slow and is not suitable for normal chat.
+- Model compatibility depends on architecture, quantization, available RAM, and the
+  locally installed backend. Model weights, prompts, credentials, and runtime caches are
+  not part of this repository.
+
 ### Development
 
 ```powershell
@@ -122,11 +133,12 @@ every push.
 | `src/pcketlm/core/runtime/` | streaming, FP8 paths, layer bridge, MTP |
 | `src/pcketlm/native/` | C++ kernels (FP8, AVX-512 MoE, attention, KV cache) |
 | `tools/` | benchmark and proof-generation scripts |
-| `state/` | committed JSON proof artifacts |
+| `state/` | ignored local runtime state and proof output |
 | `tests/` | 79 test files |
 
-Engineering history lives in [`DECISIONS.md`](DECISIONS.md), [`DONE.md`](DONE.md),
-[`ERRORS.md`](ERRORS.md), and [`LOG.md`](LOG.md).
+This clean public snapshot omits machine-local engineering journals and raw generated
+proof files. Reproduction commands and summarized measurements remain in
+[`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## License
 

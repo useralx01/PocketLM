@@ -1599,7 +1599,7 @@ def test_run_fp8_decode_loop_uses_pack_when_available(tmp_path: Path, monkeypatc
 
     assert packed.ready is True
     assert packed.fp8_pack["available"] is True
-    assert packed.fp8_pack["pack_files_open"] > 0
+    assert packed.fp8_pack["pack_files_accessed"] > 0
     assert packed.fp8_pack["sequential_reads"] > 0
     assert packed.fp8_pack["scattered_reads"] == 0
 

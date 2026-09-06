@@ -1,5 +1,5 @@
 param(
-    [string]$RepoRoot = "C:\Users\isale\Documents\pcketlm",
+    [string]$RepoRoot = (Split-Path $PSScriptRoot -Parent),
     [string]$TaskName = "PocketLM-PLM13-Watchdog"
 )
 

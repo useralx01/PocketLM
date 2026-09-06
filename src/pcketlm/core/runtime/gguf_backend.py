@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from functools import lru_cache
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,49 @@ LLAMA_SERVER_START_TIMEOUT_SECONDS = 150
 LLAMA_SERVER_STATE_FILE_NAME = "llama-server.json"
 GGUF_EXPECTED_RAM_OVERHEAD = 1.05
 LLAMA_COLD_LOAD_SECONDS_PER_GB = 6.2
+
+
+def _gguf_sampling_settings(model_id: str) -> dict:
+    # Qwen's published thinking/coding profile; do not force greedy decoding
+    # or llama.cpp's generic min_p=0.05 on this reasoning model.
+    if "qwen3.6" in model_id.lower():
+        return {"temperature": 0.6, "top_p": 0.95, "top_k": 20,
+                "min_p": 0.0, "presence_penalty": 0.0, "repeat_penalty": 1.0}
+    return {"temperature": 0}
+
+
+def _gguf_reasoning_settings(model_id: str, max_tokens: int) -> dict:
+    """Reserve final-answer capacity without disabling the thinking phase.
+
+    This is a configurable latency/quality tradeoff, not a lossless model
+    optimization. -1 opts into unlimited thinking; zero is never accepted.
+    """
+    if "qwen3.6" not in model_id.lower() or max_tokens < 64:
+        return {}
+    default = 128 if max_tokens <= 1024 else 512
+    try:
+        requested = int(os.environ.get("POCKETLM_THINKING_BUDGET", str(default)))
+    except ValueError:
+        requested = default
+    if requested == -1:
+        return {}
+    if requested <= 0:
+        requested = default
+    return {
+        "reasoning_budget_tokens": min(requested, max_tokens // 2),
+        "reasoning_budget_message": (
+            "\n\nThe thinking budget is complete. Now give only the final answer "
+            "in the exact format the user requested. Do not continue planning or explaining.\n"
+        ),
+    }
+
+
+def _gguf_memory_flags(model_id: str) -> list[str]:
+    # This installed 35B model's repacked copy exhausted RAM under the host's
+    # normal load. Mapping original GGUF weights passed the bounded RAM checks.
+    if model_id == "qwen3.6-35b-a3b" and os.environ.get("POCKETLM_GGUF_REPACK", "0") != "1":
+        return ["--no-repack"]
+    return []
 
 
 @dataclass(slots=True)
@@ -611,7 +655,53 @@ def _llama_server_is_ready() -> bool:
         return False
 
 
-def _start_llama_server(
+@contextmanager
+def _server_start_lock():
+    """Serialize independent launcher processes so they cannot load duplicate models."""
+    lock_path = state_root() / "llama-server.start.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        deadline = time.monotonic() + LLAMA_SERVER_START_TIMEOUT_SECONDS + 10
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Another Pocket model launch is still in progress.")
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _start_llama_server(selected, *, n_ctx, n_threads, model_id="") -> bool:
+    try:
+        with _server_start_lock():
+            return _start_llama_server_unlocked(
+                selected, n_ctx=n_ctx, n_threads=n_threads, model_id=model_id
+            )
+    except OSError:
+        return False
+
+
+def _start_llama_server_unlocked(
     selected: GGUFModelFile,
     *,
     n_ctx: int,
@@ -620,6 +710,10 @@ def _start_llama_server(
 ) -> bool:
     if _llama_server_is_ready():
         return True
+    # The caller can time out before its child finishes loading. A 503 is not
+    # permission to load a second copy of the model into the same machine.
+    if _llama_server_pid() is not None:
+        return False
     exe = llama_server_path()
     if not exe.exists():
         return False
@@ -642,6 +736,7 @@ def _start_llama_server(
     ]
     if n_threads is not None:
         args.extend(["--threads", str(int(n_threads))])
+    args.extend(_gguf_memory_flags(model_id))
     try:
         stdout = stdout_path.open("ab")
         stderr = stderr_path.open("ab")
@@ -669,7 +764,11 @@ def _start_llama_server(
     while time.monotonic() < deadline:
         if _llama_server_is_ready():
             return True
+        if process.poll() is not None:
+            return False
         time.sleep(1.0)
+    if process.poll() is None:
+        process.terminate()
     return False
 
 
@@ -764,6 +863,11 @@ def _run_gguf_prompt_server(
             "temperature": 0,
         }
         endpoint = "/completion"
+    payload.update(_gguf_sampling_settings(model_id))
+    if chat_messages and "qwen3.6" in model_id.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
+        payload.update(_gguf_reasoning_settings(model_id, int(max_tokens)))
+    reasoning_budget = payload.get("reasoning_budget_tokens")
     if stop_strings:
         payload["stop"] = list(stop_strings)
     request_payload = json.dumps(payload).encode("utf-8")
@@ -786,18 +890,30 @@ def _run_gguf_prompt_server(
         )
     elapsed = round(time.perf_counter() - started, 2)
     generated_text = str(payload.get("content") or "")
+    finish_reason = payload.get("stop_type")
     if chat_messages:
         choices = payload.get("choices") or []
         message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
         generated_text = str(message.get("content") or generated_text)
+        finish_reason = choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
+    generated_text = _clean_stop_text(generated_text, stop_strings)
+    blockers = []
+    if not generated_text:
+        blockers.append("Model returned no final answer; reasoning-only output is not completion.")
+    if finish_reason in {"length", "limit"} or payload.get("stopped_limit"):
+        blockers.append("Generation reached the token limit; the answer may be incomplete.")
+    if payload.get("error"):
+        blockers.append("Backend returned an error instead of a completed answer.")
     return GGUFPromptResult(
         model_id=model_id,
         model_path=selected.path,
-        ready=True,
-        generated_text=_clean_stop_text(generated_text, stop_strings),
+        ready=not blockers,
+        generated_text=generated_text,
+        blockers=blockers,
         elapsed_seconds=elapsed,
         backend="llama-cpp-gguf-server",
-        timings={"total": elapsed, "server": payload.get("timings", {})},
+        timings={"total": elapsed, "server": payload.get("timings", {}), "finish_reason": finish_reason,
+                 "reasoning_budget_tokens": reasoning_budget, "usage": payload.get("usage", {})},
     )
 
 

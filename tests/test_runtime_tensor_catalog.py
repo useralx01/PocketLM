@@ -7,6 +7,26 @@ from safetensors.torch import save_file
 from pcketlm.core.runtime.tensor_catalog import build_tensor_catalog, find_tensor_catalog_entry, load_tensor_entry_index
 
 
+def test_metadata_loader_preserves_metadata_and_does_not_build_entries(tmp_path,monkeypatch):
+    import os
+    from pcketlm.core.runtime import tensor_catalog as module
+    path=tmp_path/'catalog.json'
+    payload={'model_id':'fixture','model_dir':str(tmp_path),'tensor_count':1,'ready':True,
+        'dtype_counts':{'BF16':1},'tensors':[{'tensor_name':'weight','shape':[2,2]}]}
+    path.write_text(json.dumps(payload))
+    monkeypatch.setattr(module,'tensor_catalog_path',lambda _:path)
+    full=module.load_tensor_catalog('fixture').to_dict();full['tensors']=[]
+    def forbidden(*args,**kwargs):raise AssertionError('Metadata lookup reconstructed tensor entries')
+    monkeypatch.setattr(module.TensorCatalogEntry,'from_dict',forbidden)
+    metadata=module.load_tensor_catalog_metadata('fixture')
+    assert metadata.to_dict()==full
+    metadata.dtype_counts['BF16']=99
+    assert module.load_tensor_catalog_metadata('fixture').dtype_counts['BF16']==1
+    stamp=path.stat().st_mtime_ns
+    payload['tensor_count']=2;path.write_text(json.dumps(payload));os.utime(path,ns=(stamp+1000000,stamp+1000000))
+    assert module.load_tensor_catalog_metadata('fixture').tensor_count==2
+
+
 def test_build_tensor_catalog_reads_tensor_headers_and_groups_layers(tmp_path: Path, monkeypatch) -> None:
     from pcketlm.core import storage
 

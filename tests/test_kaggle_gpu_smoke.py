@@ -129,9 +129,9 @@ def test_kaggle_credentials_accepts_access_token(monkeypatch, tmp_path) -> None:
 def test_kernel_id_from_submit_output_uses_returned_url() -> None:
     output = (
         "Kernel version 1 successfully pushed.  Please check progress at "
-        "https://www.kaggle.com/code/lichtnicht/pocketlm-gpu-smoke-notebook\n"
+        "https://www.kaggle.com/code/<redacted-user>/pocketlm-gpu-smoke-notebook\n"
     )
 
-    assert kernel_id_from_submit_output(output, "lichtnicht/pocketlm-gpu-smoke-nb") == (
-        "lichtnicht/pocketlm-gpu-smoke-notebook"
+    assert kernel_id_from_submit_output(output, "<redacted-user>/pocketlm-gpu-smoke-nb") == (
+        "<redacted-user>/pocketlm-gpu-smoke-notebook"
     )

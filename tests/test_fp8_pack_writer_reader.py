@@ -59,6 +59,25 @@ def test_pack_reader_reports_native_slice_and_span_locations(tmp_path: Path, mon
     assert reader.telemetry()["sequential_reads"] == 2
 
 
+def test_pack_reader_reports_live_maps_not_cumulative_physical_ram(tmp_path,monkeypatch):
+    import gc
+    import tools.pack_fp8 as pack_tool
+    monkeypatch.setattr(pack_tool,'state_root',lambda:tmp_path/'state')
+    model_dir=_write_pack_fixture(tmp_path)
+    pack_model_dir_to_fp8(model_dir,model_dir/'artifacts/fp8_pack',model_id='memory-test',pack_bytes=128)
+    reader=FP8PackReader(model_dir)
+    for _ in range(2):
+        tensor=reader.get_tensor('model.layers.0.mlp.experts.0.gate_proj.weight')
+        assert reader.telemetry()['mmap_bytes_mapped']==sum(len(m) for m in reader._mmaps.values())
+        assert reader.telemetry()['mmap_bytes_resident'] is None
+        reader.close()  # Live exported views prevent unsafe closure.
+        assert reader.telemetry()['pack_files_open']>0
+        del tensor
+        gc.collect();reader.close()
+        assert reader.telemetry()['mmap_bytes_mapped']==0
+        assert reader.telemetry()['pack_files_open']==0
+
+
 def test_pack_writer_resumes_without_rewriting_finalized_tensors(tmp_path: Path, monkeypatch) -> None:
     import tools.pack_fp8 as pack_tool
 

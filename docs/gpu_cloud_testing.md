@@ -39,7 +39,7 @@ The same worker also failed DNS when trying to repair Torch from `https://downlo
 
 To run the diagnostic API path:
 
-1. Add a Kaggle API token once at `C:\Users\isale\.kaggle\kaggle.json`.
+1. Add a Kaggle API token once at `%USERPROFILE%\.kaggle\kaggle.json`.
 2. Run:
 
 ```powershell

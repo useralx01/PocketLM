@@ -1,7 +1,7 @@
 param(
     [switch]$DryRun,
-    [string]$RepoRoot = "C:\Users\isale\Documents\pcketlm",
-    [string]$CodexCommand = "C:\Users\isale\AppData\Roaming\npm\codex.cmd",
+    [string]$RepoRoot = (Split-Path $PSScriptRoot -Parent),
+    [string]$CodexCommand = "codex",
     [string]$IssueId = "PLM-13",
     [string]$StateOverride = "",
     [string]$LabelOverride = "",
