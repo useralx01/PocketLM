@@ -72,9 +72,16 @@ measured, and **rejected** for being slower.
 ## Beyond DeepSeek
 
 PocketLM is also a general local-model control center: import and validation for
-Hugging Face, single-safetensor, PyTorch, and GGUF sources; a capability-based
-compatibility matrix; Qwen (proven), Mixtral (experimental), Kimi K2 and Gemma 3
-(fixture-verified GGUF chat contracts), and a CPU Kronos forecast adapter.
+Hugging Face, single-safetensor, PyTorch, and GGUF sources, plus a capability-based
+compatibility matrix.
+
+| Model family | Path | Status |
+|---|---|---|
+| DeepSeek-V3 671B | Native FP8 runtime (C++ / AVX-512) | Proven — anti-cheat verified |
+| Qwen 2.5 / 3 (dense + MoE) | Native FP16/Q4 runtime, llama.cpp GGUF | Proven |
+| Mixtral | Native MoE path (weight mapping) | Experimental — not yet benchmarked |
+| Kimi K2, Gemma 3 | llama.cpp GGUF | Planned — config contracts checked against fixtures only |
+| Kronos | CPU forecasting adapter (not a chat model) | Experimental |
 
 ## Install
 
@@ -133,8 +140,9 @@ every push.
 | `src/pcketlm/core/runtime/` | streaming, FP8 paths, layer bridge, MTP |
 | `src/pcketlm/native/` | C++ kernels (FP8, AVX-512 MoE, attention, KV cache) |
 | `tools/` | benchmark and proof-generation scripts |
+| `docs/` | design notes, roadmap, schemas, and planning docs |
 | `state/` | ignored local runtime state and proof output |
-| `tests/` | 79 test files |
+| `tests/` | 81 test files |
 
 This clean public snapshot omits machine-local engineering journals and raw generated
 proof files. Reproduction commands and summarized measurements remain in
