@@ -1,107 +1,129 @@
 # PocketLM
 
-**A from-scratch LLM inference runtime that runs DeepSeek-V3 (671B parameters) on a consumer Windows laptop, CPU-only.**
+**A from-scratch runtime for running large language models locally on limited hardware.**
 
-Not a wrapper around Ollama, LM Studio, or llama.cpp for the core path — PocketLM
-implements its own FP8 kernels, MoE dispatch, weight paging, and speculative decoding,
-then proves at runtime that it isn't cheating to get its numbers.
+PocketLM imports, validates, and runs open-weight models on ordinary Windows machines,
+with no cloud and often no GPU. It picks the right execution backend for each model,
+streams weights from disk when a model is too large for RAM, and checks every speed
+claim against its own runtime counters.
+
+To stress-test it, PocketLM runs **DeepSeek-V3 (671B parameters) on a CPU-only laptop**.
+The weights take about 1.3 TB of disk, many times the machine's RAM.
 
 ![PocketLM desktop](docs/images/desktop.png)
 
-## Headline result
+## Highlights
 
-| | |
-|---|---|
-| Model | DeepSeek-V3, FP8, 61 transformer layers |
-| Hardware | Consumer Windows laptop, **CPU-only**, no GPU, no cloud |
-| Prompt | `Write exactly ten short words about the sky.` |
-| Output | `Blue, vast, endless, clouds, stars,` |
-| Speed | **34.23 s / visible token** — down from 569.11 (**16.6×**) |
-| Layers executed | 122 / 122 verified |
-| Tests | 560 passed, 2 skipped |
+- **Multiple model families.** Qwen, Qwen MoE, Mixtral, DeepSeek-V3, Gemma 3, and
+  Kimi K2, plus a Kronos time-series forecasting adapter. It imports Hugging Face,
+  safetensors, PyTorch, and GGUF sources.
+- **Automatic backend selection.** A capability-based engine selector chooses between
+  the native direct runtime, a managed `llama.cpp` / GGUF server, and the FP8
+  weight-streaming runtime. It uses the model's architecture, quantization, free RAM,
+  and installed backends to decide.
+- **Native C++ kernels.** 14 hand-written translation units (about 6.6k lines) cover
+  FP8 and FP16 linear layers, AVX-512 FP8 mixture-of-experts, attention, KV cache,
+  packed GEMV, and Q4 dequantization. Each kernel has a kill switch and a Python
+  fallback, so its contribution can be measured.
+- **Out-of-core execution.** A persisted tensor catalog and execution plan stream
+  weights through hot and warm residency windows. Cached weights are checked with
+  checksums, and residency survives restarts.
+- **Speculative decoding.** Multi-token-prediction drafts are verified in batched
+  tree sweeps. The full model still decides every committed token.
+- **Anti-cheat benchmarking.** A result is not recorded unless every expected layer
+  actually ran, with the stated model, quantization, and strategy.
+- **Local app.** A web UI and desktop status screen offer chat, model loading,
+  benchmarks, backend comparison, and an installation health check. Everything stays
+  on the machine.
 
-Full measured history, component wins, and rejected experiments: **[BENCHMARKS.md](BENCHMARKS.md)**
+## Results
 
-> **Scope check:** 34 s/token is not a usable chatbot, and this project does not claim
-> to be one. The result is that a 671B-parameter model executes *at all* on hardware
-> that cannot hold it in RAM, and that it got 16.6× faster through measured,
-> individually-proven optimizations. This is a systems and inference-optimization
-> project, not a chat product.
+All numbers are measured on consumer Windows hardware. Full history, reproduction
+commands, and rejected experiments are in **[BENCHMARKS.md](BENCHMARKS.md)**.
 
-## How it works
+| Model | Backend | Hardware | Result |
+|---|---|---|---|
+| Qwen2.5-14B-Instruct (Q4_K_M) | managed GGUF server | laptop CPU | **0.35 s/token** (2.8 tok/s) warm |
+| Qwen2.5-14B-Instruct | native direct runtime | laptop CPU | about 20 s/token, correct full-stack output |
+| DeepSeek-V3 671B (FP8, 61 layers) | FP8 streaming + MTP | laptop CPU, no GPU | **34.2 s/token**, down from 569 s (**16.6×**) |
 
-A 671B FP8 model is ~1.3 TB on disk. The machine has a fraction of that in RAM, so
-nothing can be resident. PocketLM addresses that in four layers:
+The DeepSeek result is a systems benchmark, not a chat experience. It shows that a
+model far larger than RAM executes correctly on a laptop, and that measured
+optimizations made it 16.6× faster. For everyday chat, PocketLM uses the fastest
+backend that a model supports.
 
-**1. Staged weight streaming.** A persisted tensor catalog and execution plan divide
-the model into units scheduled across a *hot* window and a *warm* prefetch window.
-Units rotate warm→hot, refill from an overflow head, and residency survives restarts.
-Write-time checksums verify the cache on demand.
+## Architecture
 
-**2. Native FP8 kernels.** 14 hand-written C++ translation units — FP8 linear, an
-AVX-512 FP8 MoE path, MoE dispatch with route-weight combination in C, an attention
-bridge, KV cache, and packed GEMV. Every native path has a kill switch and a Python
-fallback, so the native contribution is measurable: disabling them takes a full
-62-layer pass from `307.894s` to `800.553s`.
+```text
+            ┌──────────────── Web UI / Desktop / CLI tools ────────────────┐
+            │  chat · model loading · benchmarks · installation health     │
+            └───────────────────────────────┬──────────────────────────────┘
+                                            │
+   Model import ──► Registry & profiles ──► Engine selector ──► Supervisor / proofs
+ (HF, safetensors,   (immutable originals,   (capabilities, RAM,
+  PyTorch, GGUF)      reversible artifacts)   installed backends)
+                                            │
+          ┌─────────────────────────────────┼─────────────────────────────────┐
+          ▼                                 ▼                                 ▼
+  Native direct runtime            GGUF / llama.cpp server           FP8 streaming runtime
+  dense & MoE, tensor residency,   managed lifecycle, fastest        out-of-core weights,
+  prefix / response reuse          interactive path                  native FP8 kernels, MTP
+```
 
-**3. Caching.** Exact repeated-prefix reuse (87.085 s → 0.943 s on an 8-layer first
-visible token), a full `lm_head` cache (17.585 s → 1.611 s on the cached tail), and a
-4096 MB FP8 attention cache under a prefix policy.
+### How a model larger than RAM runs
 
-**4. MTP speculative decoding.** DeepSeek-V3's own multi-token-prediction head proposes
-candidate continuations; the full 61-layer model verifies them in batched sweeps and
-remains the only committer. A depth-10 one-pass tree with top-2048 selection now
-accepts all 10 visible tokens in a **single** verifier sweep.
+1. **Staged weight streaming.** The model is split into units that are scheduled
+   across a *hot* window and a *warm* prefetch window. Units rotate from warm to hot
+   and refill from an overflow head.
+2. **Native FP8 kernels.** Computation runs on the original FP8 weights, with no
+   down-conversion. Turning off the native kernels slows a full 62-layer pass from
+   308 s to 801 s.
+3. **Caching.** Reusing an exact repeated prefix cuts the first visible token from
+   87 s to 0.9 s. A full `lm_head` cache and a 4 GB FP8 attention cache also help.
+4. **Speculative decoding.** DeepSeek-V3's own MTP head proposes a depth-10 token
+   tree. The full 61-layer model accepts all 10 tokens in a single verifier sweep.
 
 ### Anti-cheat verification
 
-Speed claims for a 671B model on a laptop are trivially fakeable — skip layers, quietly
-drop to Q4, swap in a smaller model, or offload to a GPU. So the runtime instruments
-itself and refuses to record a proof unless the work actually happened:
+Speed claims for large models on small machines are easy to fake: skip layers, drop
+to a smaller quantization, swap in a smaller model, or offload to a GPU. The runtime
+therefore records its own work on every proof run:
 
-- `layers_executed` must equal `expected_layers_executed` (122/122 on the headline run)
-- warm-up runs a separate, independently recorded `61/61` layer proof
-- each artifact records `model_id`, quantization, expert routing, and `strategy`
+- `layers_executed` must equal `expected_layers_executed`
+- each proof records `model_id`, quantization, expert routing, and `strategy`
 - the verifier contract enforces one weight sweep per pass
-- any blocker populates a `blockers` array and invalidates the proof
+- any blocker invalidates the proof
 
-A change is only promoted to default when `anti_cheat_passed` is true and `blockers` is
-empty. [BENCHMARKS.md](BENCHMARKS.md) also lists the optimizations that were built,
-measured, and **rejected** for being slower.
+An optimization becomes the default only when `anti_cheat_passed` is true and
+`blockers` is empty.
 
-## Beyond DeepSeek
+## Model support
 
-PocketLM is also a general local-model control center: import and validation for
-Hugging Face, single-safetensor, PyTorch, and GGUF sources; a capability-based
-compatibility matrix; Qwen (proven), Mixtral (experimental), Kimi K2 and Gemma 3
-(fixture-verified GGUF chat contracts), and a CPU Kronos forecast adapter.
+| Family | Status | Backend |
+|---|---|---|
+| Qwen 2.5 / 3 (dense) | Proven: real local chat and benchmarks | direct, GGUF |
+| DeepSeek-V3 | Proven: full 61-layer runtime proof | FP8 streaming |
+| Qwen MoE, Mixtral | Experimental: paged-expert runtime | direct |
+| Gemma 3, Kimi K2 | Chat contract checked against fixtures | GGUF |
+| Kronos | Forecasting adapter checked against fixtures (not a chat model) | CPU |
 
-## Install
+A family is marked *proven* only after real weights have gone through import,
+readiness checks, runtime, and benchmarks on local hardware.
 
-Requires Python 3.12+ on Windows. **Model weights are never included** and must be
-supplied locally.
+## Getting started
+
+Requires Python 3.12+ on Windows. **Model weights are never included**; you supply
+them locally.
 
 ```powershell
-.\install-pocketlm.ps1 -StartApp
+.\install-pocketlm.ps1 -StartApp   # isolated venv + first-run health check
+.\start-pocketlm.ps1               # relaunch later
 ```
 
 The installer creates an isolated environment under `%LOCALAPPDATA%\PocketLM\venvs`
-(avoiding Windows path-length failures on deep extraction paths) and writes a sanitized
-proof to `state\supervisor\install-proof.json`. Relaunch later with `start-pocketlm.ps1`.
-
-PocketLM installs fine with no models. Settings distinguishes a healthy install with no
-weights (`partial`) from one with a runnable model (`ready`).
-
-### Runtime expectations
-
-- GGUF models supported by `llama.cpp` are the practical choice for interactive local
-  chat and the path used by the Hermes integration.
-- PocketLM's native FP8 DeepSeek-V3 671B runtime is experimental research code. It has
-  completed correctness and anti-cheat proof runs, but CPU-only generation from weights
-  stored on an external drive is extremely slow and is not suitable for normal chat.
-- Model compatibility depends on architecture, quantization, available RAM, and the
-  locally installed backend. Model weights, prompts, credentials, and runtime caches are
-  not part of this repository.
+and writes a sanitized installation report to `state\supervisor\install-proof.json`.
+With no models installed, the app reports a `partial` state. Once a runnable model is
+available, it reports `ready`.
 
 ### Development
 
@@ -109,36 +131,44 @@ weights (`partial`) from one with a runnable model (`ready`).
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e . pytest
 .\.venv\Scripts\python.exe -m pytest -q
+python tools/build_native.py --force   # native kernels (requires local OpenBLAS)
 ```
 
-Native kernels build via `python tools/build_native.py --force`, which requires a local
-OpenBLAS and copies `libopenblas.dll` next to the built DLLs.
+The full suite covers 81 test modules, including numerical checks of the native
+kernels against reference implementations. GitHub Actions installs the project and
+runs the portable contract tests on a clean Windows runner for every push.
 
-## Installation supervisor
+### Local API
 
-While running, every copy exposes local-only health endpoints:
+While running, the app serves local-only endpoints on `127.0.0.1:8765`, for example:
 
-- `GET http://127.0.0.1:8765/api/supervisor/health` — current sanitized report
-- `POST http://127.0.0.1:8765/api/supervisor/check` — run the check, save a proof artifact
+- `GET /api/status`: runtime, backend, and model state
+- `POST /api/chat`: chat with the selected backend
+- `POST /api/benchmark/comparison`: compare backends on the same prompt
+- `GET /api/supervisor/health`: sanitized installation health report
 
-Reports use a random installation ID and contain **no** usernames, hostnames, IP
-addresses, local paths, prompts, or model contents. Nothing is uploaded automatically.
-GitHub Actions runs the same installer and contract checks on a clean Windows runner for
-every push.
+Health reports use a random installation ID and contain no usernames, hostnames,
+paths, prompts, or model contents. Nothing is uploaded.
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `src/pcketlm/core/runtime/` | streaming, FP8 paths, layer bridge, MTP |
-| `src/pcketlm/native/` | C++ kernels (FP8, AVX-512 MoE, attention, KV cache) |
-| `tools/` | benchmark and proof-generation scripts |
-| `state/` | ignored local runtime state and proof output |
-| `tests/` | 79 test files |
+| `src/pcketlm/core/runtime/` | engine selector, direct and GGUF backends, weight streaming, speculative decoding |
+| `src/pcketlm/core/model_import/` | model intake, inspection, Q4 and FP8 packing |
+| `src/pcketlm/core/{registry,profiles,benchmark,validation}/` | model registry, runtime profiles, benchmark runs, validation |
+| `src/pcketlm/native/` | C++ kernels (FP8/FP16 linear, AVX-512 MoE, attention, KV cache) |
+| `src/pcketlm/app/` | web UI, desktop status screen, CLI tools |
+| `tools/` | benchmarking, diagnostics, weight packing, native build |
+| `tests/` | unit, contract, and kernel correctness tests |
+| `docs/` | design documents, GPU testing notes, privacy manifest |
 
-This clean public snapshot omits machine-local engineering journals and raw generated
-proof files. Reproduction commands and summarized measurements remain in
-[`BENCHMARKS.md`](BENCHMARKS.md).
+## Documentation
+
+- [BENCHMARKS.md](BENCHMARKS.md): measured results and optimization history
+- [docs/design/](docs/design/): blueprint, roadmap, schemas, risk register
+- [docs/gpu-cloud-testing.md](docs/gpu-cloud-testing.md): GPU validation on cloud notebooks
+- [docs/privacy.md](docs/privacy.md): what is excluded from this repository
 
 ## License
 

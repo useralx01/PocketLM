@@ -12,7 +12,22 @@ All CPU measurements are single-machine, consumer Windows hardware, **CPU-only**
 no GPU, no cloud offload, no API calls. DeepSeek-V3 weights are read in their
 original FP8 format from local disk.
 
-## Headline result
+## General local models
+
+PocketLM's everyday path is a normal-sized model on the fastest backend it supports.
+These numbers are from the project's recorded Qwen 14B runs on the same laptop class.
+
+| Model | Backend | Measured |
+|---|---|---|
+| Qwen2.5-14B-Instruct Q4_K_M | managed `llama-server` (warm) | **0.352 s/token** (2.843 tok/s) |
+| Qwen2.5-14B-Instruct Q4_K_M | managed `llama-server` (cold, includes model load) | 52.26 s first response |
+| Qwen2.5-14B-Instruct | direct runtime, Standard residency | 21.03 s |
+| Qwen2.5-14B-Instruct | direct runtime, Boosted residency | 19.81 s |
+
+The loaded GGUF server uses about 8.6 to 10 GB of RAM. The direct runtime is the
+custom-kernel research path. The GGUF path is the default for interactive chat.
+
+## DeepSeek-V3 stress test
 
 **DeepSeek-V3 (671B parameters, 61 transformer layers) generating on a consumer laptop CPU.**
 
@@ -104,8 +119,8 @@ The CPU exact path remains the default.
 
 ## Test suite
 
-`560 passed, 2 skipped` on the full suite as of the last recorded run, across 79 test
-files. GitHub Actions runs installation and the portable contract suite on a clean
+`560 passed, 2 skipped` on the full suite as of the last recorded run, across 81 test
+modules. GitHub Actions runs installation and the portable contract suite on a clean
 Windows runner for every push.
 
 ## Reproducing
