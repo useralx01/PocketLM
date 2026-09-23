@@ -2,6 +2,9 @@
 
 **A from-scratch runtime for running large language models locally on limited hardware.**
 
+> 🚧 **Active development.** PocketLM is a work in progress. The core runtime works and
+> is benchmarked, but performance, model coverage, and the app are still changing.
+
 PocketLM imports, validates, and runs open-weight models on ordinary Windows machines,
 with no cloud and often no GPU. It picks the right execution backend for each model,
 streams weights from disk when a model is too large for RAM, and checks every speed
@@ -9,6 +12,23 @@ claim against its own runtime counters.
 
 To stress-test it, PocketLM runs **DeepSeek-V3 (671B parameters) on a CPU-only laptop**.
 The weights take about 1.3 TB of disk, many times the machine's RAM.
+
+## Progress so far
+
+These are measured on the same consumer laptop, and every run passed PocketLM's
+anti-cheat checks: every layer ran, on the stated model and quantization.
+
+| What improved | Before | Now | Speedup |
+|---|---:|---:|---:|
+| **DeepSeek-V3 671B generation**, full 61 layers, CPU-only | ~120 s/token | **34.23 s/token** | **~3.5×** |
+| **Qwen2.5-14B chat**, from the direct runtime to the managed GGUF backend | ~20 s/token | **0.35 s/token** | **~57×** |
+| Repeated-prefix reuse, first visible token | 87.09 s | **0.94 s** | **92×** |
+| Full `lm_head` cache, cached tail | 17.59 s | **1.61 s** | **10.9×** |
+| Native C++ kernels vs. Python fallback, full 62-layer pass | 800.55 s | **307.89 s** | **2.6×** |
+
+Each optimization became the default only after a full-model proof. Optimizations
+that turned out slower were rejected and are listed in [BENCHMARKS.md](BENCHMARKS.md).
+These are current numbers, not final ones.
 
 ![PocketLM desktop](docs/images/desktop.png)
 
@@ -36,21 +56,33 @@ The weights take about 1.3 TB of disk, many times the machine's RAM.
   benchmarks, backend comparison, and an installation health check. Everything stays
   on the machine.
 
-## Results
+## Current results by model
 
-All numbers are measured on consumer Windows hardware. Full history, reproduction
-commands, and rejected experiments are in **[BENCHMARKS.md](BENCHMARKS.md)**.
+| Model | Backend | Current result |
+|---|---|---|
+| Qwen2.5-14B-Instruct (Q4_K_M) | managed GGUF server | **0.35 s/token** (2.8 tok/s) warm, about 9 GB RAM |
+| Qwen2.5-14B-Instruct | native direct runtime | about 20 s/token, correct full-stack output |
+| DeepSeek-V3 671B (FP8, 61 layers) | FP8 streaming + MTP speculative decoding | **34.2 s/token**, 10 of 10 draft tokens accepted in one verifier sweep |
 
-| Model | Backend | Hardware | Result |
-|---|---|---|---|
-| Qwen2.5-14B-Instruct (Q4_K_M) | managed GGUF server | laptop CPU | **0.35 s/token** (2.8 tok/s) warm |
-| Qwen2.5-14B-Instruct | native direct runtime | laptop CPU | about 20 s/token, correct full-stack output |
-| DeepSeek-V3 671B (FP8, 61 layers) | FP8 streaming + MTP | laptop CPU, no GPU | **34.2 s/token**, down from 569 s (**16.6×**) |
+The DeepSeek result is a systems benchmark, not yet a usable chat experience. It shows
+that a model far larger than RAM runs correctly on a laptop, and that it keeps getting
+faster through measured optimizations. For everyday chat, PocketLM uses the fastest
+backend that a model supports. Full history and reproduction commands are in
+**[BENCHMARKS.md](BENCHMARKS.md)**.
 
-The DeepSeek result is a systems benchmark, not a chat experience. It shows that a
-model far larger than RAM executes correctly on a laptop, and that measured
-optimizations made it 16.6× faster. For everyday chat, PocketLM uses the fastest
-backend that a model supports.
+## Status and next steps
+
+PocketLM is far from finished. Work in progress includes:
+
+- **DeepSeek-V3 speed:** cutting per-token time further, targeting the attention and
+  expert-loading costs that dominate each pass.
+- **GPU path:** turning the single-layer GPU probe into a full end-to-end GPU run.
+- **Model coverage:** moving Gemma 3, Kimi K2, and Kronos from fixture-checked to proven
+  with real local weights, and bringing MoE models up to Qwen's level.
+- **Direct runtime:** reducing tensor I/O and copying so the custom runtime closes the
+  gap with the GGUF backend.
+- **App and install:** validating installs on more Windows machines and polishing the
+  UI.
 
 ## Architecture
 
@@ -101,13 +133,13 @@ An optimization becomes the default only when `anti_cheat_passed` is true and
 
 | Family | Status | Backend |
 |---|---|---|
-| Qwen 2.5 / 3 (dense) | Proven: real local chat and benchmarks | direct, GGUF |
-| DeepSeek-V3 | Proven: full 61-layer runtime proof | FP8 streaming |
+| Qwen 2.5 / 3 (dense) | Working: real local chat and benchmarks | direct, GGUF |
+| DeepSeek-V3 | Working: full 61-layer runtime proof, still being optimized | FP8 streaming |
 | Qwen MoE, Mixtral | Experimental: paged-expert runtime | direct |
 | Gemma 3, Kimi K2 | Chat contract checked against fixtures | GGUF |
 | Kronos | Forecasting adapter checked against fixtures (not a chat model) | CPU |
 
-A family is marked *proven* only after real weights have gone through import,
+A family is marked *working* only after real weights have gone through import,
 readiness checks, runtime, and benchmarks on local hardware.
 
 ## Getting started
