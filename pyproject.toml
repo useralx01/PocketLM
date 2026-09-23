@@ -1,7 +1,7 @@
 [project]
 name = "pcketlm"
 version = "0.1.0"
-description = "Local LLM runtime for limited hardware: backend selection, out-of-core weight streaming, native FP8 kernels, and verified benchmarks."
+description = "Makes local LLMs run faster on limited hardware: native FP8 kernels, out-of-core weight streaming, caching, and speculative decoding."
 requires-python = ">=3.12"
 dependencies = [
     "safetensors",

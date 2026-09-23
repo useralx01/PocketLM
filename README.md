@@ -1,34 +1,53 @@
 # PocketLM
 
-**A from-scratch runtime for running large language models locally on limited hardware.**
+**A from-scratch runtime that makes large language models run faster on local, limited hardware.**
 
 > 🚧 **Active development.** PocketLM is a work in progress. The core runtime works and
 > is benchmarked, but performance, model coverage, and the app are still changing.
 
-PocketLM imports, validates, and runs open-weight models on ordinary Windows machines,
-with no cloud and often no GPU. It picks the right execution backend for each model,
-streams weights from disk when a model is too large for RAM, and checks every speed
-claim against its own runtime counters.
+PocketLM is about speed. It takes open-weight models that are too slow, or too large,
+for an ordinary Windows machine and makes them run faster: custom C++ kernels, weight
+streaming, caching, and speculative decoding, with no cloud and often no GPU. Each
+speedup is measured, and PocketLM checks every speed claim against its own runtime
+counters.
 
-To stress-test it, PocketLM runs **DeepSeek-V3 (671B parameters) on a CPU-only laptop**.
-The weights take about 1.3 TB of disk, many times the machine's RAM.
+The hardest test so far is **DeepSeek-V3 (671B parameters) on a CPU-only laptop**.
+The weights take about 1.3 TB of disk, many times the machine's RAM. PocketLM took it
+from **569 s per token to 34 s per token: 16.6× faster**, and that work is still going.
 
 ## Progress so far
 
-These are measured on the same consumer laptop, and every run passed PocketLM's
+All numbers are measured on the same consumer laptop, and every run passed PocketLM's
 anti-cheat checks: every layer ran, on the stated model and quantization.
 
 | What improved | Before | Now | Speedup |
 |---|---:|---:|---:|
-| **DeepSeek-V3 671B generation**, full 61 layers, CPU-only | ~120 s/token | **34.23 s/token** | **~3.5×** |
+| **DeepSeek-V3 671B generation**, full 61 layers, CPU-only | 569.11 s/token | **34.23 s/token** | **16.6×** |
 | **Qwen2.5-14B chat**, from the direct runtime to the managed GGUF backend | ~20 s/token | **0.35 s/token** | **~57×** |
 | Repeated-prefix reuse, first visible token | 87.09 s | **0.94 s** | **92×** |
 | Full `lm_head` cache, cached tail | 17.59 s | **1.61 s** | **10.9×** |
 | Native C++ kernels vs. Python fallback, full 62-layer pass | 800.55 s | **307.89 s** | **2.6×** |
 
-Each optimization became the default only after a full-model proof. Optimizations
-that turned out slower were rejected and are listed in [BENCHMARKS.md](BENCHMARKS.md).
-These are current numbers, not final ones.
+### How DeepSeek-V3 got 16.6× faster
+
+Each step became the default only after a full 61-layer proof with the same prompt and
+10 visible tokens.
+
+| Step | s / token |
+|---|---:|
+| First batched MTP verifier (starting point) | 569.11 |
+| Integrated exact default | 273.68 |
+| Tree branch verification (depth 2) | 164.92 |
+| Adaptive depth 4 | 157.81 |
+| Warm prompt-prefill cache | 98.18 |
+| Rank-first top-3 continuation (depth 6) | 85.52 |
+| Continuation pruned to rank 3 | 60.61 |
+| One-pass top-2048 tree (depth 10) | 37.49 |
+| **Shared-head warm eviction (current)** | **34.23** |
+
+Optimizations that turned out slower were rejected, and are listed with their
+measurements in [BENCHMARKS.md](BENCHMARKS.md). These are current numbers, not final
+ones.
 
 ![PocketLM desktop](docs/images/desktop.png)
 
@@ -66,7 +85,7 @@ These are current numbers, not final ones.
 
 The DeepSeek result is a systems benchmark, not yet a usable chat experience. It shows
 that a model far larger than RAM runs correctly on a laptop, and that it keeps getting
-faster through measured optimizations. For everyday chat, PocketLM uses the fastest
+faster through measured optimizations: 16.6× so far. For everyday chat, PocketLM uses the fastest
 backend that a model supports. Full history and reproduction commands are in
 **[BENCHMARKS.md](BENCHMARKS.md)**.
 
