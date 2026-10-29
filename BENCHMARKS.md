@@ -1,5 +1,11 @@
 # Benchmarks
 
+> Historical project measurements. The raw generated proof artifacts are not part of
+> this public snapshot, and the hardware specification below is incomplete. These
+> figures have not been independently reproduced from the public repository. The
+> portable CI checks do not validate full-model throughput. Keep backend, model,
+> quantization and warm/cold conditions separate when comparing results.
+
 Every number here was recorded from a JSON proof artifact produced by the benchmark
 tools. Raw generated proof files are intentionally excluded from the clean public
 source snapshot because they can contain machine-specific metadata.
@@ -119,9 +125,11 @@ The CPU exact path remains the default.
 
 ## Test suite
 
-`560 passed, 2 skipped` on the full suite as of the last recorded run, across 81 test
-modules. GitHub Actions runs installation and the portable contract suite on a clean
-Windows runner for every push.
+The earlier local record reports `560 passed, 2 skipped` across 81 test modules;
+it is not a fresh result for this documentation update. The public
+[Windows CI workflow](.github/workflows/windows-smoke.yml) installs the project and
+runs `test_supervisor.py`, `test_model_compatibility.py` and `test_kronos_backend.py`.
+It does not run the complete suite or reproduce the model benchmarks above.
 
 ## Reproducing
 
@@ -135,3 +143,4 @@ Benchmark tools live in [`tools/`](tools/) — for example
 `tools/bench_fp8_mtp_generate.py` regenerates the MTP proofs and
 `tools/bench_fp8_avx512_moe.py` regenerates the AVX-512 MoE proof. Model weights
 are never committed and must be supplied locally.
+
